@@ -2,9 +2,11 @@
 
 *A modern, cross-platform BBS in Go with SSH access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
 
-**Status:** Draft v0.2 — design decisions resolved
+**Status:** Draft v0.3 — design decisions resolved; accounts and configuration specified
 **Date:** 2026-07-24
-**All 15 open questions from v0.1 are answered. Decisions are recorded in §13 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §12.**
+**All 15 open questions from v0.1 are answered. Decisions are recorded in §14 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §13.**
+
+*v0.3 adds account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
 
 ---
 
@@ -72,7 +74,7 @@ There is also a social constraint that matters as much as the technical one: **a
 
 - **File transfer over mesh in any form.** Catalogs only, hard-blocked in code (§7.5). `[D8]`
 - **Bluetooth LE transport.** USB serial and TCP cover every realistic deployment, and BLE is the only dependency that would force cgo. Dropped. `[D13]`
-- **User-authored ANSI theme packs.** A curated set of built-in themes only. `[D15]` — see §12 `N5`
+- **User-authored ANSI theme packs.** A curated set of built-in themes only. `[D15]` — see §13 `N5`
 - **DM metadata privacy.** Content confidentiality is required; hiding who-talks-to-whom is not. `[D7]`
 - Real-time inter-BBS chat over mesh (latency is 10s of seconds to minutes; do it over IP)
 - Web forum UI. A read-only web view might come later; SSH is the product.
@@ -183,6 +185,30 @@ Wish gives a middleware chain per connection. Auth supports:
 - **Password** — over the SSH transport, keyboard-interactive. Needed for new-user signup and for people connecting from a client they don't control.
 - **Guest/anonymous** — read-only browsing, configurable.
 
+#### How an account comes into existence
+
+This is the one place where SSH is genuinely *worse* than telnet for a BBS, and it needs an explicit answer rather than an assumption. A classic BBS lets you connect and type `NEW` at the login prompt. SSH decides accept-or-reject **before any session exists**, so there is no prompt to type `NEW` at — the client has already committed to a username and a credential. Registration therefore has to be handled at the auth layer, not in the TUI.
+
+Three entry points, in order of how users will actually arrive:
+
+**1. The reserved `new` account (primary, documented path).**
+
+```bash
+ssh new@bbs.example.com
+```
+
+`new` is a reserved nick that the `PublicKeyHandler` accepts with *any* key, including one the server has never seen, and that the keyboard-interactive handler accepts with no password. It lands directly in the signup TUI. The elegant part: **SSH already handed us a public key**, so if the user connected with one, enrollment is free and their very next login is passwordless with no key-pasting step. Users on a client with no key fall through to setting a password.
+
+**2. Unknown-nick offer (convenience).** `ssh austin@bbs.example.com` where `austin` doesn't exist → the same signup TUI, pre-filled with that nick. This is the flow people will discover by accident, and it's nicer than an opaque `Permission denied`. Two constraints:
+- It must not become a nick-existence oracle beyond what a BBS already leaks (user lists are public on a BBS; this is not a meaningful new leak, but it *is* worth stating rather than discovering later).
+- An **existing** nick presenting an unknown key must get a clear "this account exists; you're not authenticated" path — never the registration flow. Offering "register?" to someone whose key merely changed is how you get duplicate accounts and a confused user.
+
+**3. Sysop-side creation (`meshbbs user add`).** Non-interactive, scriptable, and the only path that exists before the SSH server does. This is the testing lever (§6.7) and the sysop's break-glass tool.
+
+Guest access is a fourth reserved nick, `guest`, accepted with no credential when enabled, giving a read-only session with no persistent identity.
+
+Reserved nicks that can never be registered: `new`, `guest`, `sysop`, `admin`, `root`, `bbs`, `all`, `postmaster`, `daemon`.
+
 Notably, SSH gives us **SFTP for free** as the file-transfer mechanism. No ZMODEM, no XMODEM, no serial-protocol emulation nonsense — `sftp bbs.example.com` and you're in the file areas. This is a large simplification over legacy BBS software.
 
 ### 5.2 Telnet (legacy, optional) `[D12]`
@@ -202,7 +228,7 @@ BBS aesthetics mean **CP437 + ANSI art**, but modern terminals are UTF-8. Plan:
 - Support SAUCE metadata on `.ANS` files (dimensions, font hints) — it's what art packs ship with.
 - Handle window size: SSH gives us `pty-req` and `window-change`; Bubble Tea consumes these natively. Fall back to 80×24.
 - **Themes: a small curated set, built in and embedded.** `[D15]` Ship perhaps four (classic 16-colour ANSI, a muted 256-colour, high-contrast/accessible, monochrome for serial-ish clients). No sysop-authored theme packs, no manifest format, no loader.
-  - Design constraint to honour anyway: keep colour and glyph choices behind a `Theme` struct rather than hardcoding escape sequences at call sites. That costs nothing now and is the difference between "add theme packs later" being a weekend and being a rewrite. See §12 `N5`.
+  - Design constraint to honour anyway: keep colour and glyph choices behind a `Theme` struct rather than hardcoding escape sequences at call sites. That costs nothing now and is the difference between "add theme packs later" being a weekend and being a rewrite. See §13 `N5`.
 
 ---
 
@@ -227,7 +253,7 @@ Rationale for numeric over key-derived: the user requirement is that addressing 
 
 - A node's records are only accepted once its `NODE` record is held (otherwise: quarantine, not drop — the `NODE` record may simply be a few minutes behind on a lossy mesh).
 - **First-seen binding wins.** A second `NODE` record claiming an already-bound address with a different key is *rejected and logged as an alert*, never silently accepted. This is the anti-squatting rule and it must be in the first implementation, not retrofitted.
-- Address changes are a signed `NODE` record superseding the previous one **under the same key**. Key rotation is a separate, deliberately awkward operation requiring sysop-to-sysop confirmation (see §12 `N2`).
+- Address changes are a signed `NODE` record superseding the previous one **under the same key**. Key rotation is a separate, deliberately awkward operation requiring sysop-to-sysop confirmation (see §13 `N2`).
 - The full roster is ~50 nodes × ~100 B = **~5 KB**, trivially replicated and cheap to backfill.
 
 **Wire encoding.** Packed into **4 bytes**: `zone` u8, `net` u12, `node` u12. That covers 255 zones, 4095 nets, 4095 nodes per net — ample for a 50-instance network with room for growth, and 4 bytes cheaper per record than a truncated key. Addresses outside that range (which real FidoNet addresses often are — nets and nodes go to 65535) are **gateway-only**: they appear in the *body* of gateway-originated records as full 4×u16, never in the mesh record header. `[D14]`
@@ -288,6 +314,100 @@ Design notes:
 - Be honest in the UI: a file with no IP-reachable holder shows "available by request only — queued for next exchange," with the requesting user notified when it lands. Not an error, not a spinner that never resolves.
 
 ### 6.6 Doors — see §9.
+
+### 6.7 Accounts: registration, lifecycle, and recovery
+
+§5.1 covers the SSH-layer mechanics of *getting to* a signup screen. This covers what registration actually does, what policy governs it, and — the part with a genuine airtime consequence — when a new account becomes visible to the rest of the network.
+
+#### The property that makes this simple: nicks are local
+
+Per §6.1, a nick is not globally unique; `austin@42:100/7` and `austin@42:100/3` are different people. **Registration therefore needs no network coordination whatsoever** — no name reservation, no distributed lock, no waiting for a mesh round-trip that costs minutes. A brand-new instance with no radio attached and no peers can create accounts immediately. This is worth stating explicitly because the obvious alternative (globally unique nicks) would make signup depend on a link with multi-minute latency and no delivery guarantee, which would be miserable.
+
+Uniqueness is enforced case-insensitively within the instance. Nick rules: 2–16 characters, `[A-Za-z0-9_-]`, must start with a letter, no leading/trailing separators, not in the reserved list (§5.1). Display names are separate and may be richer.
+
+#### What signup collects
+
+| Field | Required | Notes |
+|---|---|---|
+| Nick | yes | Rules above; local uniqueness |
+| Password | only if no pubkey enrolled | Argon2id, never reversible |
+| SSH public key | auto | Captured from the connection if present; users may enroll several later, one per client |
+| Real name | no | Sysop-configurable whether shown |
+| Email | **no, and unverified** | See §13 `N8`. An off-grid BBS may have no path to send mail, so email must never be load-bearing for recovery |
+| Terminal prefs | defaults offered | CP437 vs. Unicode, theme, width fallback (§5.4) |
+| DM passphrase | yes, with a default | Wraps the X25519 key (§8.2 tier 2). Defaults to "same as login password"; a separate passphrase is offered |
+| Federated posting | not asked | Off by default — see below |
+
+**Multiple pubkeys per user is a v1 requirement, not a later nicety.** One key per laptop, phone, and shell box is the normal case, and a schema with a single `pubkey` column is a painful migration later.
+
+#### The DM key, created at signup
+
+Per §8.2, the user's X25519 keypair is generated at signup and stored wrapped by an Argon2id key derived from their DM passphrase. Two consequences that must be surfaced *at signup*, not in a man page:
+
+- **A lost DM passphrase means permanently unreadable DM history.** There is no recovery path and inventing one would defeat the point. The signup screen says so in plain language and requires an acknowledgement.
+- If the passphrase is shared with the login password, changing the login password re-wraps the DM key — which works only while the plaintext key is in memory, i.e. during an authenticated session. A sysop-forced password reset therefore **cannot** re-wrap it, so a sysop reset must either preserve the DM passphrase separately or explicitly warn that DM history will be lost. Get this right in Phase 1; it is exactly the kind of thing that becomes unfixable once real users have real mail.
+
+#### Registration policy modes
+
+A config enum (§11), all four needed eventually, `open` shipping first:
+
+| Mode | Behaviour |
+|---|---|
+| `open` | Anyone may register and use the BBS immediately |
+| `approval` | Registration creates a pending account; the user can log in but sees only a "awaiting sysop review" screen. Sysop approves from the TUI or `meshbbs user approve` |
+| `invite` | Requires a code from `meshbbs invite new` — single-use, optionally expiring, optionally pre-granting capabilities |
+| `closed` | No self-registration; `meshbbs user add` only |
+
+**Recommended default: `open`, with federated posting off.** This decomposition matters and is the airtime-aware answer. A new user can immediately register, browse, post to local areas, and play doors — the classic open-BBS feel — but their posts do **not** consume the shared mesh budget until the sysop grants a `post_federated` capability. The door is open; the commons is gated. See §13 `N7` if you'd rather default to `approval`.
+
+Per-capability grants (`post_federated`, `send_dm_offnode`, `upload_files`, `run_doors`) are cheaper to reason about than a role ladder and map directly onto the abuse vectors that actually exist here.
+
+#### Rate limiting
+
+Registration is an abuse vector on a public SSH port. Per-IP caps on registrations/hour and on failed auth attempts, a global cap on pending accounts, and a configurable delay before a new account may post. All in §11.
+
+#### When does the network learn about a new user? (Lazy PROFILE publication)
+
+This is the sharp edge. A `PROFILE` record (nick, node address, X25519 pubkey, signature) is ~100 B compressed and is what makes a user DM-addressable network-wide. Publishing one per account eagerly is unaffordable at the §1.1 budget:
+
+| Local users | PROFILE bytes | Cost in that node's *entire* mesh budget |
+|---:|---:|---:|
+| 10 | 1.0 KB | 0.4 days |
+| 50 | 5.0 KB | **2.0 days** |
+| 200 | 20 KB | **7.9 days** |
+
+Fifty users would consume two full days of the node's total mesh allocation just announcing that they exist — before anyone posts anything. Network-wide, 50 nodes × 50 users is ~244 KB of pure directory data.
+
+**Therefore: PROFILE records publish lazily and only on demand.** A profile is emitted when, and only when, the user first does something that requires the network to know them — posts to a federated area, or sends an off-node DM. Registering does not publish anything. Additionally:
+
+- Profiles piggyback on bundles the node is already sending (same mechanism as digests, §7.3), so in the normal case they cost no dedicated packet.
+- A user may be **unlisted** (config-default and per-user): they can send off-node DMs but no PROFILE is published, so they aren't in the network directory. Receiving a reply still works because the sender's DM carries what's needed.
+- Account deletion emits a `TOMBSTONE` for the profile; local-only accounts that never published need no tombstone.
+- **Directory backfill is pull, not push.** A node that wants the full network user directory requests it; nobody broadcasts their whole roster.
+
+See §13 `N9` on whether unlisted should be the default.
+
+#### Lifecycle and recovery
+
+- **Idle/expiry:** configurable inactivity window after which an account is marked dormant (not deleted). Dormant accounts don't count against pending caps and are excluded from directory publication.
+- **Deletion:** local records are removed; already-federated *posts* are not retracted by default (they're immutable and other nodes' tombstone policy is advisory, §8.4). The UI must say this before confirming — "your posts on other systems will remain" is the honest version.
+- **Lost password:** sysop reset via `meshbbs user passwd <nick>` run locally, with the DM-key caveat above. No email-based reset, because email may not exist.
+- **Lost pubkey:** enroll another via password login; if both are gone, sysop reset.
+- **Lost sysop credentials:** `meshbbs user grant sysop <nick>` executed locally as the service user. Filesystem access to the datadir is the root of trust, which is the correct and conventional answer for self-hosted software.
+
+#### The testing story — available from Phase 0
+
+Explicitly a Phase 0 deliverable, because federation work in Phase 2 needs populated instances and there is no SSH server until Phase 1:
+
+```bash
+meshbbs user add --nick alice --password-stdin --pubkey ~/.ssh/id_ed25519.pub
+meshbbs user add --nick bob --no-login          # DM target with no interactive access
+meshbbs user grant alice post_federated
+meshbbs dev seed --users 20 --areas 3 --posts 200 --seed 42   # deterministic
+meshbbs dev login-token alice                    # one-shot token for automated TUI tests
+```
+
+`dev seed` being **deterministic on `--seed`** is the requirement that makes the simulated mesh harness (§10) useful: N instances seeded from known seeds produce a known, reproducible divergence to reconcile, which is how you actually test anti-entropy. `dev *` subcommands are compiled in always but refuse to run against a datadir whose config sets `environment = "production"`.
 
 ---
 
@@ -485,7 +605,7 @@ ephemeral_pubkey (32B) || ChaCha20-Poly1305(body) || tag (16B)   = 48B overhead
 | **3. Client-held** | Only the user | needs a local helper | 5 |
 
 - **Tier 2 is the v1 default**, and it is a much better default than v0.1's tier 1. The user's X25519 private key is stored wrapped by an Argon2id-derived key from a passphrase they type at login (separate from, or reused from, their login password by choice). At rest the sysop has ciphertext. During a session the plaintext key is in server memory — unavoidable if the server renders the message, and it must be stated honestly in the docs and at signup.
-- **Tier 3** ships a small `meshbbs-key` helper the user runs locally. Two viable mechanisms, to be chosen during Phase 5 (§12 `N3`): a local helper that the user pipes ciphertext through, or deriving the X25519 key from a deterministic Ed25519 signature over a fixed domain-separation string made by the user's forwarded `ssh-agent` — Ed25519 signatures are deterministic, so this yields a stable keypair the agent's holder alone can reproduce, without the private key ever leaving the agent.
+- **Tier 3** ships a small `meshbbs-key` helper the user runs locally. Two viable mechanisms, to be chosen during Phase 5 (§13 `N3`): a local helper that the user pipes ciphertext through, or deriving the X25519 key from a deterministic Ed25519 signature over a fixed domain-separation string made by the user's forwarded `ssh-agent` — Ed25519 signatures are deterministic, so this yields a stable keypair the agent's holder alone can reproduce, without the private key ever leaving the agent.
 - **Design now so tier 3 stays possible:** the server must never *require* the private key for anything except decrypting for display. Key discovery, DM addressing, signature verification, and delivery must all work from public keys alone. Getting this boundary wrong in Phase 1 is what would make tier 3 a rewrite rather than an addition.
 
 **Key discovery:** `PROFILE` records replicate nick + node address + X25519 pubkey + signature (~100 B). A network-wide user directory that fits comfortably in the airtime budget. First-contact verification is trust-on-first-use, with an optional short fingerprint users can compare out of band.
@@ -589,7 +709,7 @@ One caveat from §1.1: `DOOR_EVENT` sits at the bottom of the priority order wit
   ```
   Default datadir follows OS convention (`~/.local/share/meshbbs`, `~/Library/Application Support/MeshBBS`, `%APPDATA%\MeshBBS`), overridable.
 - **Service integration:** systemd unit, launchd plist, Windows Service wrapper. Generate them with a `meshbbs install-service` subcommand.
-- **First-run wizard:** generate keys, **choose or request a numeric address**, pick a node name, scan for a Meshtastic device, configure the channel, show the derived airtime allocation in human terms (§7.6), create the sysop account. Should take under two minutes.
+- **First-run wizard:** generate keys, **choose or request a numeric address**, pick a node name, scan for a Meshtastic device, configure the channel, show the derived airtime allocation in human terms (§7.6), pick a registration mode (§6.7), create the sysop account. Writes a *minimal* `config.toml` (§11.2), not a commented dump. Should take under two minutes.
 - **Testing — the simulated mesh harness.** The `Link` abstraction lets us run N in-process BBS instances over a fake link with configurable MTU, latency, loss, **and flood multiplier**. This is essential; you cannot iterate on a sync protocol by physically deploying radios. It is also where three specific things get validated:
   - the fountain code's overhead at small K (§7.2),
   - digest suppression and scaling at N = 50 (§7.3),
@@ -599,15 +719,127 @@ One caveat from §1.1: `DOOR_EVENT` sits at the bottom of the priority order wit
 
 ---
 
-## 11. Roadmap
+## 11. Configuration and administration
 
-Revised per the decisions. The largest changes: the fountain codec moves **up** into Phase 2 (it needs the harness), DOS doors move **down** to Phase 7, BLE and theme packs are **gone**, and a new Phase 6 covers wire-format freeze plus the FTN gateway.
+### 11.1 The split: file vs. database
+
+The most consequential decision here, and the one that's expensive to change later. **Not everything configurable belongs in `config.toml`.**
+
+> **`config.toml` holds what must exist before the process can serve a single connection.**
+> **The database holds content and operational state that sysops edit while it's running.**
+
+| In `config.toml` | In the database |
+|---|---|
+| Node address, node name, sysop identity | Users, capabilities, bans |
+| Listener addresses, ports, host key paths | Forum areas and their policies |
+| Meshtastic transport and channel | Federation peers and their keys |
+| Airtime governor limits | Door registrations |
+| Policy *defaults* (registration mode, new-area defaults) | MOTD, bulletins, ANSI art |
+| Logging, datadir, environment | Per-user preferences |
+
+The test is simple: if a sysop would plausibly change it from inside the TUI while users are online, it's database. If getting it wrong means the process shouldn't start, it's file. Putting the area list in TOML would mean a restart to create a forum, which no sysop will accept; putting the listen port in the database means a corrupt database is unrecoverable.
+
+**But sysops want their config in git**, and that's legitimate. So: `meshbbs config export --all > backup.toml` dumps *both* layers into one annotated file, and `meshbbs config import` applies it. That gives version-controllable, diffable, reviewable configuration and reproducible harness setups without forcing the runtime to read areas from a text file.
+
+### 11.2 Precedence and secrets
+
+Resolution order, lowest to highest:
+
+```
+built-in defaults  →  config.toml  →  MESHBBS_* env vars  →  command-line flags
+```
+
+Every setting has a default that works. **The wizard writes a minimal file** — a dozen lines, not a 400-line commented dump. `meshbbs config reference` prints the full annotated schema (generated from struct tags, so it cannot drift from the code), and the same generator produces `docs/config.md`.
+
+**Secrets never sit in `config.toml` as literals.** The Meshtastic channel PSK in particular is a shared secret. Any secret-valued key accepts three forms:
+
+```toml
+psk = "env:MESHBBS_MESH_PSK"      # from environment
+psk = "file:keys/mesh.psk"        # from a 0600 file
+psk = "base64:..."                # literal — permitted, warned about at startup
+```
+
+Private keys are never in config at all; they live in `keys/` at 0600, and the process refuses to start if permissions are looser than that.
+
+### 11.3 Validation and reload
+
+- **`meshbbs config check` is a first-class command**, exits non-zero with precise messages, and the generated service units run it as a pre-start step. Better to fail to start than to start wrong.
+- **Startup refuses invalid config** rather than silently falling back to defaults. A typo'd key is an error, not a shrug — silently ignoring `airtime_ceiling_pct` because someone wrote `airtime_ceiling_percent` is how a mesh gets flooded.
+- **Cross-field validation belongs here**, not scattered through the code. Specifically: the ham-mode checks from §8.3 (if `is_licensed` on the node, then DM encryption must be off *and* the channel PSK must be unset), governor ceiling ≤ the code-enforced hard max, per-area sub-budgets summing to ≤ the node's allocation, and telnet enabled without `guest_only` producing a loud warning.
+- **Hot-reloadable** on `SIGHUP` / `meshbbs reload`: MOTD, theme selection, registration mode, rate limits, governor ceiling and quiet hours, area policies, log level.
+- **Requires restart:** listener addresses and ports, datadir, node address, Meshtastic transport selection, database path. The reload command names exactly which changed keys it could not apply, rather than pretending it applied them.
+
+### 11.4 The rule that protects the commons
+
+**A knob whose wrong value harms other people on the mesh does not get to be a plain config value.** The governor's ceiling is configurable up to a hard maximum compiled into the binary (§7.6); the flood multiplier can be overridden only for testing and logs a warning every startup when it is; mesh file transfer is not configurable at all because it does not exist as a code path (§7.5). This is a deliberate asymmetry: sysops get wide latitude over their own instance and narrow latitude over shared airtime.
+
+### 11.5 What is configurable
+
+Grouped as the reference doc will be. Phase markers indicate when the group first appears.
+
+**Instance identity — Phase 0**
+`node_address` (`zone:net/node`), `node_name`, `sysop_name`, `sysop_contact`, `datadir`, `timezone`, `environment` (`development` | `production` — gates `dev` subcommands, §6.7)
+
+**Listeners — Phase 1**
+- SSH: `bind`, `port` (default 2222 unprivileged, 22 documented), `host_key_path`, `auth_methods`, `max_sessions`, `max_sessions_per_user`, `idle_timeout`, `login_grace`
+- Telnet: `enabled` (default **false**), `bind`, `port`, `guest_only` (default true when enabled), warning acknowledgement flag `[D12]`
+- Web terminal: `enabled` (default false), Phase 5
+
+**Users and registration — Phase 1** (§6.7)
+`registration_mode` (`open` | `approval` | `invite` | `closed`, default `open`), `guest_enabled`, `guest_areas`, `nick_min_len`, `nick_max_len`, `extra_reserved_nicks`, `collect_real_name`, `show_real_name`, `default_capabilities` (note: **excludes `post_federated`**), `new_user_post_delay`, `session_time_limit`, `dormant_after`, `dm_key_custody` (`server` | `wrapped` | `client`, default `wrapped`), `password_min_len`, `argon2_params`
+
+**Rate limits and abuse — Phase 1**
+`auth_attempts_per_ip_per_hour`, `registrations_per_ip_per_day`, `max_pending_accounts`, `auto_ban_threshold`, `auto_ban_duration`, `ban_list` (database)
+
+**Forums — Phase 1**
+Per-area (database): `name`, `description`, `moderators`, `read_acl`, `post_acl`, `retention_days`, `retention_max_records`, `federated` (default **false** `[D8]`-adjacent — sysops opt in to airtime), `peer_nodes`, `airtime_share`, `ftn_export`
+Defaults for new areas (file): `new_area_federated = false`, `new_area_retention_days`
+
+**Files — Phase 1**
+`sftp_enabled`, `blob_path`, `max_upload_size`, `per_user_quota`, `area_paths`, `catalog_federated`
+
+**Themes — Phase 1** `[D15]`
+`default_theme`, `allow_user_theme_override`, `default_encoding` (`cp437` | `utf8` | `auto`)
+
+**Federation — Phase 2**
+`enabled_links`, `peers` (database: address, pubkey, allowed areas, quotas, `trust` = `accept` | `quarantine` | `reject`), `batch_window`, `digest_base_interval`, `quarantine_policy`, `tombstone_policy` (§8.4), `dictionary_version`, `ip_link` (bind/port/Noise static key path)
+
+**Mesh and the governor — Phase 3**
+- Transport: `mode` (`serial` | `tcp` | `auto`), `serial_device`, `serial_baud`, `tcp_host`, `tcp_port`
+- Channel: `channel_name`, `channel_index`, `psk` (secret-valued, §11.2), `port_num`, `hop_limit`
+- Governor: `airtime_ceiling_pct` (default 5, hard max 15 in code), `expected_instance_count` (else derived from the `NODE` roster), `flood_multiplier_override` (testing only), `quiet_hours`, `duty_cycle_region`, `backoff_thresholds`, `priority_order`
+- Safety: `ham_mode_override` (`i_accept_part97_responsibility`) `[D11]`
+
+**Doors — Phase 4**
+Per-door (database): `name`, `path`, `args`, `cwd`, `env_passthrough`, `dropfile_type`, `max_concurrent`, `node_lock`, `cpu_limit`, `mem_limit`, `wall_clock_limit`, `required_capability`
+
+**FTN gateway — Phase 6** `[D14]`
+`uplink` (address, packet paths, session credentials), `echo_map` (FTN tag ↔ local area), `mesh_bridged_echoes` (explicit opt-in list), `per_echo_daily_cap`, `export_areas`, `origin_line`
+
+**Logging and observability — Phase 0**
+`level`, `format` (`text` | `json`), `file`, `rotate_size`, `rotate_keep`, `metrics_bind` (Prometheus, off by default), `audit_log` (auth events, sysop actions, peer quota violations)
+
+### 11.6 Administration surfaces
+
+Three, deliberately overlapping:
+
+1. **CLI** — `user`, `invite`, `area`, `peer`, `door`, `config`, `install-service`, `dev`. Works with the server stopped, which is what makes it the recovery path. Non-interactive and scriptable.
+2. **Sysop TUI** — reachable from an authenticated session with the sysop capability. Covers the database layer: users, areas, peers, bans, MOTD, and a **live status screen** showing sessions, mesh link state, peer high-water marks, governor budget consumed, and the observed flood multiplier R (§7.6). A sysop watching R and their airtime share is a sysop who understands their mesh.
+3. **Config file** — the file layer, plus `config export/import` for the database layer.
+
+Anything destructive (delete user, purge area, remove peer) requires confirmation and writes to the audit log regardless of surface.
+
+---
+
+## 12. Roadmap
+
+Revised per the decisions. The largest changes: the fountain codec moves **up** into Phase 2 (it needs the harness), DOS doors move **down** to Phase 7, BLE and theme packs are **gone**, and a new Phase 6 covers wire-format freeze plus the FTN gateway. **Account creation and the config loader are Phase 0**, before the SSH server exists, so there is something to test against from the first week.
 
 | Phase | Scope | Why this order |
 |---|---|---|
-| **0 — Skeleton** | Go module, SQLite schema + migrations, config, logging, node key generation, **numeric address + `NODE` record model**, CI cross-compiling all 5 targets cgo-free | Prove the cgo-free build works on day one. Addressing lands here because §6.1's first-seen binding rule is hard to retrofit. |
-| **1 — Single-node BBS** | SSH server, Bubble Tea UI, menus, ANSI/CP437 rendering, **built-in themes behind a `Theme` struct**, users/auth, local forums, local DMs with **passphrase-wrapped keys (tier 2)**, file areas via SFTP, presence/node chat, telnet off-by-default | A genuinely usable BBS with zero federation. Ship this; get people on it. Tier-2 key custody is here because retrofitting key wrapping means re-keying every user. |
-| **2 — Federation over IP + the harness** | Record log, version vectors, anti-entropy with **digest suppression/scaling**, bundle format, zstd dictionary, `Link` abstraction, **simulated mesh harness**, **fountain codec (L1)**, QUIC/Noise IP link | Build and debug the sync protocol where iteration is fast — but design every byte for the mesh MTU. The codec is here, not Phase 3, because tuning small-K overhead needs the harness's controllable loss. |
+| **0 — Skeleton** | Go module, SQLite schema + migrations, **config loader + `config check` + generated reference**, logging, node key generation, **numeric address + `NODE` record model**, **`user add` / `user grant` / `dev seed` CLI**, CI cross-compiling all 5 targets cgo-free | Prove the cgo-free build works on day one. Addressing lands here because §6.1's first-seen binding rule is hard to retrofit; account CLI lands here because Phase 1 and 2 both need populated instances and neither can wait for a signup TUI. |
+| **1 — Single-node BBS** | SSH server, **`new@`/unknown-nick signup TUI, registration modes, capability grants, multi-pubkey enrollment**, Bubble Tea UI, menus, ANSI/CP437 rendering, **built-in themes behind a `Theme` struct**, local forums, local DMs with **passphrase-wrapped keys (tier 2)**, file areas via SFTP, presence/node chat, telnet off-by-default, **sysop TUI + status screen** | A genuinely usable BBS with zero federation. Ship this; get people on it. Tier-2 key custody is here because retrofitting key wrapping means re-keying every user, and the DM-key/password-reset interaction (§6.7) becomes unfixable once real mail exists. |
+| **2 — Federation over IP + the harness** | Record log, version vectors, anti-entropy with **digest suppression/scaling**, bundle format, zstd dictionary, `Link` abstraction, **simulated mesh harness (seeded by `dev seed`)**, **fountain codec (L1)**, **lazy `PROFILE` publication**, QUIC/Noise IP link | Build and debug the sync protocol where iteration is fast — but design every byte for the mesh MTU. The codec is here, not Phase 3, because tuning small-K overhead needs the harness's controllable loss. |
 | **3 — Meshtastic link** | Serial + TCP transports, protobuf framing, **airtime governor with flood-multiplier accounting**, ham-mode safety checks (DMs *and* channel PSK), file catalog replication, R estimation | The protocol already fits 233 bytes because Phase 2 was designed that way |
 | **4 — Doors** | Modern door API + spec, PTY/ConPTY bridging, sandboxing, 2–3 reference doors, dropfile generation | Independent of federation; parallelizable with 2–3. Now the whole of door scope. |
 | **5 — Reach** | Web terminal, inter-BBS `DOOR_EVENT`, sneakernet bundles, **client-held DM keys (tier 3)** | Genuinely optional, except tier-3 keys which are a stated preference |
@@ -618,9 +850,9 @@ Phases 2 and 4 are parallelizable if there's more than one person working on it.
 
 ---
 
-## 12. Open questions raised by the decisions
+## 13. Open questions raised by the decisions
 
-The v0.1 questions are all answered (§13). These are new, and are consequences of those answers rather than leftovers. None block starting Phase 0.
+The v0.1 questions are all answered (§14). These are new, and are consequences of those answers rather than leftovers. None block starting Phase 0.
 
 ### Needs a decision before Phase 2
 
@@ -643,9 +875,17 @@ The v0.1 questions are all answered (§13). These are new, and are consequences 
 
 **`N6` — What is R, actually?** §7.6 defaults the flood multiplier to 4 with no measurement behind it, and the entire airtime budget scales linearly with it. Worth measuring on a real Pacific Northwest mesh early in Phase 3, and worth a `meshbbs mesh-survey` subcommand that measures it without needing a full BBS deployment.
 
+### Raised by §6.7 / §11 (registration and config)
+
+**`N7` — Default registration mode, and is capability-gating the right shape?** §6.7 recommends `open` registration with `post_federated` **withheld** until the sysop grants it — open front door, gated commons. The alternative is `approval` mode, where nobody gets in without review. Open-plus-gating is friendlier and still protects airtime, but it means new users can post locally and then discover their posts aren't federating, which needs clear UI ("this area is local to this BBS" / "your posts here are pending federation access"). If that ambiguity bothers you, `approval` is the simpler mental model. **Needs deciding before Phase 1.**
+
+**`N8` — Collect email at all?** §6.7 says optional and unverified, because an off-grid BBS may have no way to send mail, so email can never be load-bearing for account recovery. Options: don't collect it (cleanest, and one less PII field to protect), collect as free-text sysop contact info, or collect and use it for recovery *when an SMTP relay is configured* (which reintroduces two recovery paths that behave differently depending on deployment — the thing worth avoiding). Recommendation: don't collect it in v1.
+
+**`N9` — Should new users be listed or unlisted by default?** §6.7 publishes `PROFILE` records lazily, on first federated activity, because eager publication costs ~2 days of a node's entire mesh budget for 50 users. Remaining question is the per-user default once they *do* federate: listed (discoverable in the network directory, the sociable BBS default) or unlisted (DM-reachable but not indexed). Recommendation: listed, since a BBS user list has always been public, with a visible per-user toggle.
+
 ---
 
-## 13. Decisions (resolved v0.1 questions)
+## 14. Decisions (resolved v0.1 questions)
 
 | # | Question | Decision | Main sections affected |
 |---|---|---|---|
@@ -663,7 +903,7 @@ The v0.1 questions are all answered (§13). These are new, and are consequences 
 | **D12** | Telnet? (was `Q5`) | **Off by default, loud warning when enabled.** Guest-only telnet is the recommended middle setting. | §5.2 |
 | **D13** | BLE? (was `Q4`) | **Dropped, future/never.** Makes every artifact cgo-free with no build tags — a real packaging simplification. | §2, §3, §4, §7.1, §10 |
 | **D14** | FTN gateway? (was `Q13`) | **Yes.** Moves from non-goal to goal, Phase 6. Synergistic with `D9`. Constrained hard: IP-side by default, per-echo airtime caps, and explicitly labelled as a trust boundary since FTN mail is unsigned. | §2, §7.7, Phase 6 |
-| **D15** | Theme customization? (was `Q6`) | **Small set of built-in themes.** Colours stay behind a `Theme` struct so packs remain a later addition rather than a rewrite. | §5.4, §12 `N5` |
+| **D15** | Theme customization? (was `Q6`) | **Small set of built-in themes.** Colours stay behind a `Theme` struct so packs remain a later addition rather than a rewrite. | §5.4, §13 `N5` |
 
 ---
 
