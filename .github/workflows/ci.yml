@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Every artifact must be cgo-free (design §4, §10). Dropping BLE was what
+  # bought this: no build tags, no cgo variants, one build matrix.
+  CGO_ENABLED: "0"
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # A real Windows runner is non-negotiable from Phase 4 (ConPTY, §12.9).
+        # It is here from Phase 0 so that path handling and file permissions are
+        # exercised on Windows continuously rather than discovered later.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^internal/identity/wordlist.go$' || true)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Determinism check (design §12.1)
+        if: matrix.os == 'ubuntu-latest'
+        run: go run ./tools/checkdeterminism ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  build:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          # Raspberry Pi — likely the most common deployment (§10).
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          out="meshbbs-${GOOS}-${GOARCH}"
+          [ "$GOOS" = "windows" ] && out="${out}.exe"
+          go build -trimpath -ldflags "-s -w -X github.com/aghman/meshbbs/internal/cli.Version=${GITHUB_SHA::8}" \
+            -o "$out" ./cmd/meshbbs
+          ls -la "$out"
+
+      - name: Assert the binary is not dynamically linked
+        # §4 calls cgo-free non-negotiable, so assert it rather than trusting
+        # CGO_ENABLED to have been honoured. A cgo build would pull in libc and
+        # break cross-compilation for every target at once.
+        if: matrix.goos == 'linux'
+        run: |
+          out="meshbbs-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if file "$out" | grep -q "dynamically linked"; then
+            echo "FAIL: $out is dynamically linked; the build is not cgo-free"
+            file "$out"
+            exit 1
+          fi
+          file "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meshbbs-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: meshbbs-*
+          retention-days: 7
+
+  smoke:
+    name: Smoke test the built binary
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # §12.9: the binaries must RUN, not merely compile.
+      - name: Initialise and exercise an instance
+        run: |
+          set -euo pipefail
+          go build -o ./meshbbs ./cmd/meshbbs
+          D=$(mktemp -d)
+
+          ./meshbbs --data-dir "$D" init \
+            --display-name ci-node --sysop-nick sysop --development
+
+          ./meshbbs --data-dir "$D" config check
+          ./meshbbs --data-dir "$D" id
+
+          # Both renderings must decode to the same identifier (§6.1.4.2).
+          COMPACT=$(./meshbbs --data-dir "$D" id --compact)
+          WORDS=$(./meshbbs --data-dir "$D" id --words)
+          test "${#COMPACT}" -eq 13
+          test "$(echo "$WORDS" | tr '-' '\n' | wc -l)" -eq 6
+          ./meshbbs --data-dir "$D" peer alias self "$WORDS"
+          ./meshbbs --data-dir "$D" peer resolve self | grep -q "${COMPACT:0:4}"
+
+          ./meshbbs --data-dir "$D" user add bob
+          ./meshbbs --data-dir "$D" user list
+          ./meshbbs --data-dir "$D" dev seed --seed 1 --users 3 --posts 10
+
+          # An unknown config key must fail the check (§11.3).
+          echo 'levle = "debug"' >> "$D/config.toml"
+          if ./meshbbs --data-dir "$D" config check; then
+            echo "FAIL: config check accepted an unknown key"
+            exit 1
+          fi
+          echo "smoke test passed"
+
+  fuzz:
+    name: Fuzz parsers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # §12.5: every parser is reachable by anyone holding the channel PSK, so
+      # a short fuzz run gates each change. Long campaigns belong in a
+      # scheduled job, not the PR path.
+      - name: Fuzz record parser
+        run: go test ./internal/record/ -run XXX -fuzz FuzzUnmarshal -fuzztime 60s
