@@ -1,0 +1,11 @@
+# Golden screen frames are compared byte-for-byte against rendered output,
+# which always uses LF. Without this, a Windows checkout converts them to CRLF
+# and every golden test fails there while passing everywhere else.
+*.golden -text
+
+# The BIP-39 wordlist is a frozen display contract (§6.1.4.2); keep it byte
+# stable across platforms.
+internal/identity/wordlist.go -text
+
+# SQL migrations are applied verbatim and hashed in schema_migrations.
+*.sql text eol=lf

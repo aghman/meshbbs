@@ -288,11 +288,16 @@ func (s *session) golden(name string) *session {
 		return s
 	}
 
-	want, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		s.t.Fatalf("missing golden file %s (run: go test ./internal/tui -update): %v", path, err)
 	}
-	if got != string(want) {
+	// Normalise line endings defensively. .gitattributes marks these files
+	// -text so git leaves them alone, but a checkout made before that landed,
+	// or an editor that "helpfully" converts, would otherwise fail every
+	// golden on Windows only.
+	want := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if got != want {
 		s.t.Fatalf("screen does not match %s\n--- want ---\n%s\n--- got ---\n%s", path, want, got)
 	}
 	return s
