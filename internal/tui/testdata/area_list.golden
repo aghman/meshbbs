@@ -1,0 +1,11 @@
+Message Areas
+------------------------------------------------------------------------------
+
+> general           General discussion          Local to this BBS
+  sysop             Announcements from the sy…  Local to this BBS
+  tech              Radios, antennas, and the…  Local to this BBS
+
+"Local to this BBS" means posts stay here. "Federated" means they travel
+the mesh and spend shared airtime, which needs the post_federated capability.
+
+up/down move · enter open · q back

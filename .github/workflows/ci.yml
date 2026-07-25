@@ -148,6 +148,10 @@ jobs:
           ./meshbbs --data-dir "$D" user list
           ./meshbbs --data-dir "$D" dev seed --seed 1 --users 3 --posts 10
 
+          # A sysop reset must refuse to silently destroy DM history (§6.7).
+          ./meshbbs --data-dir "$D" dev seed --seed 2 --users 1 --posts 0 >/dev/null
+          echo "newpassword" | ./meshbbs --data-dir "$D" user passwd bob
+
           # An unknown config key must fail the check (§11.3).
           echo 'levle = "debug"' >> "$D/config.toml"
           if ./meshbbs --data-dir "$D" config check; then
@@ -171,3 +175,28 @@ jobs:
       # scheduled job, not the PR path.
       - name: Fuzz record parser
         run: go test ./internal/record/ -run XXX -fuzz FuzzUnmarshal -fuzztime 60s
+
+  golden:
+    name: Golden frames are stable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # §12.8: ANSI layout regressions are invisible to ordinary assertions, so
+      # the whole frame is the assertion. This also catches a golden that was
+      # regenerated but not committed, and any residual nondeterminism in a
+      # screen (a real clock leaking into a timestamp, say).
+      - name: Golden frames match, and are deterministic
+        run: |
+          go test ./internal/tui/ -count=1
+          go test ./internal/tui/ -count=1
+          go test ./internal/tui/ -update
+          if ! git diff --quiet -- internal/tui/testdata; then
+            echo "FAIL: golden files changed when regenerated — a screen is nondeterministic"
+            git diff -- internal/tui/testdata
+            exit 1
+          fi

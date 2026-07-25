@@ -1,0 +1,16 @@
+Key Not Recognised
+------------------------------------------------------------------------------
+
+That account exists, but this key is not enrolled on it.
+
+an account with that name exists, but this key is not enrolled on it.
+
+If this is your account, reconnect with a password:
+    ssh -o PreferredAuthentications=password austin@this-bbs
+
+You can enrol this key once you are logged in.
+
+If you meant to register a NEW account, pick a different name:
+    ssh new@this-bbs
+
+any key to disconnect

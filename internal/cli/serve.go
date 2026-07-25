@@ -88,6 +88,10 @@ Serves SSH on the configured port. Users connect with:
 			if err != nil {
 				return err
 			}
+			filesDir, err := e.cfg.FilesPath()
+			if err != nil {
+				return err
+			}
 			if port == 0 {
 				port = e.cfg.SSH.Port
 			}
@@ -96,10 +100,12 @@ Serves SSH on the configured port. Users connect with:
 				Bind:         e.cfg.SSH.Bind,
 				Port:         port,
 				KeysDir:      keysDir,
+				FilesDir:     filesDir,
 				GuestEnabled: e.cfg.Users.GuestEnabled,
 				OpenSignup:   e.cfg.Users.RegistrationMode == "open",
 				Themes:       themes,
 				DefaultTheme: e.cfg.Theme.Default,
+				Clock:        e.clock,
 				Logger:       log,
 			})
 			if err != nil {
@@ -112,9 +118,33 @@ Serves SSH on the configured port. Users connect with:
 			fmt.Fprintf(out, "  ssh       %s:%d\n", e.cfg.SSH.Bind, port)
 			fmt.Fprintf(out, "  themes    %v\n", themes.Names())
 			fmt.Fprintf(out, "  guests    %v\n", e.cfg.Users.GuestEnabled)
-			fmt.Fprintf(out, "  register  %s\n\n", e.cfg.Users.RegistrationMode)
+			fmt.Fprintf(out, "  register  %s\n", e.cfg.Users.RegistrationMode)
+			fmt.Fprintf(out, "  files     %s (sftp)\n\n", filesDir)
 			fmt.Fprintf(out, "Connect with:  ssh new@localhost -p %d\n", port)
 			fmt.Fprintf(out, "Ctrl+C to stop.\n\n")
+
+			// Telnet, when enabled, runs alongside SSH. [D12] made it
+			// off-by-default with a loud warning; the warning is emitted by the
+			// telnet server itself at every start.
+			if e.cfg.Telnet.Enabled {
+				tel := sshd.NewTelnetServer(svc, st, sshd.TelnetOptions{
+					Bind:      e.cfg.Telnet.Bind,
+					Port:      e.cfg.Telnet.Port,
+					GuestOnly: e.cfg.Telnet.GuestOnly,
+					Themes:    themes,
+					Theme:     e.cfg.Theme.Default,
+					Chat:      srv.Chat(),
+					Presence:  srv.Presence(),
+					Logger:    log,
+				})
+				fmt.Fprintf(out, "  telnet    %s:%d (PLAINTEXT, guest-only)\n\n",
+					e.cfg.Telnet.Bind, e.cfg.Telnet.Port)
+				go func() {
+					if err := tel.ListenAndServe(ctx); err != nil {
+						log.Error("telnet server stopped", "err", err)
+					}
+				}()
+			}
 
 			if err := srv.ListenAndServe(ctx); err != nil {
 				return err

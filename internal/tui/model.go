@@ -9,8 +9,10 @@ package tui
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/aghman/meshbbs/internal/bbs"
+	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/aghman/meshbbs/internal/term"
 	"github.com/aghman/meshbbs/internal/theme"
@@ -60,6 +62,8 @@ const (
 	screenUnlock
 	screenKeySetup
 	screenWho
+	screenSysop
+	screenChat
 	screenNodeInfo
 	screenGoodbye
 )
@@ -82,6 +86,8 @@ type Config struct {
 	PublicKey string
 	KeyFP     string
 	AuthNote  string
+	Chat      *ChatRoom
+	Clock     clock.Clock
 	Logger    *slog.Logger
 	Ctx       context.Context
 }
@@ -126,6 +132,9 @@ type Model struct {
 	setupPW2    textInput
 	setupIdx    int
 	peers       []Peer
+	sysop_      sysopState
+	chatInput   textInput
+	chatLines   []ChatLine
 
 	quitting bool
 }
@@ -178,7 +187,17 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
+		// Ignore nonsense sizes rather than adopting them. A client that
+		// cannot report its geometry — a scripted session, some telnet
+		// clients, a terminal mid-resize — sends 0x0, and taking that at face
+		// value collapses every screen to the minimum width. The size
+		// negotiated at connection time is a better guess than zero.
+		if msg.Width >= 20 {
+			m.width = msg.Width
+		}
+		if msg.Height >= 5 {
+			m.height = msg.Height
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -236,6 +255,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.unlockPW = newInput("Passphrase: ", 64, true)
 		return m, nil
 
+	case sysopDataMsg:
+		m.sysop_.users = msg.users
+		m.sysop_.caps = msg.caps
+		m.sysop_.areas = msg.areas
+		m.sysop_.aliases = msg.aliases
+		return m, nil
+
+	case sysopActionMsg:
+		m.status, m.statusErr = msg.text, false
+		return m, m.loadSysopData()
+
+	case chatUpdatedMsg:
+		m.chatLines = msg.lines
+		// Re-arm the watcher so the next message also wakes us.
+		if m.screen == screenChat {
+			return m, m.pollChat()
+		}
+		return m, nil
+
 	case unlockedMsg:
 		// The passphrase lives only in this session's memory, only while
 		// unlocked, and is cleared on exit (§8.2 tier 2).
@@ -288,6 +326,10 @@ func (m Model) View() string {
 		return m.renderKeySetup()
 	case screenWho:
 		return m.renderWho()
+	case screenSysop:
+		return m.renderSysop()
+	case screenChat:
+		return m.renderChat()
 	case screenNodeInfo:
 		return m.renderNodeInfo()
 	default:
@@ -303,10 +345,22 @@ func (m Model) leave() (tea.Model, tea.Cmd) {
 	m.passphrase = ""
 	m.unlocked = false
 	m.quitting = true
+	if m.screen == screenChat {
+		m.leaveChat()
+	}
 	if m.joined && m.cfg.Presence != nil {
 		m.cfg.Presence.Leave(m.cfg.SessionID)
 	}
 	return m, tea.Quit
+}
+
+// clockNow reads the injected clock (§12.1), falling back to a real one for
+// callers that did not supply it.
+func (m Model) clockNow() time.Time {
+	if m.cfg.Clock != nil {
+		return m.cfg.Clock.Now()
+	}
+	return clock.NewReal().Now()
 }
 
 // sanitize prepares untrusted text for display (§5.4).
@@ -325,4 +379,14 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n-1]) + "…"
+}
+
+// contains reports whether a string slice holds a value.
+func contains(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
 }

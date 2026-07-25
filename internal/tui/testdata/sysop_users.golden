@@ -1,0 +1,14 @@
+Sysop
+------------------------------------------------------------------------------
+
+ Users  Areas  Aliases  Status
+
+  NICK           STATE    SYSOP  FEDERATED MAIL KEY
+> boss           active   yes    yes       yes
+  newbie         active   no     no        yes
+
+Federated posting is withheld from new accounts on purpose: anyone may register
+and use this BBS, but spending the network's shared airtime is a grant you make
+deliberately.
+
+tab switch · up/down move · g toggle federated posting · q back

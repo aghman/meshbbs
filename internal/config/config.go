@@ -43,6 +43,7 @@ const (
 type Config struct {
 	Node    Node    `toml:"node" doc:"Instance identity and operating environment."`
 	SSH     SSH     `toml:"ssh" doc:"The SSH front end (§5.1)."`
+	Telnet  Telnet  `toml:"telnet" doc:"The legacy plaintext front end, off by default ([D12])."`
 	Users   Users   `toml:"users" doc:"Registration and account policy (§6.7)."`
 	Theme   Theme   `toml:"theme" doc:"Appearance (§5.4)."`
 	Log     Log     `toml:"log" doc:"Logging and observability."`
@@ -55,6 +56,17 @@ type SSH struct {
 	Bind        string `toml:"bind" default:"0.0.0.0" doc:"Address to listen on."`
 	Port        int    `toml:"port" default:"2222" doc:"Port to listen on. 2222 avoids needing root; 22 is conventional for a dedicated host."`
 	MaxSessions int    `toml:"max_sessions" default:"32" doc:"Maximum concurrent sessions."`
+}
+
+// Telnet configures the legacy plaintext front end ([D12]).
+//
+// Off by default. Enabling it puts credentials on the wire in the clear; the
+// server warns at every start, and only guest access is served.
+type Telnet struct {
+	Enabled   bool   `toml:"enabled" default:"false" doc:"Serve telnet. OFF by default: telnet is plaintext, so anything typed can be read by anyone on the network path ([D12])."`
+	Bind      string `toml:"bind" default:"0.0.0.0" doc:"Address to listen on."`
+	Port      int    `toml:"port" default:"2323" doc:"Port to listen on. 23 is conventional but needs root."`
+	GuestOnly bool   `toml:"guest_only" default:"true" doc:"Serve read-only guest sessions only. Recommended: browsing over plaintext costs nothing, typing a password over it does."`
 }
 
 // Users configures registration policy (§6.7, [N7], [N9]).
@@ -95,6 +107,7 @@ type Log struct {
 type Storage struct {
 	DataDir  string `toml:"data_dir" default:"" doc:"Root data directory. Empty selects the OS convention (~/.local/share/meshbbs, ~/Library/Application Support/MeshBBS, %APPDATA%\\MeshBBS)."`
 	Database string `toml:"database" default:"bbs.db" doc:"SQLite database filename, relative to data_dir unless absolute."`
+	FilesDir string `toml:"files_dir" default:"files" doc:"Directory holding file areas, served over SFTP. Relative to data_dir unless absolute."`
 	KeysDir  string `toml:"keys_dir" default:"keys" doc:"Directory holding node and host keys, relative to data_dir unless absolute. Must be mode 0700 with 0600 keys."`
 }
 
@@ -187,6 +200,14 @@ func (c *Config) Validate() error {
 	if c.SSH.MaxSessions < 1 {
 		problems = append(problems, "ssh.max_sessions must be at least 1")
 	}
+	if c.Telnet.Enabled {
+		if c.Telnet.Port < 1 || c.Telnet.Port > 65535 {
+			problems = append(problems, fmt.Sprintf("telnet.port is %d, want 1-65535", c.Telnet.Port))
+		}
+		if c.Telnet.Port == c.SSH.Port {
+			problems = append(problems, "telnet.port and ssh.port are the same")
+		}
+	}
 
 	if strings.TrimSpace(c.Storage.Database) == "" {
 		problems = append(problems, "storage.database must not be empty")
@@ -223,6 +244,11 @@ func (c *Config) DatabasePath() (string, error) {
 // KeysPath returns the absolute path to the keys directory.
 func (c *Config) KeysPath() (string, error) {
 	return c.resolveUnder(c.Storage.KeysDir)
+}
+
+// FilesPath returns the absolute path to the file area directory.
+func (c *Config) FilesPath() (string, error) {
+	return c.resolveUnder(c.Storage.FilesDir)
 }
 
 // ThemePath returns the absolute path to the theme override directory.

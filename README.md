@@ -13,17 +13,29 @@ and no address authority — and sysops give peers short local names (`austin@pn
 name hosts in an SSH config. A gateway can bridge selected echo areas to existing FidoNet-style
 message networks.
 
-**Status:** Phase 0 (skeleton) in progress. Not yet a usable BBS — there is no SSH server until
-Phase 1 and no federation until Phase 2. What works today is identity, configuration, storage and
-the CLI.
+**Status:** Phase 1 complete — a usable single-node BBS. Federation over the mesh is Phase 2/3, so
+instances do not talk to each other yet.
 
 ## Try it
 
 ```
 go build -o meshbbs ./cmd/meshbbs
-./meshbbs init --display-name my-bbs --sysop-nick yournick --development
-./meshbbs id
+./meshbbs init --display-name my-bbs --sysop-nick yournick --sysop-password-stdin
+./meshbbs serve
 ```
+
+Then connect:
+
+```
+ssh new@localhost -p 2222      register — your SSH key is enrolled automatically
+ssh yournick@localhost -p 2222 log in
+ssh guest@localhost -p 2222    browse read-only
+sftp -P 2222 yournick@localhost   file areas
+```
+
+Forums, private mail, node chat and a sysop panel. Private messages are encrypted with a key only
+your passphrase opens — subject lines included — so the sysop stores ciphertext and cannot read
+your mail.
 
 `init` generates the node key — there is no address to choose, request or register, because the
 node ID is derived from the key itself. Back up the `keys/` directory: a lost node key cannot be
@@ -47,7 +59,8 @@ recovered, and the instance would have to re-establish with its peers as a new n
 
 ```
 go test ./...
-go run ./tools/checkdeterminism ./...   # enforces the design §12.1 constraints
+go run ./tools/checkdeterminism ./...        # enforces the design §12.1 constraints
+go test ./internal/tui/ -update              # regenerate golden screen frames
 ```
 
 The determinism check is not a style linter. Deterministic simulation is how the federation

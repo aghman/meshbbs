@@ -58,6 +58,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleUnlockKey(msg)
 	case screenKeySetup:
 		return m.handleKeySetupKey(msg)
+	case screenSysop:
+		return m.handleSysopKey(msg)
+	case screenChat:
+		return m.handleChatKey(msg)
 	case screenWho, screenNodeInfo:
 		m.screen = screenMenu
 		return m, nil
@@ -85,6 +89,19 @@ func (m Model) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "w":
 		m.screen = screenWho
 		return m, m.loadPeers()
+	case "c":
+		m.screen = screenChat
+		m.chatInput = newInput("> ", 200, false)
+		m.setWhere("chat")
+		return m, m.enterChat()
+	case "s":
+		if !m.sysop {
+			return m, errs("That is a sysop function.")
+		}
+		m.screen = screenSysop
+		m.sysop_ = sysopState{}
+		m.setWhere("sysop")
+		return m, tea.Batch(m.loadSysopData(), m.loadPeers())
 	case "n":
 		m.screen = screenNodeInfo
 		return m, nil

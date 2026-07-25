@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // frame wraps a screen with a title bar and status line.
@@ -12,25 +14,45 @@ func (m Model) frame(title string, body string, help string) string {
 
 	b.WriteString(m.styles.Title.Render(title))
 	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Render(strings.Repeat("-", minInt(m.width, 78))))
+	b.WriteString(m.styles.Muted.Render(strings.Repeat("-", minInt(m.frameWidth(), 78))))
 	b.WriteString("\n\n")
 	b.WriteString(body)
 	b.WriteString("\n")
 
 	if m.status != "" {
 		b.WriteString("\n")
+		// WRAP the status, never truncate it. These messages carry the remedy
+		// for whatever just failed — "ask the sysop for the post_federated
+		// capability" is the whole point of the [N7] refusal — and clipping
+		// them at the terminal edge throws away the actionable half.
+		style := m.styles.Success
+		prefix := "* "
 		if m.statusErr {
-			b.WriteString(m.styles.Error.Render("! " + sanitize(m.status)))
-		} else {
-			b.WriteString(m.styles.Success.Render("* " + sanitize(m.status)))
+			style, prefix = m.styles.Error, "! "
 		}
+		b.WriteString(style.Width(m.frameWidth()).Render(prefix + sanitize(m.status)))
 		b.WriteString("\n")
 	}
 	if help != "" {
 		b.WriteString("\n")
 		b.WriteString(m.styles.StatusBar.Render(help))
 	}
-	return b.String()
+
+	// Clamp to the terminal width. §5.4 sets 80x24 as the fallback floor, but
+	// people connect from phones and narrow splits, and a line that overflows
+	// wraps into a garbled second line rather than being merely cut off.
+	// MaxWidth is ANSI-aware, so this truncates visible columns without
+	// severing a colour escape.
+	return lipgloss.NewStyle().MaxWidth(m.frameWidth()).Render(b.String())
+}
+
+// frameWidth is the usable width, with a sane floor so a client reporting a
+// nonsense size does not produce a one-column screen.
+func (m Model) frameWidth() int {
+	if m.width < 20 {
+		return 20
+	}
+	return m.width
 }
 
 func minInt(a, b int) int {
@@ -56,10 +78,14 @@ func (m Model) renderMenu() string {
 	items := [][2]string{
 		{"M", "Message areas — read and post"},
 		{"E", "Electronic mail — your private messages"},
+		{"C", "Chat with everyone online"},
 		{"W", "Who else is online"},
 		{"N", "This node's identity"},
-		{"Q", "Quit"},
 	}
+	if m.sysop {
+		items = append(items, [2]string{"S", "Sysop panel"})
+	}
+	items = append(items, [2]string{"Q", "Quit"})
 	for _, it := range items {
 		b.WriteString("  ")
 		b.WriteString(m.styles.Accent.Render("[" + it[0] + "]"))

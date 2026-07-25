@@ -12,8 +12,10 @@ import (
 	"sync"
 
 	"github.com/aghman/meshbbs/internal/bbs"
+	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/aghman/meshbbs/internal/theme"
+	"github.com/aghman/meshbbs/internal/tui"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
 	gossh "golang.org/x/crypto/ssh"
@@ -27,10 +29,12 @@ type Options struct {
 	Bind         string
 	Port         int
 	KeysDir      string
+	FilesDir     string
 	GuestEnabled bool
 	OpenSignup   bool
 	Themes       *theme.Set
 	DefaultTheme string
+	Clock        clock.Clock
 	Logger       *slog.Logger
 }
 
@@ -43,6 +47,7 @@ type Server struct {
 	log      *slog.Logger
 	wish     *ssh.Server
 	presence *Presence
+	chat     *tui.ChatRoom
 }
 
 // sessionKey is the context key under which the auth Decision is stashed.
@@ -67,6 +72,9 @@ func NewServer(svc *bbs.Service, st *store.Store, opts Options) (*Server, error)
 	if opts.DefaultTheme == "" {
 		opts.DefaultTheme = theme.DefaultName
 	}
+	if opts.Clock == nil {
+		opts.Clock = clock.NewReal()
+	}
 
 	s := &Server{
 		opts:     opts,
@@ -75,6 +83,10 @@ func NewServer(svc *bbs.Service, st *store.Store, opts Options) (*Server, error)
 		authn:    NewAuthenticator(st, opts.GuestEnabled, opts.OpenSignup),
 		log:      opts.Logger,
 		presence: NewPresence(),
+		// Node chat is shared by every session on this instance, and bounded:
+		// it is a live conversation, not a message base. Anything worth
+		// keeping belongs in a forum area, where it becomes a signed record.
+		chat: tui.NewChatRoom(200),
 	}
 
 	hostKey, err := ensureHostKey(opts.KeysDir)
@@ -88,6 +100,9 @@ func NewServer(svc *bbs.Service, st *store.Store, opts Options) (*Server, error)
 		wish.WithHostKeyPath(hostKey),
 		ssh.PublicKeyAuth(s.publicKeyHandler),
 		ssh.PasswordAuth(s.passwordHandler),
+		// SFTP is a subsystem, so it bypasses the interactive middleware
+		// entirely — a client running `sftp` never gets a PTY or a TUI.
+		wish.WithSubsystem("sftp", func(sess ssh.Session) { s.sftpHandler(sess) }),
 		wish.WithMiddleware(s.sessionMiddleware()),
 	)
 	if err != nil {
@@ -129,6 +144,10 @@ func (s *Server) Shutdown(ctx context.Context) error { return s.wish.Shutdown(ct
 
 // Presence returns the who's-online tracker.
 func (s *Server) Presence() *Presence { return s.presence }
+
+// Chat returns the shared node chat room, so a telnet listener joins the same
+// conversation rather than a parallel one.
+func (s *Server) Chat() *tui.ChatRoom { return s.chat }
 
 func (s *Server) publicKeyHandler(ctx ssh.Context, key ssh.PublicKey) bool {
 	d := s.authn.PublicKey(ctx, ctx.User(), key)
