@@ -3,11 +3,22 @@ package identity
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/aghman/meshbbs/internal/rng"
 )
+
+// unixOnly skips a test that asserts Unix file permissions. Windows has no
+// equivalent representation, so these checks are meaningless there rather than
+// merely inconvenient.
+func unixOnly(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions are not represented on Windows")
+	}
+}
 
 // randomIDs yields deterministic pseudo-random node IDs for property tests.
 func randomIDs(t *testing.T, n int) []NodeID {
@@ -187,6 +198,10 @@ func TestNodeIDSelfCertifying(t *testing.T) {
 
 func TestKeyRoundTripAndPermissions(t *testing.T) {
 	dir := t.TempDir()
+	// The 0600 assertion below is Unix-specific: Windows does not carry Unix
+	// permission bits, and Go synthesizes a mode for them. checkKeyPerms skips
+	// the check there for the same reason.
+	unixOnly(t)
 	key, err := GenerateNodeKey(rng.TestSecret(42))
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +242,7 @@ func TestSaveRefusesToOverwrite(t *testing.T) {
 }
 
 func TestLoadRejectsLoosePermissions(t *testing.T) {
+	unixOnly(t)
 	if os.Getuid() == 0 {
 		t.Skip("running as root; permission checks are not meaningful")
 	}

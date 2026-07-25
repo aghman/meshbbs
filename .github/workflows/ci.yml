@@ -5,10 +5,13 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  # Every artifact must be cgo-free (design §4, §10). Dropping BLE was what
-  # bought this: no build tags, no cgo variants, one build matrix.
-  CGO_ENABLED: "0"
+# NOTE: CGO_ENABLED=0 is set per-job, not globally.
+#
+# The cgo-free requirement (§4, §10) is about the binaries we ship, and the
+# build job asserts it. Applying it to the test job breaks `go test -race`,
+# because the race detector needs cgo on Linux and Windows — darwin happens to
+# tolerate CGO_ENABLED=0 with -race, which is a good way to have this pass
+# locally on a Mac and fail everywhere else.
 
 jobs:
   test:
@@ -75,6 +78,7 @@ jobs:
 
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
+          CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
@@ -117,13 +121,17 @@ jobs:
 
       # §12.9: the binaries must RUN, not merely compile.
       - name: Initialise and exercise an instance
+        env:
+          CGO_ENABLED: "0"
         run: |
           set -euo pipefail
           go build -o ./meshbbs ./cmd/meshbbs
           D=$(mktemp -d)
 
+          # NOT --sysop-nick sysop: "sysop" is a reserved nick (§5.1), so
+          # nobody can register an account that impersonates the role.
           ./meshbbs --data-dir "$D" init \
-            --display-name ci-node --sysop-nick sysop --development
+            --display-name ci-node --sysop-nick ciadmin --development
 
           ./meshbbs --data-dir "$D" config check
           ./meshbbs --data-dir "$D" id

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -186,6 +187,11 @@ func TestSecretResolution(t *testing.T) {
 	})
 
 	t.Run("file must not be world readable", func(t *testing.T) {
+		// Secret.Resolve skips this check on Windows, which has no Unix
+		// permission bits to inspect.
+		if runtime.GOOS == "windows" {
+			t.Skip("Unix file permissions are not represented on Windows")
+		}
 		if os.Getuid() == 0 {
 			t.Skip("running as root")
 		}
