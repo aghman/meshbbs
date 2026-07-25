@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/store"
@@ -30,6 +31,7 @@ type TelnetOptions struct {
 	Theme     string
 	Chat      *tui.ChatRoom
 	Presence  *Presence
+	Location  *time.Location
 	Logger    *slog.Logger
 }
 
@@ -143,6 +145,7 @@ func (t *TelnetServer) handle(ctx context.Context, conn net.Conn) {
 		Service: t.svc, Store: t.store,
 		Presence: presenceAdapter{t.opts.Presence},
 		Chat:     t.opts.Chat,
+		Location: t.opts.Location,
 		Themes:   t.opts.Themes, ThemeName: t.opts.Theme,
 		// Telnet clients are the legacy ANSI ones, so assume CP437 unless a
 		// user later says otherwise (§5.4).

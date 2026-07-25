@@ -184,7 +184,7 @@ func TestChatDeliversBetweenSessions(t *testing.T) {
 	alice.typeRunes("anyone on 2m tonight?").enter()
 
 	// Bob's view refreshes from the shared room.
-	bob.dispatch(chatUpdatedMsg{lines: room.Lines()})
+	bob.send(chatUpdatedMsg{lines: room.Lines()})
 	bob.contains("alice: anyone on 2m tonight?")
 
 	// Joins are announced.

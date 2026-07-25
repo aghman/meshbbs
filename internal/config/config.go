@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -200,6 +201,9 @@ func (c *Config) Validate() error {
 	if c.SSH.MaxSessions < 1 {
 		problems = append(problems, "ssh.max_sessions must be at least 1")
 	}
+	if _, err := c.Location(); err != nil {
+		problems = append(problems, err.Error())
+	}
 	if c.Telnet.Enabled {
 		if c.Telnet.Port < 1 || c.Telnet.Port > 65535 {
 			problems = append(problems, fmt.Sprintf("telnet.port is %d, want 1-65535", c.Telnet.Port))
@@ -244,6 +248,24 @@ func (c *Config) DatabasePath() (string, error) {
 // KeysPath returns the absolute path to the keys directory.
 func (c *Config) KeysPath() (string, error) {
 	return c.resolveUnder(c.Storage.KeysDir)
+}
+
+// Location resolves node.timezone into a *time.Location.
+//
+// Every timestamp the BBS renders goes through this. Without it, formatting
+// falls back to the host's local zone, which makes the same message read
+// differently depending on where the server happens to run — and makes any
+// test asserting on a rendered time machine-dependent.
+func (c *Config) Location() (*time.Location, error) {
+	name := strings.TrimSpace(c.Node.Timezone)
+	if name == "" || name == "Local" {
+		return time.Local, nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("node.timezone %q is not a known IANA timezone: %w", name, err)
+	}
+	return loc, nil
 }
 
 // FilesPath returns the absolute path to the file area directory.

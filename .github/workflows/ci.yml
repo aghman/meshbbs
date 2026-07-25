@@ -194,9 +194,24 @@ jobs:
         run: |
           go test ./internal/tui/ -count=1
           go test ./internal/tui/ -count=1
+
+      # Rendering must not depend on the host's timezone. The runner is UTC and
+      # a developer laptop usually is not, so without this the same golden
+      # passes in one place and fails in the other — which is exactly how a
+      # timezone leak reached main once already.
+      - name: Golden frames are timezone independent
+        run: |
+          for tz in UTC Asia/Tokyo America/New_York Australia/Eucla; do
+            echo "--- TZ=$tz"
+            TZ=$tz go test ./internal/tui/ -count=1
+          done
+
+      - name: Golden frames are committed
+        run: |
           go test ./internal/tui/ -update
           if ! git diff --quiet -- internal/tui/testdata; then
-            echo "FAIL: golden files changed when regenerated — a screen is nondeterministic"
+            echo "FAIL: golden files changed when regenerated — a screen is nondeterministic,"
+            echo "or a regenerated golden was not committed."
             git diff -- internal/tui/testdata
             exit 1
           fi

@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aghman/meshbbs/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
@@ -435,14 +436,54 @@ func TestBogusWindowSizeIsIgnored(t *testing.T) {
 		t.Fatalf("fixture width is %d, expected 80", before)
 	}
 
-	s.dispatch(tea.WindowSizeMsg{Width: 0, Height: 0})
+	s.send(tea.WindowSizeMsg{Width: 0, Height: 0})
 	if s.model.width != before {
 		t.Fatalf("a 0x0 size was adopted: width is now %d", s.model.width)
 	}
 
 	// A real resize still applies.
-	s.dispatch(tea.WindowSizeMsg{Width: 132, Height: 50})
+	s.send(tea.WindowSizeMsg{Width: 132, Height: 50})
 	if s.model.width != 132 {
 		t.Fatalf("a legitimate resize was ignored: width is %d", s.model.width)
+	}
+}
+
+// Rendering must not depend on the host's timezone.
+//
+// node.timezone decides how timestamps read, so the same message must look the
+// same regardless of where the server runs. Before this was wired, formatting
+// silently fell through to the host's local zone — which made every golden
+// containing a timestamp machine-dependent, and shipped a config key that did
+// nothing.
+func TestRenderedTimesUseTheConfiguredZone(t *testing.T) {
+	f := newFixture(t)
+	f.user(t, "austin", "pw")
+	if _, err := f.svc.Post(f.ctx, "austin", "general", "subject", "body"); err != nil {
+		t.Fatal(err)
+	}
+
+	viewIn := func(loc *time.Location) string {
+		cfg := f.config(IntentAuthenticated, "austin")
+		u, _ := f.store.GetUser(f.ctx, "austin")
+		cfg.User = u
+		cfg.Location = loc
+		s := newSession(t, cfg)
+		s.typeRunes("m").enter()
+		return s.view()
+	}
+
+	utc := viewIn(time.UTC)
+	tokyo := viewIn(time.FixedZone("JST", 9*3600))
+
+	if utc == tokyo {
+		t.Fatal("the configured timezone had no effect on rendered times")
+	}
+	// The fixture clock is unix 1700000000 = 2023-11-14 22:13 UTC, which is
+	// 07:13 the next day in JST.
+	if !strings.Contains(utc, "2023-11-14 22:13") {
+		t.Fatalf("UTC rendering is wrong:\n%s", utc)
+	}
+	if !strings.Contains(tokyo, "2023-11-15 07:13") {
+		t.Fatalf("JST rendering is wrong:\n%s", tokyo)
 	}
 }

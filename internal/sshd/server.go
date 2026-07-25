@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/clock"
@@ -35,6 +36,7 @@ type Options struct {
 	Themes       *theme.Set
 	DefaultTheme string
 	Clock        clock.Clock
+	Location     *time.Location
 	Logger       *slog.Logger
 }
 
@@ -74,6 +76,9 @@ func NewServer(svc *bbs.Service, st *store.Store, opts Options) (*Server, error)
 	}
 	if opts.Clock == nil {
 		opts.Clock = clock.NewReal()
+	}
+	if opts.Location == nil {
+		opts.Location = time.Local
 	}
 
 	s := &Server{

@@ -70,6 +70,7 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 		Presence:  presenceAdapter{s.presence},
 		Chat:      s.chat,
 		Clock:     s.opts.Clock,
+		Location:  s.opts.Location,
 		Themes:    s.opts.Themes,
 		ThemeName: s.opts.DefaultTheme,
 		Encoding:  encoding,

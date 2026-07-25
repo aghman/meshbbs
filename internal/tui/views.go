@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -150,7 +149,7 @@ func (m Model) renderAreaRead() string {
 		b.WriteString("\n")
 		b.WriteString(m.styles.Muted.Render(fmt.Sprintf("from %s · %s · message %d of %d",
 			sanitizeLine(p.Author),
-			time.Unix(int64(p.TS), 0).Format("2006-01-02 15:04"),
+			m.at(int64(p.TS), "2006-01-02 15:04"),
 			m.postIdx+1, len(m.posts))))
 		b.WriteString("\n\n")
 		b.WriteString(m.styles.Body.Render(sanitize(p.Body)))
@@ -214,7 +213,7 @@ func (m Model) renderMailList() string {
 		line := fmt.Sprintf("%s %-14s %-34s %s",
 			flag, truncate(sanitizeLine(d.Sender), 14),
 			truncate(subject, 34),
-			time.Unix(d.SentAt, 0).Format("01-02 15:04"))
+			m.at(d.SentAt, "01-02 15:04"))
 		if i == m.mailIdx {
 			b.WriteString(m.styles.Selected.Render("> " + line))
 		} else {
@@ -234,7 +233,7 @@ func (m Model) renderMailRead() string {
 	b.WriteString(m.styles.Heading.Render(sanitizeLine(m.mailSubject)))
 	b.WriteString("\n")
 	b.WriteString(m.styles.Muted.Render("from " + sanitizeLine(d.Sender) + " · " +
-		time.Unix(d.SentAt, 0).Format("2006-01-02 15:04")))
+		m.at(d.SentAt, "2006-01-02 15:04")))
 	b.WriteString("\n\n")
 	b.WriteString(m.styles.Body.Render(sanitize(m.mailBody)))
 	return m.frame("Message", b.String(), "r reply · any other key back")

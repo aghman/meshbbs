@@ -354,7 +354,7 @@ func (m Model) renderSysopStatus() string {
 		"Mesh federation is not built yet (Phase 3). When it is, this panel gains " +
 			"the airtime budget, the observed flood multiplier, and peer high-water marks."))
 	b.WriteString("\n\n")
-	b.WriteString(m.styles.Muted.Render("  local time " + m.clockNow().Format(time.RFC1123)))
+	b.WriteString(m.styles.Muted.Render("  local time " + m.clockNow().In(m.location()).Format(time.RFC1123)))
 	return b.String()
 }
 

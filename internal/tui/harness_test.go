@@ -23,6 +23,14 @@ import (
 
 var update = flag.Bool("update", false, "rewrite golden files")
 
+// commandTimeout bounds how long the harness waits for a command.
+//
+// It must comfortably exceed the slowest legitimate command, which is an
+// Argon2id verification — around a second under the race detector on CI
+// hardware. Too tight and slow-but-valid commands get silently skipped, and
+// tests then pass or fail depending on machine speed.
+const commandTimeout = 10 * time.Second
+
 // The Model is a pure state machine over Update/View, so it can be driven
 // directly without a PTY or a running program. That is deliberate: every bug
 // found during Phase 1 hand-testing (concurrent reload, field navigation,
@@ -34,11 +42,28 @@ var update = flag.Bool("update", false, "rewrite golden files")
 type session struct {
 	t     *testing.T
 	model Model
+	// budget bounds how many messages one interaction may cascade into.
+	//
+	// The pump runs "until quiescent", but some commands are deliberately
+	// self-perpetuating: the chat poller re-arms itself on every redraw, so it
+	// is never quiescent by design. Without a budget the harness spins on it
+	// forever. Real Bubble Tea has no such problem — it is a redraw loop, not
+	// a recursion.
+	budget int
 }
+
+// maxCascade is how many messages a single keypress may produce before the
+// harness stops following the chain.
+//
+// Kept small on purpose: the chat poller re-arms itself, so this is really a
+// bound on how many times the harness rides that loop before moving on. Large
+// values just make the suite slow.
+const maxCascade = 20
 
 func newSession(t *testing.T, cfg Config) *session {
 	t.Helper()
 	s := &session{t: t, model: New(cfg)}
+	s.budget = maxCascade
 	s.run(s.model.Init())
 	return s
 }
@@ -51,7 +76,7 @@ func newSession(t *testing.T, cfg Config) *session {
 // is what makes the post-then-reload ordering testable.
 func (s *session) run(cmd tea.Cmd) {
 	s.t.Helper()
-	if cmd == nil {
+	if cmd == nil || s.budget <= 0 {
 		return
 	}
 	for _, c := range flatten(cmd) {
@@ -78,8 +103,22 @@ func (s *session) run(cmd tea.Cmd) {
 	}
 }
 
+// send injects a message from outside, as another session's activity would.
+// It resets the cascade budget, since it represents a fresh external event
+// rather than a continuation of the last one.
+func (s *session) send(msg tea.Msg) *session {
+	s.t.Helper()
+	s.budget = maxCascade
+	s.dispatch(msg)
+	return s
+}
+
 func (s *session) dispatch(msg tea.Msg) {
 	s.t.Helper()
+	if s.budget <= 0 {
+		return
+	}
+	s.budget--
 	next, cmd := s.model.Update(msg)
 	s.model = next.(Model)
 	s.run(cmd)
@@ -130,7 +169,7 @@ func runWithTimeout(cmd tea.Cmd) (tea.Msg, bool) {
 	select {
 	case msg := <-done:
 		return msg, true
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(commandTimeout):
 		return nil, false
 	}
 }
@@ -157,9 +196,11 @@ func asCommandSlice(msg tea.Msg) ([]tea.Cmd, bool) {
 	return out, true
 }
 
-// key sends a single keypress.
+// key sends a single keypress, resetting the cascade budget: each user action
+// gets a fresh allowance.
 func (s *session) key(k tea.KeyMsg) *session {
 	s.t.Helper()
+	s.budget = maxCascade
 	s.dispatch(k)
 	return s
 }
@@ -315,6 +356,14 @@ func (f *fixture) config(intent Intent, nick string) Config {
 		Encoding: term.EncodingUTF8, Width: 80, Height: 24,
 		SessionID: "test-session", Remote: "127.0.0.1:1234",
 		Intent: intent, Nick: nick, Ctx: f.ctx, Clock: f.clock,
+		// Pin the zone: without it, rendered timestamps follow the host's
+		// local time and every golden containing one becomes machine-
+		// dependent. CI runs UTC; a developer laptop usually does not.
+		Location: time.UTC,
+		// The chat watcher parks until someone speaks. That is right in a real
+		// program and a deadlock here, so tests inject chat updates directly
+		// with send() instead.
+		DisableChatPolling: true,
 	}
 }
 

@@ -88,8 +88,14 @@ type Config struct {
 	AuthNote  string
 	Chat      *ChatRoom
 	Clock     clock.Clock
-	Logger    *slog.Logger
-	Ctx       context.Context
+	Location  *time.Location
+	// DisableChatPolling stops a session from starting the background chat
+	// watcher. It exists for tests: the watcher parks until someone speaks,
+	// which is correct in a real program (commands run in goroutines) and a
+	// deadlock in a harness that drives Update synchronously.
+	DisableChatPolling bool
+	Logger             *slog.Logger
+	Ctx                context.Context
 }
 
 // Model is the session state.
@@ -361,6 +367,23 @@ func (m Model) clockNow() time.Time {
 		return m.cfg.Clock.Now()
 	}
 	return clock.NewReal().Now()
+}
+
+// location is the timezone every rendered timestamp is formatted in.
+//
+// It comes from node.timezone rather than the host's local zone, so the same
+// message reads the same regardless of where the server runs — and so a test
+// asserting on a rendered time is not machine-dependent.
+func (m Model) location() *time.Location {
+	if m.cfg.Location != nil {
+		return m.cfg.Location
+	}
+	return time.Local
+}
+
+// at formats a unix timestamp in the BBS's configured timezone.
+func (m Model) at(unix int64, layout string) string {
+	return time.Unix(unix, 0).In(m.location()).Format(layout)
 }
 
 // sanitize prepares untrusted text for display (§5.4).

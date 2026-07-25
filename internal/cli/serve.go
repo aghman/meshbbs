@@ -84,6 +84,11 @@ Serves SSH on the configured port. Users connect with:
 					e.cfg.Theme.Default, themes.Names())
 			}
 
+			loc, err := e.cfg.Location()
+			if err != nil {
+				return err
+			}
+
 			keysDir, err := e.keysDir()
 			if err != nil {
 				return err
@@ -106,6 +111,7 @@ Serves SSH on the configured port. Users connect with:
 				Themes:       themes,
 				DefaultTheme: e.cfg.Theme.Default,
 				Clock:        e.clock,
+				Location:     loc,
 				Logger:       log,
 			})
 			if err != nil {
@@ -135,6 +141,7 @@ Serves SSH on the configured port. Users connect with:
 					Theme:     e.cfg.Theme.Default,
 					Chat:      srv.Chat(),
 					Presence:  srv.Presence(),
+					Location:  loc,
 					Logger:    log,
 				})
 				fmt.Fprintf(out, "  telnet    %s:%d (PLAINTEXT, guest-only)\n\n",

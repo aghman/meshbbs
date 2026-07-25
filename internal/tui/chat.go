@@ -115,17 +115,26 @@ func (m Model) refreshChat() tea.Cmd {
 	}
 }
 
-// pollChat blocks until someone speaks, then asks for a redraw.
+// pollChat waits for someone to speak, then asks for a redraw.
 //
-// A blocking read rather than a ticker: an idle chat should cost nothing, and
-// a message should appear immediately rather than on the next tick.
+// It waits on a channel rather than ticking, so an idle chat costs nothing and
+// a message appears immediately. The session context is the other wake-up:
+// without it the goroutine would outlive a session that ended without
+// unwatching.
+//
+// Note there is deliberately no timer here. A timeout would need a wall clock,
+// and §12.1 forbids reaching for one in domain code — the determinism checker
+// catches it, as it did when this was first written with time.After.
 func (m Model) pollChat() tea.Cmd {
-	if m.cfg.Chat == nil {
+	if m.cfg.Chat == nil || m.cfg.DisableChatPolling {
 		return nil
 	}
 	ch := m.cfg.Chat.Watch(m.cfg.SessionID)
 	return func() tea.Msg {
-		<-ch
+		select {
+		case <-ch:
+		case <-m.ctx.Done():
+		}
 		return chatUpdatedMsg{lines: m.cfg.Chat.Lines()}
 	}
 }
@@ -192,7 +201,7 @@ func (m Model) renderChat() string {
 		b.WriteString("\n")
 	}
 	for _, l := range lines {
-		ts := l.At.Format("15:04")
+		ts := l.At.In(m.location()).Format("15:04")
 		if l.System {
 			b.WriteString(m.styles.Muted.Render(fmt.Sprintf("  %s  * %s", ts, sanitizeLine(l.Text))))
 		} else {
