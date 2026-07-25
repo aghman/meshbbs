@@ -8,8 +8,10 @@ Each BBS instance has its own Meshtastic node attached (USB serial or TCP) and s
 instances over a dedicated mesh channel. A BBS with no internet connection at all is a full
 participant in the network.
 
-Instances are addressed FidoNet-style — `42:100/7` — and a gateway can bridge selected echo areas
-to existing FTN message networks.
+Each instance's address is derived from its own identity key — self-certifying, with no registry
+and no address authority — and sysops give peers short local names (`austin@pnw`) the way you'd
+name hosts in an SSH config. A gateway can bridge selected echo areas to existing FidoNet-style
+message networks.
 
 **Status:** pre-implementation. Design decisions resolved; Phase 0 not yet started.
 

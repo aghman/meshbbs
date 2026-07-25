@@ -2,11 +2,12 @@
 
 *A modern, cross-platform BBS in Go with SSH access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
 
-**Status:** Draft v0.3 — design decisions resolved; accounts and configuration specified
+**Status:** Draft v0.4 — addressing reversed to key-derived IDs
 **Date:** 2026-07-24
 **All 15 open questions from v0.1 are answered. Decisions are recorded in §14 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §13.**
 
-*v0.3 adds account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
+*v0.3 added account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
+*v0.4 **reverses `[D9]`**: node addressing moves from FidoNet-style numeric `zone:net/node` back to self-certifying key-derived IDs with a local petname layer (§6.1). Knock-on changes in §6.2, §6.4, §7.3, §7.7, §8.4, §10, §11, Appendix B; open questions `N1`/`N2`/`N4` re-scoped in §13.*
 
 ---
 
@@ -51,7 +52,7 @@ With the network sized at up to ~50 instances `[D2]`, the honest per-node budget
 
 1. **Forums and DMs over mesh are viable, but tight — not comfortable.** At 50 instances sharing a 5% mesh ceiling, each node originates ~10 full packets/day ≈ 2.5 KB raw, ≈ 8.8 KB of text after dictionary compression, ≈ 25 short posts/day per node, ~1,200/day network-wide. Adequate for a hobby network; not adequate for anything careless. **Batching (§7.3) and dictionary compression (§7.4) are load-bearing requirements, not optimizations.** Fixed per-packet and per-record overhead is the enemy.
 2. **File transfer over mesh is not viable and is not implemented at all.** A single 1 MB file at 5% mesh LongFast takes over a week of channel time. Mesh replicates *file catalogs* only; bytes move over IP or sneakernet. This is a hard block, not a discouraged option. `[D8]`
-3. **Every byte on the wire must be justified.** Binary encoding, truncated hashes, derived (not transmitted) record IDs, packed numeric addresses, a pre-shared compression dictionary, and batching — not JSON, not UUIDs, not per-post packets.
+3. **Every byte on the wire must be justified.** Binary encoding, truncated hashes, derived (not transmitted) record IDs, per-bundle origin tables, a pre-shared compression dictionary, and batching — not JSON, not UUIDs, not per-post packets.
 
 There is also a social constraint that matters as much as the technical one: **a shared Meshtastic channel is a commons.** If a BBS network parks itself on a community mesh and eats 30% of airtime, it will be (rightly) unwelcome. The airtime governor (§7.6) is a first-class feature, not a nice-to-have.
 
@@ -67,7 +68,7 @@ There is also a social constraint that matters as much as the technical one: **a
 - Federation of forums and DMs between independent BBS instances
 - Meshtastic as a *first-class but not exclusive* federation transport
 - Off-grid operation: a BBS with no internet at all is a full participant
-- **FidoNet/FTN-compatible addressing and an FTN gateway** — numeric `zone:net/node` addresses `[D9]` and echomail/netmail bridging `[D14]` (§7.7)
+- **Self-certifying key-derived node IDs** with a local petname layer `[D9]` (§6.1), and an **FTN gateway** bridging echomail/netmail to existing FidoNet-style networks `[D14]` (§7.7)
 - Sysop-friendly: one config file, sane defaults, no external database or runtime
 
 ### Non-goals
@@ -236,29 +237,76 @@ BBS aesthetics mean **CP437 + ANSI art**, but modern terminals are UTF-8. Plan:
 
 ### 6.1 Identity and addressing `[D9]`
 
-Three distinct concepts. Conflating the first two is a classic mistake; conflating the second and third is the specific mistake that numeric addressing invites.
+**Reversed in v0.4.** v0.2/v0.3 specified FidoNet-style numeric `zone:net/node` addresses. That is withdrawn in favour of **self-certifying key-derived node IDs**, with human-friendliness supplied by a local petname layer rather than by the address itself. Rationale and the trade being accepted are in §6.1.4; `[D9]` in §14 records the reversal.
 
-**1. Node key = cryptographic authority.** Ed25519 keypair generated at first run. This is what signs records. It is never a display string and never appears in the UI except as a verification fingerprint.
+#### 6.1.1 Node ID = the key
 
-**2. Node address = human-friendly identity.** A **FidoNet-style 3D/4D numeric address**: `zone:net/node`, optionally `.point`. This is what users type, what appears in the UI, and what travels in record headers.
+There is no separate address. **The node ID *is* the node's identity key**, truncated:
 
 ```
-42:100/7        zone 42, net 100, node 7
-42:100/7.1      a point (a satellite/personal instance hanging off node 7)
+node_id = BLAKE3(ed25519_pubkey)[:8]          // 8 bytes / 64 bits
 ```
 
-Rationale for numeric over key-derived: the user requirement is that addressing be *easy to understand and easy to type*. `42:100/7` is memorable and speakable over voice radio; `K7QM4X2P` is neither. It also lines up exactly with the FTN gateway `[D14]`, which uses the same address space — one addressing scheme covers both networks instead of a translation table. And packed, it is *cheaper on the wire* than the 8-byte key prefix v0.1 proposed (see below).
+The property this buys, and the reason it's the right call for a mesh: **the ID is self-certifying.** Anyone holding a record can hash the claimed pubkey and check it against the ID in the header. There is no binding to maintain, no registry to consult, no authority to run, and — critically — **no way to squat an identity you don't hold the key for.** An entire category of machinery from v0.3 evaporates:
 
-**Binding address → key.** This is the piece key-derived IDs got for free and we now have to build. A `NODE` record carries `{address, node_pubkey, display_name, sysop_contact, capabilities}`, self-signed by the node key. Rules:
+| v0.3 needed | v0.4 |
+|---|---|
+| First-seen address→key binding | *gone* — the binding is arithmetic |
+| Anti-squatting conflict detection and alerting | *gone* — nothing to squat |
+| Quarantine until a node's `NODE` record arrives | *reduced* — only the pubkey is needed, and it self-verifies |
+| An address registry / coordinator (`N1`) | *gone* |
+| Zone/net numbering scheme (`N4`) | *gone* |
 
-- A node's records are only accepted once its `NODE` record is held (otherwise: quarantine, not drop — the `NODE` record may simply be a few minutes behind on a lossy mesh).
-- **First-seen binding wins.** A second `NODE` record claiming an already-bound address with a different key is *rejected and logged as an alert*, never silently accepted. This is the anti-squatting rule and it must be in the first implementation, not retrofitted.
-- Address changes are a signed `NODE` record superseding the previous one **under the same key**. Key rotation is a separate, deliberately awkward operation requiring sysop-to-sysop confirmation (see §13 `N2`).
-- The full roster is ~50 nodes × ~100 B = **~5 KB**, trivially replicated and cheap to backfill.
+**Why 8 bytes and not 4.** A shorter ID would save wire bytes, and against *accidental* collision 4 bytes would be fine (50 nodes → ~3 × 10⁻⁷). But the threat is adversarial: an attacker grinds keypairs until one hashes to a target node's ID, then presents forged records to peers that haven't yet learned the real pubkey, or slips into a sysop's allowlist. 32 bits is grindable in minutes on a GPU; 48 bits is hours-to-days. **64 bits (2⁶⁴ ≈ 1.8 × 10¹⁹) puts it out of reach**, and §6.1.3 shows the extra bytes cost nothing in practice.
 
-**Wire encoding.** Packed into **4 bytes**: `zone` u8, `net` u12, `node` u12. That covers 255 zones, 4095 nets, 4095 nodes per net — ample for a 50-instance network with room for growth, and 4 bytes cheaper per record than a truncated key. Addresses outside that range (which real FidoNet addresses often are — nets and nodes go to 65535) are **gateway-only**: they appear in the *body* of gateway-originated records as full 4×u16, never in the mesh record header. `[D14]`
+#### 6.1.2 The `NODE` record still exists, for a different job
 
-**3. User identity = a person.** An Ed25519 keypair, generated server-side at signup (with an option for the user to supply their own). A globally-addressable user is `nick@zone:net/node` — e.g. `austin@42:100/7`. The pubkey is what matters for DM encryption; the nick is a display convenience and *is not globally unique*.
+Not for binding — for **key distribution and metadata**. A `NODE` record carries `{node_pubkey, display_name, sysop_contact, capabilities}`, self-signed. Receivers verify it by hashing the pubkey and confirming it matches the `origin` ID, then verifying the signature. It is entirely self-validating; there is no trusted-first-sight rule and no conflict case.
+
+- Records from an unknown origin are **quarantined pending the `NODE` record** (which may be minutes behind on a lossy mesh), then verified retroactively.
+- Roster size: ~50 nodes × ~100 B = **~5 KB**, trivially replicated, cheap to backfill, and safe to serve to anyone since it's all public keys.
+- `NODE` records are **idempotent and replayable** — any node can rebroadcast another's `NODE` record without trust implications, which makes bootstrapping a new instance genuinely easy: ask any peer for the roster.
+
+#### 6.1.3 Wire encoding — hoist the origin, and it gets *cheaper*
+
+The naive concern is that 8-byte IDs cost twice the 4-byte packed address they replace. They don't, because **`origin` hoists out of the record and into a per-bundle origin table** — the same trick §6.2 already applies to `area` and the base timestamp:
+
+```
+Bundle header:  … | origin_count u8 | origin_id[0] (8B) | origin_id[1] (8B) | …
+Record:         origin_idx u8 | seq | ts_delta | type | …
+```
+
+Bundles are usually single-origin (a node batching its own posts), so the 8-byte ID is paid **once per bundle** and each record carries a 1-byte index. Relayed multi-origin bundles list each distinct origin once.
+
+| Records in bundle | v0.3 numeric (4 B/record) | v0.4 key-derived (table + 1 B/record) | Δ |
+|---:|---:|---:|---:|
+| 1 | 95 B | 101 B | +6 |
+| 2 | 184 B | 187 B | +3 |
+| **3** | **273 B** | **273 B** | **0** |
+| 5 | 451 B | 445 B | −6 |
+| 10 | 896 B | 875 B | −21 |
+| 20 | 1786 B | 1735 B | −51 |
+
+(Per-bundle overhead excluding bodies: headers + `seq`/`ts`/`type` + `parent` + signature.)
+
+**Break-even is 3 records, and §7.3 mandates 15–30 minute batching precisely so bundles are bigger than that.** In the common case the reversal *saves* wire bytes. It costs 6 bytes only on a single-record bundle — which, per §7.2, is the K=1 fast path used for urgent DMs, where 6 bytes is noise.
+
+#### 6.1.4 The human problem, and the petname layer
+
+This is the real cost of the reversal and it deserves a straight answer rather than a hand-wave. `K7QM4X2PB9TFR` is not memorable and not speakable over voice radio. `42:100/7` was. **Key-derived IDs are strictly worse as things humans type**, and the design has to make up for it somewhere.
+
+This is Zooko's triangle: identifiers can be *globally unique*, *human-meaningful*, and *decentralized* — pick two. Numeric addressing chose unique + human-meaningful and paid with a registry. Key-derived chooses unique + decentralized. The missing leg is supplied by **petnames**, and they have to be a real feature, not an afterthought:
+
+- **Display form.** Crockford base32 (no `I`, `L`, `O`, `U`, so no ambiguity and no accidental profanity): 8 bytes → 13 characters, shown grouped as `K7QM-4X2P-B9TFR`. Security-relevant surfaces (allowlist confirmation, fingerprint comparison) always show all 13. Everywhere else shows the first 8 characters, git-short-hash style, expanding on collision.
+- **Self-declared display name.** Each node publishes one in its `NODE` record (`pnw-bbs`, `Fog City`). **Not unique, not authoritative, never used for routing** — purely a label. The UI always renders it alongside the short ID so a spoofed name is visibly attached to the wrong ID.
+- **Local aliases are the everyday surface.** Each BBS keeps its own alias table, exactly like `~/.ssh/config` `Host` entries or `/etc/hosts`. The sysop (and optionally each user) maps `pnw` → `K7QM4X2PB9TFR`. Users then type `austin@pnw`, never the ID. Aliases are **local**, so two BBSes may disagree about what `pnw` means and neither is wrong — which is exactly why no registry is needed.
+- **Alias suggestions propagate, bindings don't.** A `NODE` record's display name is a *suggestion* the local sysop may accept as an alias with one keystroke. Nothing auto-binds. This keeps the convenience of names without reintroducing a namespace to fight over.
+
+Honest summary of the trade: **routing and trust become simpler and safer; typing an unfamiliar node ID becomes worse, and the petname table is what you're relying on to hide that.** If the alias UX is weak, this decision will feel bad in daily use. §13 `N1` and `N4` are re-scoped accordingly.
+
+#### 6.1.5 User identity
+
+An Ed25519 keypair, generated server-side at signup (with an option for the user to supply their own). A globally-addressable user is `nick@NODEID` — e.g. `austin@K7QM4X2PB9TFR`, or `austin@pnw` through a local alias. The pubkey is what matters for DM encryption; the nick is a display convenience and *is not globally unique*.
 
 ### 6.2 The record log — the heart of federation
 
@@ -267,7 +315,7 @@ Everything replicable is an **immutable, signed record** in a single append-only
 ```
 Record {
   id        [16]byte   // BLAKE3(canonical_body)[:16] — DERIVED, NOT TRANSMITTED
-  origin    [4]byte    // packed zone:net/node of the authoring instance
+  origin    [8]byte    // BLAKE3(node_pubkey)[:8] — HOISTED to a per-bundle origin table
   seq       varint     // per-origin monotonic sequence (~2B typical)
   ts        varint     // delta from the bundle's base timestamp (~2B typical)
   type      uint8      // POST, DM, PROFILE, NODE, AREA, FILE, TOMBSTONE, VOTE, DOOR_EVENT
@@ -282,10 +330,10 @@ Design notes:
 
 - **The `id` is never transmitted.** It is `BLAKE3(canonical_body)[:16]`, and the receiver recomputes it from the fields it already received. v0.1 put it on the wire; that was 16 wasted bytes, **7% of a mesh packet, per record.** Content addressing still gives free dedup — the mesh floods packets and the same record arrives via multiple paths — the ID just doesn't need to be sent to do that.
 - **Truncated to 16 bytes** where it *is* transmitted (`parent`). A full 32-byte BLAKE3 would cost 7% of a packet per reference; 128 bits is ample collision resistance at this scale. `parent` is flag-gated so top-level posts don't pay for it.
-- **`area` and the base `ts` hoist to the bundle header.** Bundles are per-area by construction, so the 4-byte area tag is paid once per bundle rather than once per record, and timestamps become small deltas.
+- **`origin`, `area`, and the base `ts` all hoist to the bundle header.** Bundles are per-area and usually single-origin, so the 4-byte area tag and the 8-byte origin ID are each paid once per bundle; records carry a 1-byte origin index and a small timestamp delta. This is what makes 8-byte self-certifying IDs cheaper than 4-byte numeric addresses at any bundle size ≥ 3 (§6.1.3).
 - **`(origin, seq)` pairs make reconciliation a version-vector problem**, which is the simplest correct approach. See §7.3.
 - **Immutable + tombstones** means forums have *no merge conflicts at all*. An edit is a new record with a `supersedes` pointer; a delete is a signed tombstone. Whether a BBS honors a *remote* delete is local sysop policy — see below.
-- **The node signs, not the user, for forum posts.** `[D5]` A 64-byte Ed25519 signature is 27% of a mesh packet, so dual-signing every post is unaffordable. Node-signing means "instance 42:100/7 vouches that user `austin` posted this," which matches the FidoNet trust model — you trust the sysop, and the sysop is accountable. **DMs are user-signed** (§8.2), where non-repudiation actually matters and volume is lower.
+- **The node signs, not the user, for forum posts.** `[D5]` A 64-byte Ed25519 signature is 27% of a mesh packet, so dual-signing every post is unaffordable. Node-signing means "the instance holding key `K7QM4X2P…` vouches that user `austin` posted this," which matches the FidoNet trust model — you trust the sysop, and the sysop is accountable. **DMs are user-signed** (§8.2), where non-repudiation actually matters and volume is lower.
 
 ### 6.3 Forums
 
@@ -297,9 +345,9 @@ Design notes:
 
 ### 6.4 Direct messages
 
-- Addressed to `nick@zone:net/node`. Routed by node address.
+- Addressed to `nick@NODEID` (or `nick@alias` locally, §6.1.4). Routed by node ID.
 - **End-to-end encrypted, user-signed** (§8.2). Intermediate BBSes and everyone else on the mesh channel store and forward opaque bytes.
-- **Recipient addressing is in the clear.** `[D7]` v0.1 proposed routing on `BLAKE3(recipient_pubkey)[:8]` to hide the recipient from intermediate sysops. Since metadata privacy is explicitly not a requirement, we drop it — and get real benefits: intermediate nodes can bounce undeliverable mail immediately instead of holding it blind, sysops can rate-limit and spam-filter per recipient, and the address is 4 bytes instead of 8.
+- **Recipient addressing is in the clear.** `[D7]` v0.1 proposed routing on an opaque `BLAKE3(recipient_pubkey)[:8]` tag to hide the recipient from intermediate sysops. Since metadata privacy is explicitly not a requirement, we drop the indirection and route on the destination node ID plus a cleartext nick — so intermediate nodes can bounce undeliverable mail immediately instead of holding it blind, and sysops can rate-limit and spam-filter per recipient.
 - Store-and-forward: if the destination node isn't reachable, hold and retry with exponential backoff, with a TTL (default 7 days) after which we return a bounce to the sender.
 - DMs sit above forum posts in the governor's priority order (§7.6) — they are the one class we keep transmitting under backpressure.
 
@@ -321,7 +369,7 @@ Design notes:
 
 #### The property that makes this simple: nicks are local
 
-Per §6.1, a nick is not globally unique; `austin@42:100/7` and `austin@42:100/3` are different people. **Registration therefore needs no network coordination whatsoever** — no name reservation, no distributed lock, no waiting for a mesh round-trip that costs minutes. A brand-new instance with no radio attached and no peers can create accounts immediately. This is worth stating explicitly because the obvious alternative (globally unique nicks) would make signup depend on a link with multi-minute latency and no delivery guarantee, which would be miserable.
+Per §6.1, a nick is not globally unique; `austin@K7QM4X2PB9TFR` and `austin@M2X9F0QLD4H7A` are different people. **Registration therefore needs no network coordination whatsoever** — no name reservation, no distributed lock, no waiting for a mesh round-trip that costs minutes. A brand-new instance with no radio attached and no peers can create accounts immediately. This is worth stating explicitly because the obvious alternative (globally unique nicks) would make signup depend on a link with multi-minute latency and no delivery guarantee, which would be miserable.
 
 Uniqueness is enforced case-insensitively within the instance. Nick rules: 2–16 characters, `[A-Za-z0-9_-]`, must start with a letter, no leading/trailing separators, not in the reserved list (§5.1). Display names are separate and may be richer.
 
@@ -470,7 +518,7 @@ This is an LT code with a small-K-tuned distribution and a systematic prefix. Wr
 
 ### 7.3 L3 — replication and anti-entropy
 
-**Version vectors.** For each area, a node tracks `{origin_node → highest_contiguous_seq}`: 4 bytes of packed address + ~2 bytes of varint seq = **6 bytes per known origin per area** (down from 10 in v0.1, thanks to numeric addressing). At 50 instances `[D2]` that is **300 bytes per area** — two mesh packets — and across 10 federated areas, 3 KB.
+**Version vectors.** For each area, a node tracks `{origin_node → highest_contiguous_seq}`: 8 bytes of node ID + ~2 bytes of varint seq = **10 bytes per known origin per area**. At 50 instances `[D2]` that is **500 bytes per area** — three mesh packets — and across 10 federated areas, 5 KB. (Key-derived IDs cost 4 bytes per entry more than v0.3's packed addresses here; unlike the record header, a version vector has no repeated-origin structure to hoist. It changes nothing, because full vectors never go on the mesh routinely — see the digest design below — but it is the one place the reversal genuinely costs bytes.)
 
 For 50 peers, version vectors remain the right answer. Merkle trees, IBLTs, and range-based reconciliation pay off at thousands of peers with heavily diverged state; at 50 they add machinery without reducing bytes. **But 3 KB of full vectors cannot go on the mesh routinely**, which drives the digest design below.
 
@@ -526,7 +574,7 @@ Restating the §1 conclusion as an enforced rule, because it will be tempting to
 - The UI shows network-wide file listings with a "held by" indicator.
 - **The mesh `Link` implementation rejects file payloads.** This is a type-level constraint, not a config option: `FILE_DATA` is not in the set of record types the mesh link will serialize. There is no sysop flag to turn it on and no size threshold below which it's allowed.
 - Fetch paths: (1) direct IP from a holding BBS, (2) queued for the next sneakernet exchange. That's it.
-- Be honest in the UI: "held by 42:100/3 — no IP route from here; queued for next exchange" is a feature, not a failure.
+- Be honest in the UI: "held by `pnw` (`K7QM4X2P…`) — no IP route from here; queued for next exchange" is a feature, not a failure.
 
 ### 7.6 The airtime governor
 
@@ -545,7 +593,9 @@ The most important piece of civic infrastructure in the system, and the 50-insta
 
 ### 7.7 The FTN gateway `[D14]`
 
-FidoNet/FTN compatibility moves from non-goal to goal. It is a strong fit: `[D9]` already put us in FTN's address space, the record log maps cleanly onto echomail, and there is a live FTN scene to connect to. It is also the single most dangerous feature in the document for the airtime budget, so the constraints come first.
+FidoNet/FTN compatibility moves from non-goal to goal. The record log maps cleanly onto echomail and there is a live FTN scene to connect to. It is also the single most dangerous feature in the document for the airtime budget, so the constraints come first.
+
+**The `[D9]` reversal costs this feature something, and it should be stated plainly.** v0.3's numeric addressing shared an address space with FTN, so the mapping was the identity function. With key-derived IDs it is not: the gateway must maintain an **explicit two-way mapping table** between FTN `zone:net/node[.point]` addresses and MeshBBS node IDs. In exchange, the gateway's own FTN address becomes honestly what it is — an address assigned by a FidoNet coordinator to *the gateway*, not a claim about the whole MeshBBS network's numbering. That is arguably the more truthful arrangement: we are a foreign network with a gateway into FTN, not a pretend FTN zone. The mapping table is a Phase 6 deliverable and lives in the database with the rest of the peer state.
 
 **Constraints, non-negotiable:**
 
@@ -562,12 +612,12 @@ FidoNet/FTN compatibility moves from non-goal to goal. It is a strong fit: `[D9]
 | `MSGID` / `REPLY` kludges | record `id` / `parent` |
 | `SEEN-BY` / `PATH` lines | dedup is by content-addressed `id`; SEEN-BY is generated outbound, consumed inbound for loop prevention |
 | Echo tag | area name (and its 4-byte `area` tag) |
-| `zone:net/node.point` | node address, full 4×u16 in the record body (§6.1) |
+| `zone:net/node.point` | **explicit mapping table at the gateway** — see below |
 
 **The gateway is a trust boundary, and this is the part to get right.** FTN echomail is plaintext, unsigned, and carries no cryptographic origin. Records entering from FTN cannot be signed by their true author, so:
 
 - The **gateway node signs them with its own key**, and they are marked `via_ftn` with the original FTN origin address and `MSGID` preserved in the body.
-- The UI must display them as gateway-attested, not author-attested: "from `joe@1:234/5` via gateway 42:100/1". Users need to know the trust chain is different.
+- The UI must display them as gateway-attested, not author-attested: "from `joe@1:234/5` via gateway `fido-gw` (`M2X9F0QL…`)". Users need to know the trust chain is different.
 - Loop prevention needs both mechanisms: content-addressed dedup handles the mesh side, `SEEN-BY`/`PATH` handles the FTN side. A message that round-trips FTN → mesh → FTN must not re-enter as new. Test this explicitly in the harness with a deliberately cyclic topology.
 - Outbound, only areas the sysop has explicitly marked as FTN-exportable go out, and node-signed provenance is necessarily lost on the way — flag it in the export config so nobody is surprised.
 
@@ -584,7 +634,7 @@ The mesh channel PSK is shared by every BBS on the network (and Meshtastic's cha
 - Everything is **signed**, so content can't be forged or tampered with in transit.
 - Forum posts are **public by definition** — no confidentiality expectation, and the UI should say so.
 - DMs are **end-to-end encrypted** so the shared channel key is irrelevant to them.
-- **DM metadata is not protected.** `[D7]` Other sysops can see that `austin@42:100/7` sent a DM to `joe@42:100/3`, and when. This is a deliberate, documented trade — it buys immediate bounces, per-recipient spam filtering, and 4 bytes per DM. The user-facing docs must state it plainly rather than letting people assume otherwise from the phrase "end-to-end encrypted."
+- **DM metadata is not protected.** `[D7]` Other sysops can see that `austin@K7QM4X2P…` sent a DM to `joe@M2X9F0QL…`, and when. This is a deliberate, documented trade — it buys immediate bounces and per-recipient spam filtering. The user-facing docs must state it plainly rather than letting people assume otherwise from the phrase "end-to-end encrypted."
 
 ### 8.2 DM encryption and key custody `[D6]` `[D7]`
 
@@ -626,8 +676,8 @@ Sysops should not stumble into an FCC violation because our defaults were conven
 
 ### 8.4 Inter-BBS trust
 
-- **Peer allowlist.** A sysop explicitly adds peer node addresses *and their keys* (the pairing from §6.1 — allowlisting an address alone would be meaningless). Unknown-origin records are quarantined for review by default, which is friendlier to network growth than dropping.
-- **Address squatting** is the new attack surface numeric addressing introduces: first-seen binding wins, conflicts are alerted, never silently resolved (§6.1).
+- **Peer allowlist.** A sysop adds peer node IDs. Because an ID *is* the key (§6.1.1), allowlisting an ID is allowlisting a key — there is no pairing to get wrong and no way for a different key to answer to that ID. Unknown-origin records are quarantined for review by default, which is friendlier to network growth than dropping.
+- **Display-name spoofing** replaces address squatting as the residual naming attack: nothing stops a node calling itself `Fog City`, so the UI must always render a display name next to its short ID, and local aliases must never auto-bind from a remote suggestion (§6.1.4). The ID itself cannot be spoofed.
 - **Per-peer quotas** on records/hour and bytes/hour.
 - **Local moderation always wins.** Remote tombstones are **advisory and sysop-configurable** `[D6]` — auto-honouring is what users expect, so it is the default for areas where the tombstone's origin matches the post's origin, but a tombstone from a *different* node than the original author is never auto-honoured. That combination gives users the behaviour they expect while preventing a compromised node from nuking network-wide content.
 - **No transitive trust.** If A trusts B and B trusts C, A does *not* automatically accept C's records — though A will happily *relay* them if it carries a shared area. Records are signed end-to-end, so relaying is safe regardless of trust.
@@ -709,7 +759,7 @@ One caveat from §1.1: `DOOR_EVENT` sits at the bottom of the priority order wit
   ```
   Default datadir follows OS convention (`~/.local/share/meshbbs`, `~/Library/Application Support/MeshBBS`, `%APPDATA%\MeshBBS`), overridable.
 - **Service integration:** systemd unit, launchd plist, Windows Service wrapper. Generate them with a `meshbbs install-service` subcommand.
-- **First-run wizard:** generate keys, **choose or request a numeric address**, pick a node name, scan for a Meshtastic device, configure the channel, show the derived airtime allocation in human terms (§7.6), pick a registration mode (§6.7), create the sysop account. Writes a *minimal* `config.toml` (§11.2), not a commented dump. Should take under two minutes.
+- **First-run wizard:** generate the node key (**the ID falls out of it — nothing to choose, request, or register**), pick a display name, scan for a Meshtastic device, configure the channel, show the derived airtime allocation in human terms (§7.6), pick a registration mode (§6.7), create the sysop account. Writes a *minimal* `config.toml` (§11.2), not a commented dump. Should take under two minutes.
 - **Testing — the simulated mesh harness.** The `Link` abstraction lets us run N in-process BBS instances over a fake link with configurable MTU, latency, loss, **and flood multiplier**. This is essential; you cannot iterate on a sync protocol by physically deploying radios. It is also where three specific things get validated:
   - the fountain code's overhead at small K (§7.2),
   - digest suppression and scaling at N = 50 (§7.3),
@@ -778,7 +828,7 @@ Private keys are never in config at all; they live in `keys/` at 0600, and the p
 Grouped as the reference doc will be. Phase markers indicate when the group first appears.
 
 **Instance identity — Phase 0**
-`node_address` (`zone:net/node`), `node_name`, `sysop_name`, `sysop_contact`, `datadir`, `timezone`, `environment` (`development` | `production` — gates `dev` subcommands, §6.7)
+`node_display_name`, `sysop_name`, `sysop_contact`, `datadir`, `timezone`, `environment` (`development` | `production` — gates `dev` subcommands, §6.7). **There is no `node_id` key** — it is derived from `keys/node.ed25519` and is read-only in every surface; `meshbbs id` prints it. `aliases` (database): local petname → node ID map (§6.1.4)
 
 **Listeners — Phase 1**
 - SSH: `bind`, `port` (default 2222 unprivileged, 22 documented), `host_key_path`, `auth_methods`, `max_sessions`, `max_sessions_per_user`, `idle_timeout`, `login_grace`
@@ -802,7 +852,7 @@ Defaults for new areas (file): `new_area_federated = false`, `new_area_retention
 `default_theme`, `allow_user_theme_override`, `default_encoding` (`cp437` | `utf8` | `auto`)
 
 **Federation — Phase 2**
-`enabled_links`, `peers` (database: address, pubkey, allowed areas, quotas, `trust` = `accept` | `quarantine` | `reject`), `batch_window`, `digest_base_interval`, `quarantine_policy`, `tombstone_policy` (§8.4), `dictionary_version`, `ip_link` (bind/port/Noise static key path)
+`enabled_links`, `peers` (database: node ID — which *is* the key, §6.1.1 — plus local alias, allowed areas, quotas, `trust` = `accept` | `quarantine` | `reject`), `batch_window`, `digest_base_interval`, `quarantine_policy`, `tombstone_policy` (§8.4), `dictionary_version`, `ip_link` (bind/port/Noise static key path)
 
 **Mesh and the governor — Phase 3**
 - Transport: `mode` (`serial` | `tcp` | `auto`), `serial_device`, `serial_baud`, `tcp_host`, `tcp_port`
@@ -837,7 +887,7 @@ Revised per the decisions. The largest changes: the fountain codec moves **up** 
 
 | Phase | Scope | Why this order |
 |---|---|---|
-| **0 — Skeleton** | Go module, SQLite schema + migrations, **config loader + `config check` + generated reference**, logging, node key generation, **numeric address + `NODE` record model**, **`user add` / `user grant` / `dev seed` CLI**, CI cross-compiling all 5 targets cgo-free | Prove the cgo-free build works on day one. Addressing lands here because §6.1's first-seen binding rule is hard to retrofit; account CLI lands here because Phase 1 and 2 both need populated instances and neither can wait for a signup TUI. |
+| **0 — Skeleton** | Go module, SQLite schema + migrations, **config loader + `config check` + generated reference**, logging, node key generation, **key-derived node ID + `NODE` record + local alias table**, **`user add` / `user grant` / `dev seed` CLI**, CI cross-compiling all 5 targets cgo-free | Prove the cgo-free build works on day one. Identity lands here because everything signs against it; the alias table lands with it because `[D9]` makes petnames the only human-facing surface. Account CLI lands here because Phase 1 and 2 both need populated instances and neither can wait for a signup TUI. |
 | **1 — Single-node BBS** | SSH server, **`new@`/unknown-nick signup TUI, registration modes, capability grants, multi-pubkey enrollment**, Bubble Tea UI, menus, ANSI/CP437 rendering, **built-in themes behind a `Theme` struct**, local forums, local DMs with **passphrase-wrapped keys (tier 2)**, file areas via SFTP, presence/node chat, telnet off-by-default, **sysop TUI + status screen** | A genuinely usable BBS with zero federation. Ship this; get people on it. Tier-2 key custody is here because retrofitting key wrapping means re-keying every user, and the DM-key/password-reset interaction (§6.7) becomes unfixable once real mail exists. |
 | **2 — Federation over IP + the harness** | Record log, version vectors, anti-entropy with **digest suppression/scaling**, bundle format, zstd dictionary, `Link` abstraction, **simulated mesh harness (seeded by `dev seed`)**, **fountain codec (L1)**, **lazy `PROFILE` publication**, QUIC/Noise IP link | Build and debug the sync protocol where iteration is fast — but design every byte for the mesh MTU. The codec is here, not Phase 3, because tuning small-K overhead needs the harness's controllable loss. |
 | **3 — Meshtastic link** | Serial + TCP transports, protobuf framing, **airtime governor with flood-multiplier accounting**, ham-mode safety checks (DMs *and* channel PSK), file catalog replication, R estimation | The protocol already fits 233 bytes because Phase 2 was designed that way |
@@ -854,14 +904,19 @@ Phases 2 and 4 are parallelizable if there's more than one person working on it.
 
 The v0.1 questions are all answered (§14). These are new, and are consequences of those answers rather than leftovers. None block starting Phase 0.
 
-### Needs a decision before Phase 2
+### Dissolved by the `[D9]` reversal
 
-**`N1` — Who assigns numeric addresses, and what is the default zone?** `[D9]` gives us easy-to-type addresses but also, unavoidably, an address authority. Options:
-- **Coordinator model (FidoNet-like):** a per-zone coordinator publishes a signed roster; new sysops request an address. Familiar to BBS people, matches the FTN gateway, needs a volunteer.
-- **Self-assign + collision detect:** pick your own, first-seen binding wins, conflicts alerted. No authority, no gatekeeping, but two sysops who both pick `42:100/1` while partitioned have a genuine mess when the partition heals.
-- **Hybrid (suggested):** self-assign within a reserved "unregistered" net (e.g. `42:999/*`) for isolated meshes and testing; coordinator-assigned nets for the connected network. Also: what zone number? It must not collide with FidoNet zones 1–6 or other live FTN networks.
+- **~~`N1` — Who assigns numeric addresses, and what is the default zone?~~** No addresses to assign, no zone to pick, no coordinator to recruit. This was the single biggest unresolved dependency in v0.3 — it needed a volunteer human before the network could grow — and it is simply gone. The `N1` slot is reused below for the alias question that replaces it.
+- **~~`N4` — Geographic zone/net structure?~~** No `net` field exists. Topology-aware routing, if ever wanted, would have to come from observed mesh neighbours rather than from the address, which is the more honest source anyway. Slot reused below.
 
-**`N2` — Node key rotation.** First-seen address→key binding (§6.1) means a sysop who loses their node key loses their address. What's the recovery path? A sysop-to-sysop attested rotation (M-of-N peers sign an override), a coordinator-signed override if `N1` lands on a coordinator, or "generate a new address and move on"? The last is honest but painful once an address is on business cards.
+### Needs a decision before Phase 1
+
+**`N1` (re-scoped) — How much alias machinery ships in v1, and who controls it?** `[D9]` makes the petname layer (§6.1.4) the *only* human-facing addressing surface, so its quality is now load-bearing in a way it wasn't when addresses were typeable. Open sub-questions:
+- **Sysop-only aliases, or per-user aliases too?** Sysop-only is one table and covers the common case (`pnw`, `fogcity`). Per-user means every user can name nodes for themselves — nicer, but it's a second table, a UI, and a merge story when the sysop's alias and the user's disagree.
+- **One-keystroke accept of a remote `NODE` record's suggested display name?** Convenient, and the thing that makes onboarding a new peer feel instant. Also the exact mechanism by which a hostile node gets its preferred name into your table. Suggested: offer it, never auto-apply, and show the full 13-character ID at the moment of acceptance.
+- **Do aliases resolve in DM addressing (`austin@pnw`) or only in the UI?** Resolving them in addressing is obviously what users want and means an unresolvable alias is now a delivery failure mode with its own error path.
+
+**`N2` (re-scoped) — Node key rotation and succession.** Simpler than v0.3's version but not gone. Since the ID *is* the key, rotating the key means **becoming a different node**: new ID, and peers' allowlists, aliases, and version vectors all still point at the old one. Proposed: a signed `SUCCESSION` record, signed by the *old* key, naming the new ID, which peers may auto-follow (carrying the alias over) or hold for sysop confirmation. That covers planned rotation cleanly. It does **not** cover a *lost* key — with no old key there is nothing to sign with, so the honest answer is "you are a new node, re-establish out of band." Decide whether auto-follow or confirm-first is the default, and whether the old node ID is tombstoned.
 
 ### Needs a decision before Phase 5
 
@@ -869,7 +924,7 @@ The v0.1 questions are all answered (§14). These are new, and are consequences 
 
 ### Lower stakes
 
-**`N4` — Which zone/net structure for the mesh network itself?** Related to `N1` but narrower: does `net` correspond to a geographic mesh (so `42:100/*` is the Pacific Northwest mesh and routing can be topology-aware), or is it flat? Geographic nets make hierarchical routing possible later; flat is simpler now.
+**`N4` (re-scoped) — Node ID display length.** §6.1.4 proposes 13 Crockford base32 characters in full, abbreviated to 8 everywhere except security-relevant surfaces. Worth sanity-checking against real use: is 8 characters enough to be unambiguous in a 50-node network's UI (yes, overwhelmingly), and is 13 short enough that a sysop will actually read it aloud to confirm a fingerprint (borderline)? An alternative is a **word-based encoding** — 64 bits as four or five words from a fixed list, PGP-wordlist style — which is dramatically better for voice confirmation over radio and worse for typing. Both could ship: base32 for typing, words for verification.
 
 **`N5` — Do we want the theme *loader* even without theme packs?** `[D15]` says built-in themes only, and §5.4 keeps colours behind a `Theme` struct so packs remain possible. Question is whether to also read `<datadir>/themes/*.toml` at startup — roughly 50 lines, and it converts "sysop wants a custom theme" from a feature request into a file they edit. Cheap enough that it may not be worth deferring.
 
@@ -895,14 +950,14 @@ The v0.1 questions are all answered (§14). These are new, and are consequences 
 | **D4** | Legacy DOS doors? (was `Q15`) | **Nice-to-have.** Modern door API gets all of Phase 4; DOS deferred to Phase 7. | §9, Phase 4/7 |
 | **D5** | Node- or user-signed posts? (was `Q9`) | **Node-signed forums, user-signed DMs** (the v0.1 recommendation). | §6.2, §8.2 |
 | **D6** | Honour remote deletes? (was `Q10`) | **Advisory, sysop-configurable.** Refined: auto-honour when the tombstone's origin matches the post's origin; never auto-honour a third-party tombstone. | §8.4 |
-| **D7** | DM metadata privacy? (was `Q12`, part 1) | **Content confidentiality only.** Drops hashed-recipient routing — DMs address `nick@zone:net/node` in the clear, enabling immediate bounces and spam filtering, and saving 4 bytes. Must be documented plainly. | §6.4, §8.1 |
+| **D7** | DM metadata privacy? (was `Q12`, part 1) | **Content confidentiality only.** Drops the hashed-recipient routing tag — DMs address `nick@NODEID` in the clear, enabling immediate bounces and spam filtering. Must be documented plainly. | §6.4, §8.1 |
 | **D8** | Mesh file transfer? (was `Q11`) | **None at all.** Not a quota or a toggle — the mesh link refuses file payloads by type. Catalogs replicate; bytes move over IP or sneakernet. | §1, §6.5, §7.5 |
-| **D9** | Node addressing? (was `Q7`) | **FidoNet-style numeric `zone:net/node`.** Keys remain the cryptographic authority, bound to addresses by signed `NODE` records with first-seen-wins anti-squatting. Cheaper on the wire (4 B) than the key prefix it replaces, and shares an address space with the FTN gateway. Introduces `N1`/`N2`. | §6.1, §8.4 |
+| **D9** | Node addressing? (was `Q7`) | **REVERSED in v0.4 — self-certifying key-derived IDs**, `BLAKE3(node_pubkey)[:8]`, with human-friendliness from a local petname/alias layer. Was numeric `zone:net/node` in v0.2–v0.3. Deletes the registry, the address authority, first-seen binding, and the whole squatting attack surface; costs typeability, which the alias table must carry. Net *cheaper* on the wire at bundle sizes ≥ 3 once `origin` hoists to a per-bundle table. Dissolves old `N1`/`N4`, re-scopes `N2`. | §6.1, §6.2, §8.4, §7.7 |
 | **D10** | Register a portnum? (was `Q2`) | **Yes, but after the wire format is frozen and tested.** Versioning from day one; freeze + spec + conformance vectors + portnum request all in Phase 6. | §7.1, Phase 6 |
 | **D11** | Hard-block encrypted DMs in ham mode? (was `Q14`) | **Hard-block with a documented override flag.** Extended: the channel PSK must also be disabled in ham mode, and signing remains legal and enabled. | §8.3 |
 | **D12** | Telnet? (was `Q5`) | **Off by default, loud warning when enabled.** Guest-only telnet is the recommended middle setting. | §5.2 |
 | **D13** | BLE? (was `Q4`) | **Dropped, future/never.** Makes every artifact cgo-free with no build tags — a real packaging simplification. | §2, §3, §4, §7.1, §10 |
-| **D14** | FTN gateway? (was `Q13`) | **Yes.** Moves from non-goal to goal, Phase 6. Synergistic with `D9`. Constrained hard: IP-side by default, per-echo airtime caps, and explicitly labelled as a trust boundary since FTN mail is unsigned. | §2, §7.7, Phase 6 |
+| **D14** | FTN gateway? (was `Q13`) | **Yes.** Moves from non-goal to goal, Phase 6. The `D9` reversal means FTN↔MeshBBS addressing needs an explicit mapping table rather than being the identity function (§7.7). Constrained hard: IP-side by default, per-echo airtime caps, and explicitly labelled as a trust boundary since FTN mail is unsigned. | §2, §7.7, Phase 6 |
 | **D15** | Theme customization? (was `Q6`) | **Small set of built-in themes.** Colours stay behind a `Theme` struct so packs remain a later addition rather than a rewrite. | §5.4, §13 `N5` |
 
 ---
@@ -927,25 +982,28 @@ Two things the governor must do with this:
 
 ## Appendix B — Payload budget for a typical forum post
 
-Revised for the derived-`id` and packed-address changes in §6.2. Single-record bundle, worst case:
+Revised for the derived-`id` change (§6.2) and the key-derived origin of `[D9]`. **Single-record bundle** — the worst case for v0.4, because the origin table's fixed cost has nothing to amortize against:
 
-| Component | v0.1 | v0.2 |
-|---|---:|---:|
-| Meshtastic `Data` payload ceiling | 233 | 233 |
-| L1 symbol header | −8 | −8 |
-| L2 bundle header (dict id, area tag, base ts, count, flags) | −4 | −6 |
-| Record `id` | −16 | **0** (derived, not sent) |
-| `origin` | −8 | **−4** (packed `zone:net/node`) |
-| `seq`, `ts` delta, `type` | −13 | **−5** (varint, ts hoisted to bundle) |
-| `area` | −4 | **0** (hoisted to bundle header) |
-| `parent` (threaded replies only) | −16 | −16 |
-| Ed25519 signature | −64 | −64 |
-| **Remaining for compressed body** | **106** | **130** |
-| → decompressed at 3.5× with trained dictionary | ≈ 370 chars | **≈ 455 chars** |
+| Component | v0.1 | v0.3 (numeric) | **v0.4 (key-derived)** |
+|---|---:|---:|---:|
+| Meshtastic `Data` payload ceiling | 233 | 233 | 233 |
+| L1 symbol header | −8 | −8 | −8 |
+| L2 bundle header (dict id, area tag, base ts, count, flags) | −4 | −6 | −6 |
+| Bundle origin table (1 origin) | — | — | **−9** (count + one 8 B ID) |
+| Record `id` | −16 | 0 (derived) | 0 (derived) |
+| `origin` per record | −8 | −4 (packed address) | **−1** (index into table) |
+| `seq`, `ts` delta, `type` | −13 | −5 | −5 |
+| `area` | −4 | 0 (hoisted) | 0 (hoisted) |
+| `parent` (threaded replies only) | −16 | −16 | −16 |
+| Ed25519 signature | −64 | −64 | −64 |
+| **Remaining for compressed body** | **106** | **130** | **124** |
+| → decompressed at 3.5× with trained dictionary | ≈ 370 chars | ≈ 455 chars | **≈ 434 chars** |
 
-A top-level post (no `parent`) has 146 bytes for the body, ≈ 510 characters.
+A top-level post (no `parent`) has 140 bytes for the body, ≈ 490 characters.
 
-Batching compounds this: across a 10-record bundle the bundle header and area tag are paid once, and per-record cost falls to `sig(64) + origin(4) + seq/ts/type(5) = 73` bytes plus body. **The signature is now 50–60% of the per-record overhead** — which is precisely why `D5` (node-signed, not dual-signed) matters, and it is the obvious target if a future revision needs more room (aggregate signatures over a whole bundle would recover ~64 bytes per record, at the cost of losing per-record verifiability).
+**Batching reverses the comparison**, which is the whole argument for `[D9]`'s wire encoding. Across a 10-record single-origin bundle the origin ID is paid once and per-record cost falls to `sig(64) + origin_idx(1) + seq/ts/type(5) = 70` bytes plus body — against 73 under numeric addressing. Total non-body overhead for 10 records: **875 B (v0.4) vs 896 B (v0.3)**. Break-even is 3 records; §7.3's 15–30 minute batching windows put normal traffic well past that.
+
+**The signature is now ~90% of the per-record overhead.** That is precisely why `D5` (node-signed, not dual-signed) matters, and it is the only remaining target of any size: aggregate or bundle-level signatures would recover ~64 bytes per record, at the cost of losing per-record verifiability when records are relayed individually. Worth revisiting only if the budget gets tight — everything else has been squeezed.
 
 ---
 
