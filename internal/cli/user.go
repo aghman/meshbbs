@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,7 +30,7 @@ airtime is a grant the sysop makes deliberately.`,
 	}
 	cmd.AddCommand(
 		newUserAddCmd(e), newUserListCmd(e),
-		newUserGrantCmd(e), newUserRevokeCmd(e), newUserShowCmd(e),
+		newUserGrantCmd(e), newUserRevokeCmd(e), newUserShowCmd(e), newUserPasswdCmd(e),
 	)
 	return cmd
 }
@@ -229,6 +230,50 @@ func newUserRevokeCmd(e *env) *cobra.Command {
 			})
 		},
 	}
+}
+
+func newUserPasswdCmd(e *env) *cobra.Command {
+	var discardDMKey bool
+
+	c := &cobra.Command{
+		Use:   "passwd <nick>",
+		Short: "Set a user's password (sysop reset)",
+		Long: `Set a user's password.
+
+This is an administrative reset and it cannot re-wrap the user's message key,
+because the sysop does not have their passphrase. If the account has a message
+key, the command refuses unless --discard-dm-key is given — proceeding makes
+their existing mail permanently unreadable, and that should be a deliberate
+act by someone who has been told.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pw, err := readPassword(cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+			if pw == "" {
+				return fmt.Errorf("no password on stdin")
+			}
+			return withStore(e, cmd, func(ctx context.Context, st *store.Store) error {
+				err := st.ResetPasswordAsSysop(ctx, args[0], pw, discardDMKey)
+				if errors.Is(err, store.ErrDMHistoryWouldBeLost) {
+					return fmt.Errorf("%w\n\nRe-run with --discard-dm-key to proceed anyway", err)
+				}
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Password set for %s\n", args[0])
+				if discardDMKey {
+					fmt.Fprintf(cmd.OutOrStdout(),
+						"Their message key was discarded; existing mail is now unreadable.\n")
+				}
+				return nil
+			})
+		},
+	}
+	c.Flags().BoolVar(&discardDMKey, "discard-dm-key", false,
+		"proceed even though it will make the user's existing DM history permanently unreadable")
+	return c
 }
 
 func readPassword(r io.Reader) (string, error) {

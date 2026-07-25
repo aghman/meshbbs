@@ -1,0 +1,328 @@
+// Package tui is the Bubble Tea session interface (design §5).
+//
+// One tea.Program per SSH session. The model is a small state machine over
+// screens; each screen is a method rather than a separate model, which keeps
+// the shared state (user, theme, sizing) in one place and avoids threading it
+// through a dozen sub-models for a UI this size.
+package tui
+
+import (
+	"context"
+	"log/slog"
+
+	"github.com/aghman/meshbbs/internal/bbs"
+	"github.com/aghman/meshbbs/internal/store"
+	"github.com/aghman/meshbbs/internal/term"
+	"github.com/aghman/meshbbs/internal/theme"
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// Intent mirrors sshd.Intent, duplicated to avoid an import cycle.
+type Intent int
+
+const (
+	IntentUnknown Intent = iota
+	IntentAuthenticated
+	IntentSignup
+	IntentGuest
+	IntentKeyUnknown
+)
+
+// Peer is a connected user, for the who's-online screen.
+type Peer struct {
+	Node  int
+	Nick  string
+	Guest bool
+	Where string
+}
+
+// PresenceTracker is the subset of presence the TUI needs.
+type PresenceTracker interface {
+	Join(id, nick, remote string, guest bool) int
+	Leave(id string)
+	SetLocation(id, where string)
+	List() []Peer
+}
+
+// screen identifies the current view.
+type screen int
+
+const (
+	screenSignup screen = iota
+	screenKeyUnknown
+	screenMenu
+	screenAreaList
+	screenAreaRead
+	screenPostCompose
+	screenMailList
+	screenMailRead
+	screenMailCompose
+	screenUnlock
+	screenKeySetup
+	screenWho
+	screenNodeInfo
+	screenGoodbye
+)
+
+// Config is everything a session needs.
+type Config struct {
+	Service   *bbs.Service
+	Store     *store.Store
+	Presence  PresenceTracker
+	Themes    *theme.Set
+	ThemeName string
+	Encoding  term.Encoding
+	Width     int
+	Height    int
+	SessionID string
+	Remote    string
+	Intent    Intent
+	Nick      string
+	User      store.User
+	PublicKey string
+	KeyFP     string
+	AuthNote  string
+	Logger    *slog.Logger
+	Ctx       context.Context
+}
+
+// Model is the session state.
+type Model struct {
+	cfg    Config
+	styles theme.Styles
+	ctx    context.Context
+
+	screen screen
+	width  int
+	height int
+
+	// Identity for this session.
+	nick     string
+	guest    bool
+	sysop    bool
+	nodeNum  int
+	joined   bool
+	unlocked bool
+	// passphrase is held only while a session is unlocked for reading mail.
+	// It never leaves this process and is cleared on lock and on exit.
+	passphrase string
+
+	// Transient UI state.
+	status    string
+	statusErr bool
+
+	signup      signupState
+	areas       []store.Area
+	areaIdx     int
+	posts       []store.Post
+	postIdx     int
+	compose     composeState
+	mail        []store.DM
+	mailIdx     int
+	mailBody    string
+	mailSubject string
+	unlockPW    textInput
+	setupPW     textInput
+	setupPW2    textInput
+	setupIdx    int
+	peers       []Peer
+
+	quitting bool
+}
+
+// New builds the session model.
+func New(cfg Config) Model {
+	if cfg.Ctx == nil {
+		cfg.Ctx = context.Background()
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+
+	th := cfg.Themes.Get(cfg.ThemeName)
+	m := Model{
+		cfg:    cfg,
+		styles: th.Styles(cfg.Encoding == term.EncodingUTF8),
+		ctx:    cfg.Ctx,
+		width:  cfg.Width,
+		height: cfg.Height,
+		nick:   cfg.Nick,
+	}
+
+	switch cfg.Intent {
+	case IntentSignup:
+		m.screen = screenSignup
+		m.signup = newSignupState(cfg.Nick, cfg.PublicKey != "")
+	case IntentKeyUnknown:
+		m.screen = screenKeyUnknown
+	case IntentGuest:
+		m.screen = screenMenu
+		m.guest = true
+		m.nick = "guest"
+	default:
+		m.screen = screenMenu
+		m.sysop = cfg.User.IsSysop
+	}
+	return m
+}
+
+// Init implements tea.Model.
+func (m Model) Init() tea.Cmd {
+	if m.screen == screenMenu {
+		return tea.Batch(m.join(), m.loadAreas())
+	}
+	return nil
+}
+
+// Update implements tea.Model.
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		return m, nil
+
+	case tea.KeyMsg:
+		// Ctrl+C always leaves, from any screen. A BBS that can trap a user is
+		// a BBS people stop trusting.
+		if msg.Type == tea.KeyCtrlC {
+			return m.leave()
+		}
+		return m.handleKey(msg)
+
+	case statusMsg:
+		m.status, m.statusErr = msg.text, msg.isErr
+		return m, nil
+
+	case areasLoadedMsg:
+		m.areas = msg.areas
+		return m, nil
+
+	case postsLoadedMsg:
+		m.posts, m.postIdx = msg.posts, 0
+		if len(m.posts) > 0 {
+			m.postIdx = len(m.posts) - 1
+		}
+		return m, nil
+
+	case mailLoadedMsg:
+		m.mail, m.mailIdx = msg.mail, 0
+		return m, nil
+
+	case mailOpenedMsg:
+		m.mailSubject, m.mailBody = msg.subject, msg.body
+		m.screen = screenMailRead
+		return m, nil
+
+	case peersLoadedMsg:
+		m.peers = msg.peers
+		return m, nil
+
+	case joinedMsg:
+		m.nodeNum, m.joined = msg.node, true
+		return m, nil
+
+	case needKeySetupMsg:
+		// The account has no DM key — typically created by the CLI, which
+		// cannot know a passphrase. Offer to create one rather than dead-ending
+		// on "no DM key yet", which the user has no way to act on.
+		m.screen = screenKeySetup
+		m.setupPW = newInput("Passphrase: ", 64, true)
+		m.setupPW2 = newInput("Confirm: ", 64, true)
+		m.setupIdx = 0
+		return m, nil
+
+	case needUnlockMsg:
+		m.screen = screenUnlock
+		m.unlockPW = newInput("Passphrase: ", 64, true)
+		return m, nil
+
+	case unlockedMsg:
+		// The passphrase lives only in this session's memory, only while
+		// unlocked, and is cleared on exit (§8.2 tier 2).
+		m.passphrase = msg.passphrase
+		m.unlocked = true
+		m.screen = screenMailList
+		m.setWhere("mail")
+		return m, m.loadMail()
+
+	case signupDoneMsg:
+		m.nick = msg.nick
+		m.sysop = false
+		m.unlocked = true
+		m.passphrase = msg.passphrase
+		m.screen = screenMenu
+		m.status = "Welcome to the BBS, " + msg.nick + "."
+		return m, tea.Batch(m.join(), m.loadAreas())
+	}
+
+	return m, nil
+}
+
+// View implements tea.Model.
+func (m Model) View() string {
+	if m.quitting {
+		return m.renderGoodbye()
+	}
+	switch m.screen {
+	case screenSignup:
+		return m.renderSignup()
+	case screenKeyUnknown:
+		return m.renderKeyUnknown()
+	case screenMenu:
+		return m.renderMenu()
+	case screenAreaList:
+		return m.renderAreaList()
+	case screenAreaRead:
+		return m.renderAreaRead()
+	case screenPostCompose:
+		return m.renderCompose()
+	case screenMailList:
+		return m.renderMailList()
+	case screenMailRead:
+		return m.renderMailRead()
+	case screenMailCompose:
+		return m.renderMailCompose()
+	case screenUnlock:
+		return m.renderUnlock()
+	case screenKeySetup:
+		return m.renderKeySetup()
+	case screenWho:
+		return m.renderWho()
+	case screenNodeInfo:
+		return m.renderNodeInfo()
+	default:
+		return m.renderMenu()
+	}
+}
+
+// leave tears the session down cleanly.
+func (m Model) leave() (tea.Model, tea.Cmd) {
+	// Clear the passphrase before the process forgets about this session. It
+	// is the one piece of user secret material the server holds, and only for
+	// as long as a session is unlocked (§8.2).
+	m.passphrase = ""
+	m.unlocked = false
+	m.quitting = true
+	if m.joined && m.cfg.Presence != nil {
+		m.cfg.Presence.Leave(m.cfg.SessionID)
+	}
+	return m, tea.Quit
+}
+
+// sanitize prepares untrusted text for display (§5.4).
+func sanitize(s string) string { return term.SanitizeForDisplay(s) }
+
+// sanitizeLine prepares an untrusted single-line field.
+func sanitizeLine(s string) string { return term.SanitizeLine(s) }
+
+// truncate shortens a string for a fixed-width column.
+func truncate(s string, n int) string {
+	if n <= 1 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}

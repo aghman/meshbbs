@@ -70,6 +70,7 @@ no registry and no address authority. Run "meshbbs id" to see this node's ID.`,
 		"override the data directory")
 
 	root.AddCommand(
+		newServeCmd(e),
 		newIDCmd(e),
 		newInitCmd(e),
 		newConfigCmd(e),

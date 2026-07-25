@@ -1,0 +1,316 @@
+package tui
+
+import (
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// composeState holds an in-progress post or message.
+type composeState struct {
+	to      textInput
+	subject textInput
+	body    textArea
+	field   int // 0 = to/subject, 1 = subject/body, 2 = body
+	area    string
+}
+
+func newCompose(withTo bool) composeState {
+	c := composeState{
+		to:      newInput("To: ", 32, false),
+		subject: newInput("Subject: ", 72, false),
+		body:    newTextArea(4000),
+	}
+	if !withTo {
+		c.field = 1
+	}
+	return c
+}
+
+// handleKey dispatches by screen.
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Any keypress clears a stale status line, so a message from three screens
+	// ago is not still on display.
+	if m.status != "" && msg.Type != tea.KeyRunes {
+		m.status = ""
+	}
+
+	switch m.screen {
+	case screenSignup:
+		return m.handleSignupKey(msg)
+	case screenKeyUnknown:
+		return m.leave()
+	case screenMenu:
+		return m.handleMenuKey(msg)
+	case screenAreaList:
+		return m.handleAreaListKey(msg)
+	case screenAreaRead:
+		return m.handleAreaReadKey(msg)
+	case screenPostCompose:
+		return m.handleComposeKey(msg, false)
+	case screenMailList:
+		return m.handleMailListKey(msg)
+	case screenMailRead:
+		return m.handleMailReadKey(msg)
+	case screenMailCompose:
+		return m.handleComposeKey(msg, true)
+	case screenUnlock:
+		return m.handleUnlockKey(msg)
+	case screenKeySetup:
+		return m.handleKeySetupKey(msg)
+	case screenWho, screenNodeInfo:
+		m.screen = screenMenu
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch strings.ToLower(msg.String()) {
+	case "m", "f":
+		m.screen = screenAreaList
+		m.areaIdx = 0
+		m.setWhere("forums")
+		return m, m.loadAreas()
+	case "e":
+		if m.guest {
+			return m, errs("Guests cannot read mail. Register with `ssh new@` for an account.")
+		}
+		if !m.unlocked {
+			return m, m.checkMailAccess()
+		}
+		m.screen = screenMailList
+		m.setWhere("mail")
+		return m, m.loadMail()
+	case "w":
+		m.screen = screenWho
+		return m, m.loadPeers()
+	case "n":
+		m.screen = screenNodeInfo
+		return m, nil
+	case "q":
+		return m.leave()
+	}
+	return m, nil
+}
+
+func (m Model) handleAreaListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.areaIdx > 0 {
+			m.areaIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if m.areaIdx < len(m.areas)-1 {
+			m.areaIdx++
+		}
+		return m, nil
+	case "enter":
+		if len(m.areas) == 0 {
+			return m, nil
+		}
+		m.screen = screenAreaRead
+		area := m.areas[m.areaIdx]
+		m.setWhere("area:" + area.Name)
+		return m, m.loadPosts(area.Name)
+	case "q", "esc":
+		m.screen = screenMenu
+		m.setWhere("menu")
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleAreaReadKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch strings.ToLower(msg.String()) {
+	case "up", "k":
+		if m.postIdx > 0 {
+			m.postIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if m.postIdx < len(m.posts)-1 {
+			m.postIdx++
+		}
+		return m, nil
+	case "p":
+		if m.guest {
+			return m, errs("Guests cannot post. Register with `ssh new@` for an account.")
+		}
+		m.screen = screenPostCompose
+		m.compose = newCompose(false)
+		m.compose.area = m.areas[m.areaIdx].Name
+		return m, nil
+	case "q", "esc":
+		m.screen = screenAreaList
+		m.setWhere("forums")
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleComposeKey(msg tea.KeyMsg, isMail bool) (tea.Model, tea.Cmd) {
+	c := m.compose
+
+	switch msg.Type {
+	case tea.KeyEsc:
+		if isMail {
+			m.screen = screenMailList
+		} else {
+			m.screen = screenAreaRead
+		}
+		return m, nil
+
+	case tea.KeyTab:
+		c.field++
+		maxField := 2
+		if !isMail {
+			maxField = 2
+		}
+		if c.field > maxField {
+			c.field = 0
+			if !isMail {
+				c.field = 1
+			}
+		}
+		m.compose = c
+		return m, nil
+
+	case tea.KeyCtrlD:
+		// Ctrl+D sends, because Enter has to insert a newline in the body.
+		if strings.TrimSpace(c.body.String()) == "" {
+			return m, errs("Nothing to send — the message is empty.")
+		}
+		if isMail {
+			to := strings.TrimSpace(c.to.String())
+			if to == "" {
+				return m, errs("No recipient.")
+			}
+			m.screen = screenMailList
+			m.compose = newCompose(true)
+			// Sequence, not Batch: Batch runs both concurrently, so the
+			// reload can read the list before the send has committed and the
+			// user sees their own message missing.
+			return m, tea.Sequence(m.sendMail(to, c.subject.String(), c.body.String()), m.loadMail())
+		}
+		area := c.area
+		m.screen = screenAreaRead
+		m.compose = newCompose(false)
+		// Sequence, not Batch — see the comment on the mail path above.
+		return m, tea.Sequence(m.submitPost(area, c.subject.String(), c.body.String()), m.loadPosts(area))
+	}
+
+	// Enter advances out of the single-line fields. Only the body treats it as
+	// a newline — without this, typing a recipient and pressing enter silently
+	// did nothing, and the subject and body then concatenated into the To
+	// field.
+	switch c.field {
+	case 0:
+		if msg.Type == tea.KeyEnter {
+			c.field = 1
+		} else {
+			c.to, _ = c.to.Update(msg)
+		}
+	case 1:
+		if msg.Type == tea.KeyEnter {
+			c.field = 2
+		} else {
+			c.subject, _ = c.subject.Update(msg)
+		}
+	default:
+		c.body, _ = c.body.Update(msg)
+	}
+	m.compose = c
+	return m, nil
+}
+
+func (m Model) handleMailListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch strings.ToLower(msg.String()) {
+	case "up", "k":
+		if m.mailIdx > 0 {
+			m.mailIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if m.mailIdx < len(m.mail)-1 {
+			m.mailIdx++
+		}
+		return m, nil
+	case "enter":
+		if len(m.mail) == 0 {
+			return m, nil
+		}
+		return m, m.openMail(m.mail[m.mailIdx])
+	case "c":
+		m.screen = screenMailCompose
+		m.compose = newCompose(true)
+		return m, nil
+	case "q", "esc":
+		m.screen = screenMenu
+		m.setWhere("menu")
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleMailReadKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch strings.ToLower(msg.String()) {
+	case "r":
+		m.screen = screenMailCompose
+		m.compose = newCompose(true)
+		m.compose.to.value = m.mail[m.mailIdx].Sender
+		m.compose.subject.value = "Re: " + m.mailSubject
+		m.compose.field = 2
+		return m, nil
+	default:
+		m.screen = screenMailList
+		m.mailBody, m.mailSubject = "", ""
+		return m, m.loadMail()
+	}
+}
+
+func (m Model) handleUnlockKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = screenMenu
+		return m, nil
+	case tea.KeyEnter:
+		return m, m.tryUnlock(m.unlockPW.String())
+	}
+	m.unlockPW, _ = m.unlockPW.Update(msg)
+	return m, nil
+}
+
+func (m Model) handleKeySetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = screenMenu
+		return m, nil
+	case tea.KeyEnter:
+		if m.setupIdx == 0 {
+			if len(m.setupPW.String()) < 8 {
+				return m, errs("Passphrase must be at least 8 characters.")
+			}
+			m.setupIdx = 1
+			return m, nil
+		}
+		if m.setupPW.String() != m.setupPW2.String() {
+			m.setupPW2.Clear()
+			return m, errs("Passphrases do not match.")
+		}
+		return m, m.createDMKey(m.setupPW.String())
+	}
+	if m.setupIdx == 0 {
+		m.setupPW, _ = m.setupPW.Update(msg)
+	} else {
+		m.setupPW2, _ = m.setupPW2.Update(msg)
+	}
+	return m, nil
+}
+
+func (m *Model) setWhere(where string) {
+	if m.joined && m.cfg.Presence != nil {
+		m.cfg.Presence.SetLocation(m.cfg.SessionID, where)
+	}
+}

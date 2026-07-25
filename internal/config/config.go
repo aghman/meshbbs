@@ -42,8 +42,33 @@ const (
 // would produce a reference document that lies.
 type Config struct {
 	Node    Node    `toml:"node" doc:"Instance identity and operating environment."`
+	SSH     SSH     `toml:"ssh" doc:"The SSH front end (§5.1)."`
+	Users   Users   `toml:"users" doc:"Registration and account policy (§6.7)."`
+	Theme   Theme   `toml:"theme" doc:"Appearance (§5.4)."`
 	Log     Log     `toml:"log" doc:"Logging and observability."`
 	Storage Storage `toml:"storage" doc:"Database and on-disk layout."`
+}
+
+// SSH configures the front end (§11.5, Phase 1).
+type SSH struct {
+	Enabled     bool   `toml:"enabled" default:"true" doc:"Serve SSH."`
+	Bind        string `toml:"bind" default:"0.0.0.0" doc:"Address to listen on."`
+	Port        int    `toml:"port" default:"2222" doc:"Port to listen on. 2222 avoids needing root; 22 is conventional for a dedicated host."`
+	MaxSessions int    `toml:"max_sessions" default:"32" doc:"Maximum concurrent sessions."`
+}
+
+// Users configures registration policy (§6.7, [N7], [N9]).
+type Users struct {
+	RegistrationMode string `toml:"registration_mode" default:"open" doc:"open, approval, invite, or closed. Default 'open' with federated posting withheld: the door is open, the shared airtime is gated ([N7])."`
+	GuestEnabled     bool   `toml:"guest_enabled" default:"true" doc:"Allow anonymous read-only access via ssh guest@."`
+	DirectoryListed  bool   `toml:"default_directory_listed" default:"true" doc:"Whether new users are listed in the network directory ([N9])."`
+}
+
+// Theme configures appearance (§5.4, [D15], [N5]).
+type Theme struct {
+	Default  string `toml:"default" default:"classic" doc:"Built-in or file theme name. Run the BBS and press N for the list."`
+	Dir      string `toml:"dir" default:"themes" doc:"Directory scanned for *.toml style overrides, relative to data_dir unless absolute ([N5])."`
+	Encoding string `toml:"default_encoding" default:"auto" doc:"auto, utf8, or cp437. 'auto' guesses from the client's locale and terminal type."`
 }
 
 // Node is the instance's own identity (§11.5, Phase 0).
@@ -141,6 +166,28 @@ func (c *Config) Validate() error {
 		problems = append(problems, fmt.Sprintf("log.format is %q, want text or json", c.Log.Format))
 	}
 
+	switch c.Users.RegistrationMode {
+	case "open", "approval", "invite", "closed":
+	default:
+		problems = append(problems, fmt.Sprintf(
+			"users.registration_mode is %q, want open, approval, invite, or closed",
+			c.Users.RegistrationMode))
+	}
+
+	switch c.Theme.Encoding {
+	case "auto", "utf8", "cp437":
+	default:
+		problems = append(problems, fmt.Sprintf(
+			"theme.default_encoding is %q, want auto, utf8, or cp437", c.Theme.Encoding))
+	}
+
+	if c.SSH.Port < 1 || c.SSH.Port > 65535 {
+		problems = append(problems, fmt.Sprintf("ssh.port is %d, want 1-65535", c.SSH.Port))
+	}
+	if c.SSH.MaxSessions < 1 {
+		problems = append(problems, "ssh.max_sessions must be at least 1")
+	}
+
 	if strings.TrimSpace(c.Storage.Database) == "" {
 		problems = append(problems, "storage.database must not be empty")
 	}
@@ -176,6 +223,11 @@ func (c *Config) DatabasePath() (string, error) {
 // KeysPath returns the absolute path to the keys directory.
 func (c *Config) KeysPath() (string, error) {
 	return c.resolveUnder(c.Storage.KeysDir)
+}
+
+// ThemePath returns the absolute path to the theme override directory.
+func (c *Config) ThemePath() (string, error) {
+	return c.resolveUnder(c.Theme.Dir)
 }
 
 func (c *Config) resolveUnder(p string) (string, error) {

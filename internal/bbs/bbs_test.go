@@ -138,16 +138,25 @@ func TestDMRoundTrip(t *testing.T) {
 	if len(inbox) != 1 {
 		t.Fatalf("bob has %d messages, want 1", len(inbox))
 	}
-	if inbox[0].Sender != "austin" || inbox[0].Subject != "Antenna" {
+	if inbox[0].Sender != "austin" {
 		t.Fatalf("routing metadata wrong: %+v", inbox[0])
 	}
+	// The subject must NOT be readable from the index: [D7] authorised
+	// exposing who-talks-to-whom, not message content (§8.1).
+	if inbox[0].Subject != "" {
+		t.Fatalf("subject leaked into the cleartext index: %q", inbox[0].Subject)
+	}
 
-	text, err := svc.OpenDM(ctx, "bob", "bob-pw", inbox[0].SealedBytes)
+	payload, err := svc.OpenDM(ctx, "bob", "bob-pw", inbox[0].SealedBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text != "Want to split a J-pole order?" {
-		t.Fatalf("decrypted %q", text)
+	if payload.Text != "Want to split a J-pole order?" {
+		t.Fatalf("decrypted %q", payload.Text)
+	}
+	// The subject is sealed with the body, so it only appears after decryption.
+	if payload.Subject != "Antenna" {
+		t.Fatalf("subject is %q, want Antenna", payload.Subject)
 	}
 }
 
@@ -297,5 +306,50 @@ func TestPostsAndDMsAreSignedRecords(t *testing.T) {
 		if err := rec.Verify(self.PublicKey); err != nil {
 			t.Fatalf("record %s does not verify: %v", rec.ID(), err)
 		}
+	}
+}
+
+// [D7] authorised exposing who-talks-to-whom, NOT message content. §8.1 says
+// to treat the mesh as public, so a cleartext subject would put the gist of
+// every private message in front of every sysop on the channel.
+func TestSubjectIsEncryptedNotJustTheBody(t *testing.T) {
+	svc, st, ctx := testService(t)
+	mkUser(t, svc, st, ctx, "austin", "pw")
+	mkUser(t, svc, st, ctx, "bob", "bob-pw")
+
+	subject := "Repeater access codes"
+	id, err := svc.SendDM(ctx, "austin", "bob", subject, "body text")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := st.GetRecord(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rec.Body), subject) {
+		t.Fatal("the subject appears in cleartext in the stored record")
+	}
+	if strings.Contains(string(rec.SignedBytes()), subject) {
+		t.Fatal("the subject appears in cleartext in the signed bytes (it would go on the wire)")
+	}
+
+	// Sender and recipient DO remain readable — that is what [D7] authorised,
+	// and it is what makes immediate bounces and spam filtering possible.
+	body, err := store.UnmarshalDMBody(rec.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.Sender != "austin" || body.Recipient != "bob" {
+		t.Fatalf("routing metadata should stay readable, got %+v", body)
+	}
+
+	// And the recipient still gets the subject back.
+	payload, err := svc.OpenDM(ctx, "bob", "bob-pw", body.Sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Subject != subject {
+		t.Fatalf("subject did not survive the round trip: %q", payload.Subject)
 	}
 }

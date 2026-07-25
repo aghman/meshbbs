@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/aghman/meshbbs/internal/auth"
 	"github.com/aghman/meshbbs/internal/config"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/record"
@@ -16,7 +17,7 @@ import (
 
 func newInitCmd(e *env) *cobra.Command {
 	var displayName, sysopName, sysopNick, sysopContact string
-	var development bool
+	var development, sysopPasswordStdin bool
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -60,9 +61,23 @@ the instance would have to re-establish with its peers as a new node.`,
 			// so a late failure would strand the operator with a half-built
 			// instance they cannot init again and probably should not delete
 			// by hand.
+			var sysopHash string
 			if sysopNick != "" {
 				if err := store.ValidateNick(sysopNick); err != nil {
 					return fmt.Errorf("--sysop-nick: %w", err)
+				}
+				if sysopPasswordStdin {
+					pw, err := readPassword(cmd.InOrStdin())
+					if err != nil {
+						return err
+					}
+					if pw == "" {
+						return fmt.Errorf("--sysop-password-stdin was given but stdin was empty")
+					}
+					sysopHash, err = auth.HashPassword(pw)
+					if err != nil {
+						return err
+					}
 				}
 			}
 
@@ -135,10 +150,11 @@ the instance would have to re-establish with its peers as a new node.`,
 
 			if sysopNick != "" {
 				if _, err := st.CreateUser(ctx, store.CreateUserOptions{
-					Nick:        sysopNick,
-					DisplayName: cfg.Node.SysopName,
-					IsSysop:     true,
-					CanLogin:    true,
+					Nick:         sysopNick,
+					DisplayName:  cfg.Node.SysopName,
+					PasswordHash: sysopHash,
+					IsSysop:      true,
+					CanLogin:     true,
 					// The sysop gets federated posting; everyone else must be
 					// granted it explicitly ([N7]).
 					Capabilities: append(append([]string(nil), store.DefaultCapabilities...),
@@ -147,6 +163,14 @@ the instance would have to re-establish with its peers as a new node.`,
 					return fmt.Errorf("create sysop account: %w", err)
 				}
 				fmt.Fprintf(out, "Created sysop account %q\n", sysopNick)
+				if sysopHash == "" {
+					// An account with neither a password nor an enrolled key
+					// cannot log in at all, which is a confusing state to hand
+					// a new sysop. Say so, with the fix.
+					fmt.Fprintf(out, "\n  WARNING: %s has no password and no SSH key, so it cannot log in yet.\n", sysopNick)
+					fmt.Fprintf(out, "  Set one with:  meshbbs user passwd %s\n", sysopNick)
+					fmt.Fprintf(out, "  Or register over SSH and grant sysop:  ssh new@localhost\n")
+				}
 			}
 
 			id := key.ID()
@@ -163,6 +187,8 @@ the instance would have to re-establish with its peers as a new node.`,
 	cmd.Flags().StringVar(&sysopName, "sysop-name", "", "sysop's name, for display")
 	cmd.Flags().StringVar(&sysopContact, "sysop-contact", "", "sysop contact address published in the NODE record")
 	cmd.Flags().StringVar(&sysopNick, "sysop-nick", "", "create a sysop account with this nick")
+	cmd.Flags().BoolVar(&sysopPasswordStdin, "sysop-password-stdin", false,
+		"read the sysop's password from stdin (without this the account cannot log in until one is set)")
 	cmd.Flags().BoolVar(&development, "development", false,
 		"mark this as a development instance, enabling the dev subcommands")
 	return cmd

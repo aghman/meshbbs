@@ -27,14 +27,52 @@ func (d DM) Unread() bool { return d.ReadAt == 0 }
 
 // DMBody is the wire body of a DM record (§6.4).
 //
-// Addressing is deliberately in the CLEAR ([D7]) — metadata privacy is
+// Addressing is deliberately in the CLEAR ([D7]): metadata privacy is
 // explicitly not a requirement, and a readable recipient buys immediate
-// bounces and per-recipient spam filtering. Only `Sealed` is encrypted.
+// bounces and per-recipient spam filtering.
+//
+// The SUBJECT IS NOT. [D7] authorised exposing who-talks-to-whom, not message
+// content, and §8.1 says to treat the mesh as a public broadcast medium where
+// every participating sysop can read the channel. A cleartext subject would
+// put the gist of every private message in front of all of them, which is
+// plainly contrary to "DMs are end-to-end encrypted". The subject therefore
+// travels inside Sealed, alongside the body.
 type DMBody struct {
 	Sender    string
 	Recipient string
-	Subject   string
-	Sealed    []byte // keyring.Seal output; opaque to this node
+	Sealed    []byte // keyring.Seal of (subject, body); opaque to this node
+}
+
+// SealedPayload is what gets encrypted: the subject and the message text.
+//
+// Layout: subjectLen(1) | subject | text
+type SealedPayload struct {
+	Subject string
+	Text    string
+}
+
+// MarshalSealedPayload encodes the part of a DM that only the recipient reads.
+func MarshalSealedPayload(p SealedPayload) ([]byte, error) {
+	if len(p.Subject) > 72 {
+		return nil, fmt.Errorf("subject is %d bytes, limit is 72", len(p.Subject))
+	}
+	out := make([]byte, 0, 1+len(p.Subject)+len(p.Text))
+	out = append(out, byte(len(p.Subject)))
+	out = append(out, p.Subject...)
+	out = append(out, p.Text...)
+	return out, nil
+}
+
+// UnmarshalSealedPayload decodes a decrypted DM payload.
+func UnmarshalSealedPayload(b []byte) (SealedPayload, error) {
+	if len(b) < 1 {
+		return SealedPayload{}, record.ErrTruncated
+	}
+	n := int(b[0])
+	if len(b) < 1+n {
+		return SealedPayload{}, record.ErrTruncated
+	}
+	return SealedPayload{Subject: string(b[1 : 1+n]), Text: string(b[1+n:])}, nil
 }
 
 // MarshalDMBody encodes a DM body deterministically.
@@ -45,16 +83,11 @@ func MarshalDMBody(d DMBody) ([]byte, error) {
 	if len(d.Recipient) > 16 {
 		return nil, fmt.Errorf("recipient is %d bytes, limit is 16", len(d.Recipient))
 	}
-	if len(d.Subject) > 72 {
-		return nil, fmt.Errorf("subject is %d bytes, limit is 72", len(d.Subject))
-	}
-	out := make([]byte, 0, 3+len(d.Sender)+len(d.Recipient)+len(d.Subject)+len(d.Sealed))
+	out := make([]byte, 0, 2+len(d.Sender)+len(d.Recipient)+len(d.Sealed))
 	out = append(out, byte(len(d.Sender)))
 	out = append(out, d.Sender...)
 	out = append(out, byte(len(d.Recipient)))
 	out = append(out, d.Recipient...)
-	out = append(out, byte(len(d.Subject)))
-	out = append(out, d.Subject...)
 	out = append(out, d.Sealed...)
 	return out, nil
 }
@@ -80,9 +113,6 @@ func UnmarshalDMBody(b []byte) (DMBody, error) {
 	if d.Recipient, rest, err = read(rest); err != nil {
 		return DMBody{}, err
 	}
-	if d.Subject, rest, err = read(rest); err != nil {
-		return DMBody{}, err
-	}
 	d.Sealed = append([]byte(nil), rest...)
 	return d, nil
 }
@@ -93,7 +123,7 @@ func (s *Store) IndexDM(ctx context.Context, id record.ID, body DMBody, senderNo
 		INSERT INTO dm_index (record_id, sender, recipient, sender_node, subject, sent_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(record_id) DO NOTHING`,
-		id[:], body.Sender, body.Recipient, senderNode[:], body.Subject, sentAt)
+		id[:], body.Sender, body.Recipient, senderNode[:], "", sentAt)
 	if err != nil {
 		return fmt.Errorf("index DM: %w", err)
 	}

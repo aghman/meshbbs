@@ -126,13 +126,21 @@ func (s *Service) SendDM(ctx context.Context, sender, recipientRef, subject, tex
 		return record.ID{}, err
 	}
 
-	sealed, err := keyring.Seal(pub, []byte(text))
+	// The subject is sealed with the body, not carried in the clear: see the
+	// note on store.DMBody for why [D7] does not cover it.
+	payload, err := store.MarshalSealedPayload(store.SealedPayload{
+		Subject: subject, Text: text,
+	})
+	if err != nil {
+		return record.ID{}, err
+	}
+	sealed, err := keyring.Seal(pub, payload)
 	if err != nil {
 		return record.ID{}, err
 	}
 
 	body, err := store.MarshalDMBody(store.DMBody{
-		Sender: sender, Recipient: nick, Subject: subject, Sealed: sealed,
+		Sender: sender, Recipient: nick, Sealed: sealed,
 	})
 	if err != nil {
 		return record.ID{}, err
@@ -193,22 +201,22 @@ func (s *Service) ResolveRecipient(ctx context.Context, ref string) (string, ide
 // passphrase explicitly rather than reading it from session state. That is
 // deliberate: it keeps the set of code paths touching private material small
 // and visible, and it is exactly the operation tier 3 will move off the server.
-func (s *Service) OpenDM(ctx context.Context, nick, passphrase string, sealed []byte) (string, error) {
+func (s *Service) OpenDM(ctx context.Context, nick, passphrase string, sealed []byte) (store.SealedPayload, error) {
 	wrapped, err := s.store.WrappedDMKey(ctx, nick)
 	if err != nil {
-		return "", err
+		return store.SealedPayload{}, err
 	}
 	priv, err := keyring.Unwrap(wrapped, passphrase)
 	if err != nil {
-		return "", err
+		return store.SealedPayload{}, err
 	}
 	defer priv.Zero()
 
 	plain, err := keyring.Open(priv, sealed)
 	if err != nil {
-		return "", err
+		return store.SealedPayload{}, err
 	}
-	return string(plain), nil
+	return store.UnmarshalSealedPayload(plain)
 }
 
 // newRecord reserves a sequence number and builds a signed record.
@@ -271,5 +279,24 @@ func (s *Service) SeedDefaultAreas(ctx context.Context) error {
 			}
 		}
 	}
+	return nil
+}
+
+// VerifyPassphrase checks that a passphrase unwraps a user's DM key, without
+// decrypting any message.
+//
+// This backs the session unlock step. It exists as its own operation so the
+// UI never has to fake a decryption to test a passphrase — and so the set of
+// code paths that touch private key material stays small and greppable.
+func (s *Service) VerifyPassphrase(ctx context.Context, nick, passphrase string) error {
+	wrapped, err := s.store.WrappedDMKey(ctx, nick)
+	if err != nil {
+		return err
+	}
+	priv, err := keyring.Unwrap(wrapped, passphrase)
+	if err != nil {
+		return err
+	}
+	priv.Zero()
 	return nil
 }
