@@ -420,3 +420,37 @@ func TestSchemaHasNoEmailColumn(t *testing.T) {
 		}
 	}
 }
+
+// Regression: the connection pool is capped at one connection (see Open), so a
+// method that issues a second query while a result set is still open
+// deadlocks rather than erroring — the process simply stops. ListPosts had
+// exactly this bug (it called SelfNode mid-stream).
+//
+// This test would hang rather than fail if it regressed, so the package's
+// -timeout is what turns it into a red build. Keep it cheap so it always runs.
+func TestListPostsDoesNotDeadlockOnTheSingleConnection(t *testing.T) {
+	s, ctx := testStore(t)
+	k := testKey(t, 21)
+	if err := s.PutNode(ctx, Node{ID: k.ID(), PublicKey: k.Public, IsSelf: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateArea(ctx, "general", "", false); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ListPosts(ctx, "general", 10)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ListPosts did not return within 10s: it is holding the single " +
+			"pooled connection while issuing another query")
+	}
+}
