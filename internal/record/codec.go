@@ -1,6 +1,7 @@
 package record
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
@@ -45,6 +46,27 @@ func Unmarshal(b []byte) (*Record, error) {
 	r, err := decodeCanonical(canonical)
 	if err != nil {
 		return nil, err
+	}
+
+	// Require the input to be the canonical encoding of what it parsed to.
+	//
+	// Without this, one logical record has several wire forms — an overlong
+	// varint is the easy one — and since the record ID is a hash of these
+	// bytes, each form gets a DIFFERENT ID. Content-addressed dedup is what
+	// stops a flooding mesh reprocessing the same record from every path
+	// (§6.2), so a peer able to mint new IDs for existing records could defeat
+	// it and force repeated work for records that will fail verification
+	// anyway.
+	//
+	// Re-encoding and comparing makes this structural rather than a promise to
+	// check each field individually: any future encoding subtlety is covered
+	// by the same test.
+	reencoded, err := r.canonicalBytes()
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(reencoded, canonical) {
+		return nil, errors.New("non-canonical record encoding: the same record has another wire form")
 	}
 	// Retain the exact bytes rather than re-encoding. This is what makes an
 	// encoder change unable to invalidate stored history.

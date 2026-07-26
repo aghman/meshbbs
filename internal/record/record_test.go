@@ -330,11 +330,48 @@ func FuzzUnmarshal(f *testing.F) {
 		if len(got.Body) > MaxBodyLen {
 			t.Fatalf("parsed a body of %d bytes, over the %d limit", len(got.Body), MaxBodyLen)
 		}
-		// Anything that parses must re-marshal to exactly the input, or the
-		// codec has a non-canonical representation — which would let two
-		// different byte strings share a record ID.
-		if !bytes.Equal(got.Marshal(), data) {
-			t.Fatalf("parse/serialize is not canonical")
+		// Anything that parses must RE-ENCODE from its parsed fields to exactly
+		// the input.
+		//
+		// Comparing Marshal() to the input is not enough and was the original
+		// mistake here: Marshal returns the retained signed bytes, so it echoes
+		// the input and the check passes vacuously. Re-encoding from the fields
+		// is what actually proves the wire form is the only one for this
+		// record.
+		reencoded, err := got.canonicalBytes()
+		if err != nil {
+			t.Fatalf("a parsed record failed to re-encode: %v", err)
+		}
+		if !bytes.Equal(reencoded, got.SignedBytes()) {
+			t.Fatalf("parse/encode is not canonical:\n in: % x\nout: % x", got.SignedBytes(), reencoded)
 		}
 	})
+}
+
+// The record ID is a hash of the wire bytes, so a second wire form for the
+// same record means a second ID — and content-addressed dedup, which is what
+// stops a flooding mesh reprocessing everything from every path, stops working.
+//
+// Go's binary.Uvarint accepts overlong encodings, so this is reachable: 0x81
+// 0x00 decodes to 1 exactly as 0x01 does. Found in the version-vector fuzzer
+// first, then confirmed here.
+func TestRecordRejectsNonCanonicalVarints(t *testing.T) {
+	k := testKey(t, 31)
+	r := mustNew(t, k, Record{Seq: 1, TS: 1, Type: TypePost, Body: []byte("x")})
+	wire := r.Marshal()
+
+	seqOff := 1 + 1 + 1 + identity.NodeIDLen
+	if wire[seqOff] != 1 {
+		t.Fatalf("expected seq=1 as one byte at offset %d, got 0x%02x", seqOff, wire[seqOff])
+	}
+
+	padded := append([]byte{}, wire[:seqOff]...)
+	padded = append(padded, 0x81, 0x00) // overlong encoding of 1
+	padded = append(padded, wire[seqOff+1:]...)
+
+	got, err := Unmarshal(padded)
+	if err == nil {
+		t.Fatalf("accepted a non-canonical varint: parsed seq=%d as id %s, "+
+			"giving one record two IDs", got.Seq, got.ID())
+	}
 }
