@@ -173,8 +173,18 @@ jobs:
       # §12.5: every parser is reachable by anyone holding the channel PSK, so
       # a short fuzz run gates each change. Long campaigns belong in a
       # scheduled job, not the PR path.
+      # Every wire parser gets a short run on each change. These found three
+      # real canonicality bugs — overlong varints in the record codec and the
+      # version vector, and unvalidated reserved bits in the symbol header —
+      # each of which gave one logical value two wire forms.
       - name: Fuzz record parser
-        run: go test ./internal/record/ -run XXX -fuzz FuzzUnmarshal -fuzztime 60s
+        run: go test ./internal/record/ -run XXX -fuzz FuzzUnmarshal -fuzztime 45s
+      - name: Fuzz version vector parser
+        run: go test ./internal/vv/ -run XXX -fuzz FuzzDecode -fuzztime 30s
+      - name: Fuzz symbol parser
+        run: go test ./internal/fountain/ -run XXX -fuzz FuzzDecodeSymbol -fuzztime 30s
+      - name: Fuzz bundle parser
+        run: go test ./internal/bundle/ -run XXX -fuzz FuzzUnpack -fuzztime 30s
 
   golden:
     name: Golden frames are stable
