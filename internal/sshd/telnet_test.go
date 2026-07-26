@@ -475,7 +475,7 @@ func TestTelnetRefusesConnectionsOverTheLimit(t *testing.T) {
 	held[0].Close()
 	held = held[1:]
 
-	if !waitFor(10*time.Second, func() bool { return srv.ActiveSessions() < 2 }) {
+	if !waitFor(30*time.Second, func() bool { return srv.ActiveSessions() < 2 }) {
 		t.Fatalf("closing a session did not release its slot (active=%d)", srv.ActiveSessions())
 	}
 
@@ -509,4 +509,64 @@ func waitFor(budget time.Duration, cond func() bool) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return cond()
+}
+
+// A client that connects and vanishes must not hold its session slot.
+//
+// This is the failure mode a session cap makes worse rather than better: if
+// dead sessions never unwind, the slots fill permanently and the BBS is
+// unreachable over telnet until it restarts. The session must end on the
+// reader seeing EOF, not on a later write happening to fail — whether a write
+// is pending is a matter of timing, and on CI it was not.
+func TestTelnetReleasesSlotWhenClientVanishes(t *testing.T) {
+	addr, srv := startTelnetLimited(t, true, 4)
+
+	conns := make([]net.Conn, 0, 3)
+	for i := 0; i < 3; i++ {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+	}
+	if !waitFor(10*time.Second, func() bool { return srv.ActiveSessions() == 3 }) {
+		t.Fatalf("expected 3 sessions, got %d", srv.ActiveSessions())
+	}
+
+	// Drop every client abruptly, without reading anything first, so nothing
+	// on the server is mid-write when they go.
+	for _, c := range conns {
+		c.Close()
+	}
+
+	// A generous budget: this is about whether sessions unwind AT ALL, not how
+	// fast. A tight bound here turns an environment difference into a red
+	// build, which is what happened when this was first written.
+	if !waitFor(30*time.Second, func() bool { return srv.ActiveSessions() == 0 }) {
+		t.Fatalf("sessions did not unwind after their clients disconnected: %d still held",
+			srv.ActiveSessions())
+	}
+}
+
+// The reader must report the end of the stream exactly once, so a teardown
+// hook cannot fire repeatedly.
+func TestTelnetReaderSignalsEndOnce(t *testing.T) {
+	var ends int
+	r := &telnetReader{
+		conn:  &pipeConn{data: []byte("hi")},
+		onEnd: func() { ends++ },
+	}
+	buf := make([]byte, 32)
+	for i := 0; i < 5; i++ {
+		if _, err := r.Read(buf); err != nil {
+			break
+		}
+	}
+	// Drain past EOF a few more times.
+	for i := 0; i < 3; i++ {
+		_, _ = r.Read(buf)
+	}
+	if ends != 1 {
+		t.Fatalf("end signalled %d times, want exactly 1", ends)
+	}
 }

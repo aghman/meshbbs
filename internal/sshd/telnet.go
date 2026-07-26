@@ -176,6 +176,17 @@ func (t *TelnetServer) handle(ctx context.Context, conn net.Conn) {
 	// Telnet sessions are guest-only in this build. Accepting a password over
 	// plaintext is exactly the thing [D12] warns about, and the SSH path is
 	// one command away — so the honest move is to offer reading, not logins.
+	// Tie the program's lifetime to this connection.
+	//
+	// Without this, a session whose client vanishes can persist indefinitely:
+	// Bubble Tea keeps running until something tells it to stop, and the only
+	// signal it would otherwise get is a write failing — which only happens if
+	// a render is pending. A client that connects and disappears would hold its
+	// slot forever, and with a session cap in place that is worse than no cap,
+	// because the BBS ends up permanently full.
+	connCtx, cancelConn := context.WithCancel(ctx)
+	defer cancelConn()
+
 	sessionID := fmt.Sprintf("telnet-%p", conn)
 	model := tui.New(tui.Config{
 		Service: t.svc, Store: t.store,
@@ -195,8 +206,9 @@ func (t *TelnetServer) handle(ctx context.Context, conn net.Conn) {
 	})
 
 	p := tea.NewProgram(model,
-		tea.WithInput(&telnetReader{conn: conn}),
+		tea.WithInput(&telnetReader{conn: conn, onEnd: cancelConn}),
 		tea.WithOutput(conn),
+		tea.WithContext(connCtx),
 	)
 	if _, err := p.Run(); err != nil {
 		t.log.Debug("telnet session ended", "err", err)
@@ -229,6 +241,10 @@ const (
 type telnetReader struct {
 	conn  net.Conn
 	state telnetState
+	// onEnd fires once when the stream ends, so the session can be torn down
+	// on the reader's authority rather than waiting for a write to fail.
+	onEnd func()
+	ended bool
 }
 
 type telnetState int
@@ -249,10 +265,22 @@ func (r *telnetReader) Read(p []byte) (int, error) {
 	// is what a caller expects from an io.Reader.
 	for {
 		n, err := r.readOnce(p)
+		if err != nil {
+			r.signalEnd()
+		}
 		if n > 0 || err != nil {
 			return n, err
 		}
 	}
+}
+
+// signalEnd reports the end of the stream exactly once.
+func (r *telnetReader) signalEnd() {
+	if r.ended || r.onEnd == nil {
+		return
+	}
+	r.ended = true
+	r.onEnd()
 }
 
 func (r *telnetReader) readOnce(p []byte) (int, error) {
