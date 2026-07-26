@@ -207,6 +207,11 @@ jobs:
         run: .github/scripts/fuzz.sh ./internal/gossip FuzzDecodeRangeReq 30s
       - name: Fuzz gossip vector-request parser
         run: .github/scripts/fuzz.sh ./internal/gossip FuzzDecodeVectorReq 20s
+      # A profile nick arrives from a stranger's instance and is rendered into a
+      # terminal, so the parser is both a canonicality and an ANSI-injection
+      # boundary.
+      - name: Fuzz profile parser
+        run: .github/scripts/fuzz.sh ./internal/profile FuzzUnmarshalProfileBody 20s
 
   golden:
     name: Golden frames are stable
