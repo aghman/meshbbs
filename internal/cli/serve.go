@@ -134,15 +134,16 @@ Serves SSH on the configured port. Users connect with:
 			// telnet server itself at every start.
 			if e.cfg.Telnet.Enabled {
 				tel := sshd.NewTelnetServer(svc, st, sshd.TelnetOptions{
-					Bind:      e.cfg.Telnet.Bind,
-					Port:      e.cfg.Telnet.Port,
-					GuestOnly: e.cfg.Telnet.GuestOnly,
-					Themes:    themes,
-					Theme:     e.cfg.Theme.Default,
-					Chat:      srv.Chat(),
-					Presence:  srv.Presence(),
-					Location:  loc,
-					Logger:    log,
+					Bind:        e.cfg.Telnet.Bind,
+					Port:        e.cfg.Telnet.Port,
+					GuestOnly:   e.cfg.Telnet.GuestOnly,
+					MaxSessions: e.cfg.Telnet.MaxSessions,
+					Themes:      themes,
+					Theme:       e.cfg.Theme.Default,
+					Chat:        srv.Chat(),
+					Presence:    srv.Presence(),
+					Location:    loc,
+					Logger:      log,
 				})
 				fmt.Fprintf(out, "  telnet    %s:%d (PLAINTEXT, guest-only)\n\n",
 					e.cfg.Telnet.Bind, e.cfg.Telnet.Port)

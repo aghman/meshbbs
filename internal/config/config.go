@@ -64,10 +64,11 @@ type SSH struct {
 // Off by default. Enabling it puts credentials on the wire in the clear; the
 // server warns at every start, and only guest access is served.
 type Telnet struct {
-	Enabled   bool   `toml:"enabled" default:"false" doc:"Serve telnet. OFF by default: telnet is plaintext, so anything typed can be read by anyone on the network path ([D12])."`
-	Bind      string `toml:"bind" default:"0.0.0.0" doc:"Address to listen on."`
-	Port      int    `toml:"port" default:"2323" doc:"Port to listen on. 23 is conventional but needs root."`
-	GuestOnly bool   `toml:"guest_only" default:"true" doc:"Serve read-only guest sessions only. Recommended: browsing over plaintext costs nothing, typing a password over it does."`
+	Enabled     bool   `toml:"enabled" default:"false" doc:"Serve telnet. OFF by default: telnet is plaintext, so anything typed can be read by anyone on the network path ([D12])."`
+	Bind        string `toml:"bind" default:"0.0.0.0" doc:"Address to listen on."`
+	Port        int    `toml:"port" default:"2323" doc:"Port to listen on. 23 is conventional but needs root."`
+	MaxSessions int    `toml:"max_sessions" default:"16" doc:"Maximum concurrent telnet sessions. This is a public plaintext port, so it is capped."`
+	GuestOnly   bool   `toml:"guest_only" default:"true" doc:"Serve read-only guest sessions only. Recommended: browsing over plaintext costs nothing, typing a password over it does."`
 }
 
 // Users configures registration policy (§6.7, [N7], [N9]).
@@ -210,6 +211,9 @@ func (c *Config) Validate() error {
 		}
 		if c.Telnet.Port == c.SSH.Port {
 			problems = append(problems, "telnet.port and ssh.port are the same")
+		}
+		if c.Telnet.MaxSessions < 1 {
+			problems = append(problems, "telnet.max_sessions must be at least 1")
 		}
 	}
 

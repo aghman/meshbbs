@@ -24,15 +24,16 @@ import (
 // and the default when it is turned on: browsing a public message base over
 // plaintext costs nothing, while typing a password over it is a real loss.
 type TelnetOptions struct {
-	Bind      string
-	Port      int
-	GuestOnly bool
-	Themes    *theme.Set
-	Theme     string
-	Chat      *tui.ChatRoom
-	Presence  *Presence
-	Location  *time.Location
-	Logger    *slog.Logger
+	Bind        string
+	Port        int
+	GuestOnly   bool
+	MaxSessions int
+	Themes      *theme.Set
+	Theme       string
+	Chat        *tui.ChatRoom
+	Presence    *Presence
+	Location    *time.Location
+	Logger      *slog.Logger
 }
 
 // TelnetServer serves the BBS over a raw socket.
@@ -45,6 +46,11 @@ type TelnetServer struct {
 
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
+
+	// ready closes once the listener is accepting, so callers can wait for
+	// startup without opening a probe connection — which would occupy a
+	// session slot and race anything that cares about capacity.
+	ready chan struct{}
 }
 
 // NewTelnetServer builds the listener.
@@ -55,6 +61,7 @@ func NewTelnetServer(svc *bbs.Service, st *store.Store, opts TelnetOptions) *Tel
 	return &TelnetServer{
 		opts: opts, svc: svc, store: st, log: opts.Logger,
 		conns: map[net.Conn]struct{}{},
+		ready: make(chan struct{}),
 	}
 }
 
@@ -66,6 +73,7 @@ func (t *TelnetServer) ListenAndServe(ctx context.Context) error {
 		return fmt.Errorf("telnet listen: %w", err)
 	}
 	t.ln = ln
+	close(t.ready)
 
 	// §11.3 and [D12]: the warning goes in the log every start, not just in
 	// the docs, so a sysop who enabled this months ago is reminded.
@@ -100,6 +108,16 @@ func (t *TelnetServer) ListenAndServe(ctx context.Context) error {
 	}
 }
 
+// Ready is closed once the listener is accepting connections.
+func (t *TelnetServer) Ready() <-chan struct{} { return t.ready }
+
+// ActiveSessions returns the number of live telnet connections.
+func (t *TelnetServer) ActiveSessions() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.conns)
+}
+
 // Close stops the listener.
 func (t *TelnetServer) Close() error {
 	if t.ln != nil {
@@ -109,9 +127,27 @@ func (t *TelnetServer) Close() error {
 }
 
 func (t *TelnetServer) handle(ctx context.Context, conn net.Conn) {
+	// Cap concurrent sessions. This is a plaintext port on the public
+	// internet; without a limit, anything that opens sockets and never speaks
+	// exhausts memory and file descriptors, and takes SSH down with it.
+	max := t.opts.MaxSessions
+	if max <= 0 {
+		max = 16
+	}
+
 	t.mu.Lock()
+	if len(t.conns) >= max {
+		t.mu.Unlock()
+		fmt.Fprintf(conn, "\r\nThis BBS is full (%d telnet sessions). Try again shortly,\r\n"+
+			"or connect over SSH, which has its own capacity.\r\n", max)
+		conn.Close()
+		t.log.Warn("telnet connection refused: at capacity",
+			"limit", max, "remote", conn.RemoteAddr())
+		return
+	}
 	t.conns[conn] = struct{}{}
 	t.mu.Unlock()
+
 	defer func() {
 		t.mu.Lock()
 		delete(t.conns, conn)
@@ -167,17 +203,59 @@ func (t *TelnetServer) handle(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// Telnet protocol bytes (RFC 854).
+const (
+	tnIAC  = 255 // interpret as command
+	tnSE   = 240 // end of subnegotiation
+	tnSB   = 250 // begin subnegotiation
+	tnWILL = 251
+	tnWONT = 252
+	tnDO   = 253
+	tnDONT = 254
+)
+
 // telnetReader strips telnet IAC command sequences from the byte stream.
 //
 // Without this, a client's negotiation bytes arrive as keystrokes and the TUI
 // sees garbage — the classic symptom being a menu that reacts to keys nobody
 // pressed.
+//
+// It is a STATE MACHINE rather than a per-read scan, and that matters: a TCP
+// read ends wherever the network decides, including between the IAC and the
+// command byte, or halfway through a window-size subnegotiation. A parser that
+// restarts on each read loses that context and emits the tail of the sequence
+// as input. The first version of this code did exactly that, and only a test
+// feeding one byte at a time caught it.
 type telnetReader struct {
-	conn net.Conn
-	buf  []byte
+	conn  net.Conn
+	state telnetState
 }
 
+type telnetState int
+
+const (
+	tnData        telnetState = iota // ordinary bytes
+	tnSawIAC                         // saw IAC, awaiting a command
+	tnAwaitOption                    // saw IAC WILL/WONT/DO/DONT, awaiting the option
+	tnInSubneg                       // inside IAC SB ... awaiting IAC SE
+	tnSubnegIAC                      // inside a subnegotiation, saw IAC
+)
+
 func (r *telnetReader) Read(p []byte) (int, error) {
+	// Keep reading until at least one application byte is produced, or the
+	// connection ends. A read that consumed nothing but protocol bytes — a
+	// client's opening handshake is exactly that — has nothing to hand up, and
+	// returning (0, nil) invites the consumer to spin. Blocking for more input
+	// is what a caller expects from an io.Reader.
+	for {
+		n, err := r.readOnce(p)
+		if n > 0 || err != nil {
+			return n, err
+		}
+	}
+}
+
+func (r *telnetReader) readOnce(p []byte) (int, error) {
 	tmp := make([]byte, len(p))
 	n, err := r.conn.Read(tmp)
 	if n == 0 {
@@ -185,30 +263,49 @@ func (r *telnetReader) Read(p []byte) (int, error) {
 	}
 
 	out := p[:0]
-	for i := 0; i < n; i++ {
-		c := tmp[i]
-		if c != 255 { // not IAC
-			out = append(out, c)
-			continue
-		}
-		// IAC: skip the command, and its option byte for WILL/WONT/DO/DONT.
-		if i+1 >= n {
-			break
-		}
-		cmd := tmp[i+1]
-		switch cmd {
-		case 255: // escaped 0xFF
-			out = append(out, 255)
-			i++
-		case 251, 252, 253, 254: // WILL WONT DO DONT
-			i += 2
-		case 250: // SB ... SE
-			for i < n && !(tmp[i] == 255 && i+1 < n && tmp[i+1] == 240) {
-				i++
+	for _, c := range tmp[:n] {
+		switch r.state {
+		case tnData:
+			if c == tnIAC {
+				r.state = tnSawIAC
+				continue
 			}
-			i++
-		default:
-			i++
+			out = append(out, c)
+
+		case tnSawIAC:
+			switch c {
+			case tnIAC:
+				// IAC IAC is an escaped literal 0xFF.
+				out = append(out, tnIAC)
+				r.state = tnData
+			case tnWILL, tnWONT, tnDO, tnDONT:
+				r.state = tnAwaitOption
+			case tnSB:
+				r.state = tnInSubneg
+			default:
+				// A two-byte command (NOP, AYT, IP, ...): nothing follows.
+				r.state = tnData
+			}
+
+		case tnAwaitOption:
+			// Discard the option byte itself.
+			r.state = tnData
+
+		case tnInSubneg:
+			if c == tnIAC {
+				r.state = tnSubnegIAC
+			}
+			// Everything else inside a subnegotiation is payload we ignore.
+
+		case tnSubnegIAC:
+			if c == tnSE {
+				r.state = tnData
+			} else {
+				// IAC IAC inside a subnegotiation is escaped data; anything
+				// else is a malformed stream, and staying in the subnegotiation
+				// is the conservative reading.
+				r.state = tnInSubneg
+			}
 		}
 	}
 	return len(out), err
