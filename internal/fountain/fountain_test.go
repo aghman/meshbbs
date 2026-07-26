@@ -363,6 +363,99 @@ func TestRepairCountSurvivesTheLossItIsSizedFor(t *testing.T) {
 	}
 }
 
+// TestRepairCountHoldsTheFailureRate measures what RepairCount actually
+// achieves, rather than checking the model it is built on.
+//
+// The distinction matters, and cost us once. The test above asserts that the
+// *expected* arrivals clear K+1.6, which the old constants satisfied while
+// still failing to decode 6.2% of the time — because the codec's overhead is
+// not 1.6 but a long-tailed distribution with p95 = 5, and because expected
+// arrivals say nothing about the half of receivers that do worse than expected.
+// A model can be self-consistent and wrong. Only a measured decode rate catches
+// that.
+//
+// So: transmit, drop symbols independently, and count how often the decoder
+// fails to finish. The seeds are fixed, so this is a deterministic number and
+// not a flaky threshold.
+//
+// If mask()'s degree distribution changes, epsilon changes with it and this
+// test fails. That is the intended alarm: refit the constants against a fresh
+// failure curve, do not relax the threshold.
+func TestRepairCountHoldsTheFailureRate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("statistical; needs a few thousand decodes")
+	}
+
+	var sender identity.NodeID
+	sender[0] = 1
+
+	// The design targets under 2% of receivers needing a repair round. Allow
+	// 4% here so an ordinary refit does not have to be exact, but stay well
+	// under the 6.2% the original constants produced.
+	const allowed = 0.04
+
+	cases := []struct {
+		k      int
+		loss   float64
+		trials int
+	}{
+		{5, 0.10, 900},
+		{10, 0.05, 900},
+		{10, 0.20, 900},
+		{15, 0.30, 700},
+		{20, 0.10, 700},
+		{40, 0.05, 250}, // K=40 is O(K^3) to solve; fewer trials
+	}
+
+	for _, tc := range cases {
+		repair := RepairCount(tc.k, tc.loss)
+		failed := 0
+		for trial := 0; trial < tc.trials; trial++ {
+			src := rng.NewSeeded(uint64(trial)*7919 + uint64(tc.k)*131)
+			payload := make([]byte, tc.k*200)
+			if _, err := src.Read(payload); err != nil {
+				t.Fatal(err)
+			}
+			enc, err := NewEncoder(sender, uint32(trial), payload, 200)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dec, err := NewDecoder(sender, uint32(trial), enc.K(), 200, enc.OrigLen())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range enc.Transmission(repair) {
+				if src.Float64() < tc.loss {
+					continue // lost in flight
+				}
+				if _, err := dec.Add(s); err != nil {
+					t.Fatalf("decoder rejected a well-formed symbol: %v", err)
+				}
+			}
+			if !dec.Done() {
+				failed++
+				continue
+			}
+			got, err := dec.Payload()
+			if err != nil {
+				t.Fatalf("K=%d: decoder finished but produced no payload: %v", tc.k, err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("K=%d: decoder produced a payload that is not the original", tc.k)
+			}
+		}
+
+		rate := float64(failed) / float64(tc.trials)
+		t.Logf("K=%2d loss=%2.0f%%: K+%d symbols, %.2f%% of receivers failed to decode",
+			tc.k, tc.loss*100, repair, rate*100)
+		if rate > allowed {
+			t.Errorf("K=%d at %.0f%% loss: %.2f%% of receivers failed to decode with %d repair symbols "+
+				"(allowed %.0f%%). Refit epsilon and zScore against a fresh failure curve.",
+				tc.k, tc.loss*100, rate*100, repair, allowed*100)
+		}
+	}
+}
+
 func TestSymbolWireRoundTrip(t *testing.T) {
 	src := rng.NewSeeded(17)
 	for i := 0; i < 500; i++ {

@@ -2,11 +2,12 @@
 
 *A modern, cross-platform BBS in Go with SSH access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
 
-**Status:** Draft v0.7 — door API authority settled
-**Date:** 2026-07-24
+**Status:** Draft v0.8 — fountain parameters corrected by measurement
+**Date:** 2026-07-25
 **All 15 open questions from v0.1 are answered. Decisions are recorded in §15 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §14.**
 
 *v0.3 added account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
+*v0.8 corrects two §7.2 claims that implementation disproved: the fountain degree distribution (uniform-half, not "heavy on degree 2–3" — that intuition belongs to belief propagation, and we decode by Gaussian elimination), and the repair count (`ceil(αK)+1` decoded for only 5 of 12 receivers at K=10 and 20% loss; replaced by a fitted formula with ε = 3.4, z = 1.8). Both corrections come from the Phase 2 simulator harness (§12.1) doing its job.*
 *v0.7 closes `N11`: door API capability levels 1–3 always available, `act_as_user` a per-door sysop grant with capability intersection (§9.1.1); `DOOR_EVENT` stays node-signed. No open questions remain except `N10`, which resolves by measurement.*
 *v0.6 adds the testing strategy (§12) and, from auditing for it, three Phase-0 encoding constraints that silently break signatures (§6.2.1). Raises `N11` (door API authority). `N4` closed; `N10` open pending measurement.*
 *v0.5 resolves `N1`–`N9` (§15.2): sysop-owned aliases resolving in addressing, `SUCCESSION` with auto-follow, standalone key helper, dual base32/word ID rendering, a theme loader, an R measurement method and `mesh-survey` (§7.8), open-plus-gated registration, no email, listed-by-default. Adopts `spf13/cobra` for all CLI. One question remains open (`N10`: the actual value of R).*
@@ -579,9 +580,49 @@ byte 7     : symbol_size_hint / extended id high bits
 ```
 
 1. **Systematic prefix.** Symbols `0..K-1` are the original fragments, sent in order. A receiver with no loss decodes at **zero coding overhead** — the common case on a good link costs us nothing, which is the property pure fountain schemes give up.
-2. **Repair symbols on demand.** Symbols `K, K+1, …` are XOR combinations of the source symbols. The combination for symbol `i` is derived by seeding a PRNG with `(sender, bundle_id, i)`, so **the mask is never transmitted** — both ends compute it. Note the `sender` in that tuple: `bundle_id` alone is a random uint32 chosen independently by each node, so decoder state must be keyed by the Meshtastic source address as well, or two nodes colliding on a bundle ID will silently corrupt each other's decodes. Degree is drawn from a distribution tuned for small K (heavy on degree 2–3, which is where small-K decoding actually succeeds).
+2. **Repair symbols on demand.** Symbols `K, K+1, …` are XOR combinations of the source symbols. The combination for symbol `i` is derived by seeding a PRNG with `(sender, bundle_id, i)`, so **the mask is never transmitted** — both ends compute it. Note the `sender` in that tuple: `bundle_id` alone is a random uint32 chosen independently by each node, so decoder state must be keyed by the Meshtastic source address as well, or two nodes colliding on a bundle ID will silently corrupt each other's decodes. Degree is drawn from a **uniform-half** distribution: each source symbol is included with probability ½, giving expected degree K/2.
+
+   > **Corrected from "heavy on degree 2–3".** That intuition is correct for *belief-propagation* decoding, which needs sparse rows to find a degree-1 equation to peel. We decode by Gaussian elimination (item 3), which wants the opposite — dense rows are far more likely to be linearly independent of what the decoder already holds. Measured at K=40: the sparse distribution needed **14.41** symbols beyond K on average; uniform-half needs **1.72**. At mesh airtime that difference is minutes per bundle.
 3. **Decoding** is belief propagation with Gaussian-elimination fallback over GF(2). At K ≤ 64 that is a 64×64 bit matrix — microseconds, and a few dozen lines.
-4. **How many repair symbols to send** is a governor decision, not a protocol constant: send `K` systematic symbols plus `ceil(αK) + 1` repair symbols, where α starts at the observed mesh loss rate and adapts from the digest cycle (peers' high-water marks reveal whether bundles are landing). No NACKs in the steady state; a peer still stuck after a full digest cycle can unicast a `want-repair(bundle_id, count)` as a last resort.
+4. **How many repair symbols to send** is a governor decision, not a protocol constant. α starts at the observed mesh loss rate and adapts from the digest cycle (peers' high-water marks reveal whether bundles are landing). No NACKs in the steady state; a peer still stuck after a full digest cycle can unicast a `want-repair(bundle_id, count)`.
+
+   > **`want-repair` is a common path, not a last resort** — an earlier draft of this section called it the latter, and measurement says otherwise. The formula below sizes for *one* receiver's decode probability (~2% failure). The chance that **every** receiver decodes is that raised to the audience size, and it falls off fast — measured at K=10, 20% loss: **97%** for a single receiver, **79%** across ten, **29%** across fifty. At the 50-instance scale of `[D2]`, roughly two thirds of broadcasts will leave *somebody* short.
+   >
+   > This is the right trade rather than a defect. Sizing so that fifty receivers all decode would inflate every transmission for every peer on the channel, to spare one straggler a unicast. But it means `want-repair` must be engineered as a routine, rate-limited, airtime-budgeted path — not an exception handler.
+
+   The count itself is **not** `ceil(αK) + 1`. That formula under-provisions badly, because it accounts for neither the repair symbols being lost at the same rate as everything else, nor the fact that loss is random and half of all receivers do worse than the mean. Measured at K=10 and 20% loss it sent 13 symbols and **5 of 12 receivers decoded**.
+
+   What we send instead is the smallest `N` satisfying
+
+   ```
+   N(1-α) - z·sqrt(N·α·(1-α))  ≥  K + ε        with ε = 3.4, z = 1.8
+   ```
+
+   solved by search (N appears on both sides). ε is the codec's own overhead — the symbols needed beyond K because some arrivals are linearly dependent — and **it is flat in K**, not proportional to it. It was first set to 1.6, the measured *mean*; that was the wrong statistic, because the overhead is long-tailed (p90 = 4, p95 = 5, p99 = 7) and sizing to the mean leaves half the receivers short of it. The constants are fitted to a measured failure curve (K ∈ {5,10,15,20,40} × α ∈ {5…50}%, 3000 trials each, smallest count holding failure under 2%); they clear all thirty cells while overshooting by 14 symbols in total.
+
+   Note that **z came down from 2.0 as ε went up**. The margin was never missing, it was charged to the wrong term — and widening the binomial interval to cover a shortfall that was really codec overhead costs far more airtime, because that term scales with N while ε does not.
+
+   Cost, at R=4 on LongFast for a 3 KB bundle (K=15), in seconds of channel time:
+
+   | Loss | Symbols | Channel time | vs. payload alone |
+   |---|---|---|---|
+   | 0% | 16 | 1m 54s | 1.11× |
+   | 10% | 24 | 2m 52s | 1.66× |
+   | 30% | 34 | 4m 03s | 2.36× |
+   | 50% | 50 | 5m 58s | 3.47× |
+
+   This table is why α must adapt rather than be set pessimistically: assuming 50% loss on a link that is actually clean triples the airtime bill for every peer on the channel.
+
+   **Against ARQ.** Modelling ARQ properly — transmit `K`, then retransmit the union of what anyone still lacks, with retransmissions subject to the same loss, repeating until everyone is whole — at K=10 and 15% loss:
+
+   | Receivers | ARQ | Fountain | Ratio |
+   |---|---|---|---|
+   | 1 | 12 | 20 | **0.60×** |
+   | 5 | 21 | 20 | 1.05× |
+   | 20 | 24 | 20 | 1.20× |
+   | 50 | 29 | 20 | 1.45× |
+
+   The fountain cost is flat in audience size — one transmission serves everyone — while ARQ grows with it. Note the crossover: **at a single receiver ARQ genuinely wins**, and unicast repair to one peer is the better strategy. `[D1]` is a claim about broadcast to many, and holds from about five receivers up.
 5. **K = 1 is a special case** — a single-packet bundle needs no coding, just optional blind repeats. Most DMs and most small post batches land here, and the code path should be trivially short.
 
 This is an LT code with a small-K-tuned distribution and a systematic prefix. Writing it ourselves is a few hundred lines, avoids the IPR question, and lets us tune the distribution against the simulated mesh harness (§10) — which is exactly why the codec is built in **Phase 2**, where the harness lives, not in Phase 3 alongside the radios.

@@ -114,31 +114,134 @@ func TestBroadcastCostsLessThanRetransmittingTheUnion(t *testing.T) {
 	}
 	k := enc.K()
 
-	const receivers = 20
 	const loss = 0.15
 
-	// What ARQ would cost: the sender transmits K, then retransmits every
-	// symbol that ANY receiver missed, repeating until all are satisfied.
-	missing := make(map[int]bool)
-	for r := 0; r < receivers; r++ {
-		for i := 0; i < k; i++ {
-			if src.Float64() < loss {
-				missing[i] = true
+	// arqCost simulates ARQ properly: transmit K, then repeatedly retransmit the
+	// union of what is STILL missing, with retransmissions subject to the same
+	// loss, until every receiver holds every symbol.
+	//
+	// Running the rounds matters. A single round is capped at 2K and saturates
+	// once the receiver count is large enough that some receiver missed every
+	// symbol — which is exactly the regime where fountain coding wins, so a
+	// one-round model flatters ARQ precisely where it is worst.
+	arqCost := func(receivers int) int {
+		// missing[r][i] — receiver r still needs symbol i.
+		missing := make([]map[int]bool, receivers)
+		for r := range missing {
+			missing[r] = map[int]bool{}
+			for i := 0; i < k; i++ {
+				if src.Float64() < loss {
+					missing[r][i] = true
+				}
 			}
 		}
-	}
-	arqSymbols := k + len(missing)
 
-	// What this codec costs: K systematic plus repair sized for the loss, sent
-	// once regardless of how many receivers there are.
+		sent := k
+		for round := 0; round < 100; round++ {
+			union := map[int]bool{}
+			for _, m := range missing {
+				for i := range m {
+					union[i] = true
+				}
+			}
+			if len(union) == 0 {
+				return sent
+			}
+			sent += len(union)
+			// Retransmissions are lost at the same rate as anything else.
+			for i := range union {
+				for _, m := range missing {
+					if m[i] && src.Float64() >= loss {
+						delete(m, i)
+					}
+				}
+			}
+		}
+		t.Fatal("ARQ did not converge in 100 rounds")
+		return sent
+	}
+
+	// The fountain cost does not depend on the receiver count at all: one
+	// transmission serves everyone, and each decodes independently. That
+	// invariance is the whole argument for [D1], so assert it rather than
+	// assuming it.
 	fountainSymbols := k + RepairCount(k, loss)
 
-	t.Logf("K=%d, %d receivers at %.0f%% loss: ARQ ~%d symbols, fountain %d symbols",
-		k, receivers, loss*100, arqSymbols, fountainSymbols)
+	t.Logf("K=%d at %.0f%% loss — fountain sends %d symbols regardless of audience:",
+		k, loss*100, fountainSymbols)
 
-	if fountainSymbols >= arqSymbols {
-		t.Errorf("fountain coding cost %d symbols vs ARQ's %d — the premise of [D1] "+
-			"is that one broadcast beats retransmitting the union", fountainSymbols, arqSymbols)
+	for _, receivers := range []int{1, 5, 20, 50} {
+		arq := arqCost(receivers)
+		t.Logf("  %2d receivers: ARQ %3d symbols, fountain %d (%.2fx)",
+			receivers, arq, fountainSymbols, float64(arq)/float64(fountainSymbols))
+
+		// At one receiver ARQ is genuinely competitive — there is no union to
+		// pay for, and unicast repair is a reasonable strategy. The claim is
+		// about broadcast to many, so that is where the assertion lives.
+		if receivers >= 5 && fountainSymbols >= arq {
+			t.Errorf("at %d receivers fountain cost %d symbols vs ARQ's %d — the premise of [D1] "+
+				"is that one broadcast beats retransmitting the union",
+				receivers, fountainSymbols, arq)
+		}
+	}
+}
+
+// RepairCount is sized for ONE receiver's decode probability, not the whole
+// audience's. Sending to N receivers at a 2% per-receiver failure rate means
+// all N decode only 0.98^N of the time, so a large audience will routinely
+// leave someone short.
+//
+// That is deliberate, not an oversight: sizing so that fifty receivers all
+// decode with high probability would inflate every transmission for everyone,
+// and §7.2 already provides the cheap escape — a straggler unicasts
+// want-repair after a full digest cycle. This test pins the behaviour down so
+// the tradeoff stays visible rather than being discovered in the field.
+func TestRepairSizingIsPerReceiverNotPerAudience(t *testing.T) {
+	sender := testSender(3)
+	const k = 10
+	const loss = 0.20
+	repair := RepairCount(k, loss)
+
+	payload := make([]byte, k*symbolPayload)
+	rng.NewSeeded(5).Read(payload)
+	enc, err := NewEncoder(sender, 9, payload, symbolPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const trials = 400
+	for _, audience := range []int{1, 10, 50} {
+		allDecoded := 0
+		for trial := 0; trial < trials; trial++ {
+			src := rng.NewSeeded(uint64(trial)*31 + uint64(audience))
+			everyone := true
+			for r := 0; r < audience; r++ {
+				dec, err := NewDecoder(sender, 9, k, symbolPayload, enc.OrigLen())
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, s := range enc.Transmission(repair) {
+					if src.Float64() < loss {
+						continue
+					}
+					dec.Add(s)
+				}
+				if !dec.Done() {
+					everyone = false
+				}
+			}
+			if everyone {
+				allDecoded++
+			}
+		}
+		rate := float64(allDecoded) / trials
+		t.Logf("audience of %2d: everyone decoded in %.1f%% of transmissions", audience, rate*100)
+
+		// The point being pinned: this degrades with audience size, and the
+		// design absorbs it with want-repair rather than by over-provisioning.
+		if audience == 1 && rate < 0.95 {
+			t.Errorf("a single receiver decoded only %.1f%% of the time; RepairCount is under-sized", rate*100)
+		}
 	}
 }
 

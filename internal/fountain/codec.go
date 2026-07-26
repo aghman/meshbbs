@@ -112,14 +112,47 @@ func (e *Encoder) Transmission(repair int) []Symbol {
 //
 // Measured: at K=10 and 20% loss the design's formula sends 13 symbols and
 // only 5 of 12 receivers decoded. What is actually needed is the smallest N
-// where the number received stays above K + epsilon even a couple of standard
-// deviations below the mean:
+// where the number received stays above K + epsilon even z standard deviations
+// below the mean:
 //
-//	N(1-p) - 2*sqrt(N*p*(1-p)) >= K + epsilon
+//	N(1-p) - z*sqrt(N*p*(1-p)) >= K + epsilon
 //
-// with epsilon the codec's own overhead, measured at about 1.6 symbols. Solved
-// by search rather than algebra, because N appears on both sides and the
-// search is over at most a few dozen values.
+// Solved by search rather than algebra, because N appears on both sides and
+// the search is over at most a few dozen values.
+//
+// # Where epsilon and z come from
+//
+// Epsilon is the codec's own overhead: the symbols it needs beyond K because
+// some arrivals are linearly dependent on what it already holds. It was first
+// set to 1.6, the measured *mean*. That was the wrong statistic. The overhead
+// has a long tail — mean 1.6 but p90 = 4, p95 = 5, p99 = 7, and flat in K —
+// so sizing to the mean leaves roughly half the receivers short of it, on top
+// of whatever the binomial term already gave away.
+//
+// The constants below are fitted to a measured failure curve rather than
+// derived: for K in {5,10,15,20,40} crossed with loss in {5,10,20,30,40,50}%,
+// 3000 trials each, find the smallest repair count holding failure under 2%.
+// Against that table the original (1.6, 2.0) fell short in 28 of 30 cells,
+// with observed failure rates of 1.9% to 6.2%. These constants clear every
+// cell while overshooting by 14 symbols in total across all thirty — under
+// half a symbol each.
+//
+// Note that z came DOWN from 2.0 as epsilon went up. The margin was never
+// missing; it was being charged to the wrong term. Widening the binomial
+// interval to cover a shortfall that was really the codec's overhead cost far
+// more airtime than fixing epsilon, because the binomial term scales with N
+// while the overhead does not.
+//
+// TestRepairCountHoldsTheFailureRate is the regression test. If the degree
+// distribution in mask() changes, epsilon changes with it and these constants
+// must be refitted — that test will say so.
+const (
+	// epsilon is the codec overhead allowance, in symbols. Flat in K.
+	epsilon = 3.4
+	// zScore is how many standard deviations of binomial loss to cover.
+	zScore = 1.8
+)
+
 func RepairCount(k int, lossRate float64) int {
 	if lossRate <= 0 {
 		// A clean link decodes from the systematic prefix alone. One spare
@@ -132,7 +165,6 @@ func RepairCount(k int, lossRate float64) int {
 		lossRate = 0.9
 	}
 
-	const epsilon = 1.6 // measured codec overhead, flat in K
 	target := float64(k) + epsilon
 
 	// N cannot exceed a few multiples of K even at extreme loss; cap the
@@ -141,7 +173,7 @@ func RepairCount(k int, lossRate float64) int {
 	for n := k + 1; n <= maxN; n++ {
 		mean := float64(n) * (1 - lossRate)
 		sd := math.Sqrt(float64(n) * lossRate * (1 - lossRate))
-		if mean-2*sd >= target {
+		if mean-zScore*sd >= target {
 			return n - k
 		}
 	}
