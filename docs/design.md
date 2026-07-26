@@ -2,11 +2,12 @@
 
 *A modern, cross-platform BBS in Go with SSH access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
 
-**Status:** Draft v0.8 — fountain parameters corrected by measurement
+**Status:** Draft v0.9 — anti-entropy measured at fifty nodes
 **Date:** 2026-07-25
 **All 15 open questions from v0.1 are answered. Decisions are recorded in §15 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §14.**
 
 *v0.3 added account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
+*v0.9 records what building the anti-entropy engine (§7.3) and simulating fifty nodes established: `bundle_id` must be content-derived or an interrupted transmission livelocks under the airtime governor; ε is flat in K only for K ≥ 5 and K=1 is exact; the 50-node digest interval is ~5 hours, not 2–3; reply suppression is needed on the request path, not just the digest path; and control-message limits must derive from the MTU in bytes. Measured result at fifty nodes: convergence in 3h20m at 2.3% of the channel, with 95% of digest beats suppressed.*
 *v0.8 corrects two §7.2 claims that implementation disproved: the fountain degree distribution (uniform-half, not "heavy on degree 2–3" — that intuition belongs to belief propagation, and we decode by Gaussian elimination), and the repair count (`ceil(αK)+1` decoded for only 5 of 12 receivers at K=10 and 20% loss; replaced by a fitted formula with ε = 3.4, z = 1.8). Both corrections come from the Phase 2 simulator harness (§12.1) doing its job.*
 *v0.7 closes `N11`: door API capability levels 1–3 always available, `act_as_user` a per-door sysop grant with capability intersection (§9.1.1); `DOOR_EVENT` stays node-signed. No open questions remain except `N10`, which resolves by measurement.*
 *v0.6 adds the testing strategy (§12) and, from auditing for it, three Phase-0 encoding constraints that silently break signatures (§6.2.1). Raises `N11` (door API authority). `N4` closed; `N10` open pending measurement.*
@@ -580,7 +581,9 @@ byte 7     : symbol_size_hint / extended id high bits
 ```
 
 1. **Systematic prefix.** Symbols `0..K-1` are the original fragments, sent in order. A receiver with no loss decodes at **zero coding overhead** — the common case on a good link costs us nothing, which is the property pure fountain schemes give up.
-2. **Repair symbols on demand.** Symbols `K, K+1, …` are XOR combinations of the source symbols. The combination for symbol `i` is derived by seeding a PRNG with `(sender, bundle_id, i)`, so **the mask is never transmitted** — both ends compute it. Note the `sender` in that tuple: `bundle_id` alone is a random uint32 chosen independently by each node, so decoder state must be keyed by the Meshtastic source address as well, or two nodes colliding on a bundle ID will silently corrupt each other's decodes. Degree is drawn from a **uniform-half** distribution: each source symbol is included with probability ½, giving expected degree K/2.
+2. **Repair symbols on demand.** Symbols `K, K+1, …` are XOR combinations of the source symbols. The combination for symbol `i` is derived by seeding a PRNG with `(sender, bundle_id, i)`, so **the mask is never transmitted** — both ends compute it. Note the `sender` in that tuple: two nodes can collide on a `bundle_id`, so decoder state must be keyed by the Meshtastic source address as well, or their decodes silently corrupt each other.
+
+   > **`bundle_id` is derived from the bundle's content, not drawn at random.** An earlier draft specified "a random uint32 chosen independently by each node". That livelocks under an airtime governor, and the simulator caught it: when the governor interrupts a transmission partway, a random ID makes the retry a *different block*, so every symbol receivers already hold becomes worthless. Measured at a 0.1% duty cycle — **30 simulated days, 43 minutes of airtime, zero records delivered**, while four peers sent ~700 vector requests each and got nothing. Taking `bundle_id = BLAKE3(packed_bundle)[:4]` makes an interrupted transmission **resumable**: the same records are the same block, symbols accumulate across attempts, and the sender continues from a cursor rather than restarting. The same run then converged in 58 seconds of channel time. This is not an optimisation — without it, a node whose budget is tighter than one bundle never converges at all. Degree is drawn from a **uniform-half** distribution: each source symbol is included with probability ½, giving expected degree K/2.
 
    > **Corrected from "heavy on degree 2–3".** That intuition is correct for *belief-propagation* decoding, which needs sparse rows to find a degree-1 equation to peel. We decode by Gaussian elimination (item 3), which wants the opposite — dense rows are far more likely to be linearly independent of what the decoder already holds. Measured at K=40: the sparse distribution needed **14.41** symbols beyond K on average; uniform-half needs **1.72**. At mesh airtime that difference is minutes per bundle.
 3. **Decoding** is belief propagation with Gaussian-elimination fallback over GF(2). At K ≤ 64 that is a 64×64 bit matrix — microseconds, and a few dozen lines.
@@ -598,7 +601,13 @@ byte 7     : symbol_size_hint / extended id high bits
    N(1-α) - z·sqrt(N·α·(1-α))  ≥  K + ε        with ε = 3.4, z = 1.8
    ```
 
-   solved by search (N appears on both sides). ε is the codec's own overhead — the symbols needed beyond K because some arrivals are linearly dependent — and **it is flat in K**, not proportional to it. It was first set to 1.6, the measured *mean*; that was the wrong statistic, because the overhead is long-tailed (p90 = 4, p95 = 5, p99 = 7) and sizing to the mean leaves half the receivers short of it. The constants are fitted to a measured failure curve (K ∈ {5,10,15,20,40} × α ∈ {5…50}%, 3000 trials each, smallest count holding failure under 2%); they clear all thirty cells while overshooting by 14 symbols in total.
+   solved by search (N appears on both sides). ε is the codec's own overhead — the symbols needed beyond K because some arrivals are linearly dependent — and it is **flat in K only for K ≥ 5**:
+
+   | K | 1 | 2 | 3 | 4 | ≥5 |
+   |---|---|---|---|---|---|
+   | ε | 0 | 0.9 | 2.0 | 2.5 | 3.4 |
+
+   **K = 1 is computed exactly rather than approximated.** Every symbol of a one-symbol block decodes it, so the question is only how many copies make it improbable that all are lost: the smallest `n` with `α^n ≤ 0.02`. The Gaussian machinery above is a normal approximation to a binomial and overshoots badly at tiny `n`. Treating K=1 like K=40 charged **16 symbols for a one-symbol payload at 50% loss** where 6 suffice — a 3× airtime bill on precisely the bundles item 5 says dominate a BBS. At fifty nodes the simulator showed this alone putting the federation at 5.4% of the channel, over the §1.1 budget; fixing it brought the same run to **2.3%**. It was first set to 1.6, the measured *mean*; that was the wrong statistic, because the overhead is long-tailed (p90 = 4, p95 = 5, p99 = 7) and sizing to the mean leaves half the receivers short of it. The constants are fitted to a measured failure curve (K ∈ {5,10,15,20,40} × α ∈ {5…50}%, 3000 trials each, smallest count holding failure under 2%); they clear all thirty cells while overshooting by 14 symbols in total.
 
    Note that **z came down from 2.0 as ε went up**. The margin was never missing, it was charged to the wrong term — and widening the binomial interval to cover a shortfall that was really codec overhead costs far more airtime, because that term scales with N while ε does not.
 
@@ -647,9 +656,23 @@ v0.1 proposed a digest broadcast every 15–30 minutes. At 50 instances this is 
 **11% of the channel for control traffic that carries no content** — more than the entire 5% budget, before a single post is sent. Four mitigations, all required:
 
 1. **Digests never carry full version vectors.** A digest carries, per federated area, `{area_tag(4) | rolling_hash(4) | count(2)}` = 10 bytes. Ten areas = 100 bytes, one packet. Full vectors are exchanged **unicast, on demand**, only when a rolling-hash mismatch proves divergence.
-2. **Interval scales with peer count.** `interval = base × max(1, N/5)`, clamped so control traffic stays under a configured share of the mesh budget (default 1% of the 5% ceiling, i.e. 20% of our allocation). At 50 nodes that lands around 2–3 hours. This is fine: anti-entropy is a *safety net*, not the delivery path.
+2. **Interval scales with peer count.** `interval = base × max(1, N/5)`, clamped so control traffic stays under a configured share of the mesh budget (default 1% of the 5% ceiling, i.e. 20% of our allocation). Take whichever is larger.
+
+   At 50 nodes that lands at **about 5 hours**, not the 2–3 an earlier draft claimed — this section's own table contradicted that text, since 50 nodes at a 120-minute interval consume 2.8% of the channel, nearly triple the 1% control budget set a paragraph earlier. Measured intervals: 5 peers → 30 min, 20 → 2.0 h, 50 → 5.0 h, 100 → 10.0 h.
+
+   > **The two rules are nearly the same function**, which is worth knowing before tuning either. Both are linear in N: the heuristic contributes `base/5` = 6m 0s per peer, and the clamp requires `digest_airtime/share` = 5m 54s per peer for a 103-byte digest at R=4. They differ by 2%, so the interval is effectively set by the clamp alone and small changes in digest size decide which wins. Only the clamp has physical meaning — it is derived from bytes, airtime and the flood multiplier rather than chosen — so it is the one to reason about.
+
+   A multi-hour heartbeat sounds alarming and is not: anti-entropy is a *safety net*, not the delivery path. Content propagates by opportunistic push, digests piggyback on any bundle already in flight, and the standalone digest is only the idle-node heartbeat. What the interval bounds is how long a node that has been silent **and** has heard nothing waits before announcing itself.
 3. **Piggyback.** Any bundle we're already sending carries the digest in its header. A node with normal traffic almost never needs a standalone digest packet — which means the standalone digest is genuinely just the idle-node heartbeat.
 4. **Suppression.** If we hear a digest from a peer whose rolling hashes match ours across all shared areas within the last interval, skip our own — it would carry no information. On a converged mesh this collapses digest traffic to near zero.
+
+5. **Reply suppression (added in v0.9).** The four mitigations above control the *digest*, and leave the reply path unguarded: one broadcast digest heard by fifty peers who are all behind produces fifty simultaneous unicast requests to one node. That is the digest storm wearing a different hat, and the reply is bigger than the digest that triggered it.
+
+   So a peer waits a random fraction of a request window before asking, and **drops its request entirely if the answer arrives first**. Because responses are broadcast (cycle step 4), the first peer to ask answers everyone and the rest fall silent without ever transmitting. This is classic multicast repair suppression, and the reason the reply storm never forms.
+
+6. **Control messages fit one packet, by construction.** `MaxAreas` and the delta-request size are *derived* from the MTU rather than chosen. A control message spanning packets must be fragmented, so it can arrive partially and need its own repair — a request that itself requires reliable delivery, which is the recursion this whole no-session design exists to avoid.
+
+   Note that a delta request must be bounded in **bytes, not ranges**: this section budgets "~10 bytes per range", which holds only while sequence numbers are small. The origin is 8 fixed bytes but the two varints grow — 14 bytes per range at 2²⁰ records, 16 at 2⁴⁸. A count-based limit fits one packet in a young area and silently overflows in a mature one, which is a fragmentation bug that surfaces only after months of deployment.
 
 **The gossip cycle, revised:**
 
@@ -659,6 +682,18 @@ v0.1 proposed a digest broadcast every 15–30 minutes. At 50 instances this is 
 4. **Bundle push (broadcast).** The holder packages requested records and broadcasts — other lagging peers benefit for free, which is the same broadcast-economy argument as the fountain code.
 
 Batching is not optional at these budgets. One packet per post wastes the fixed header on every post and burns 2 s of airtime for a 40-character message. Accumulating 15–30 minutes of posts into one bundle amortizes framing across records and lets zstd find cross-message redundancy.
+
+**Measured, at the `[D2]` scale.** Fifty instances on a simulated LongFast mesh at 15% loss, ten of them publishing, R = 4:
+
+| | |
+|---|---|
+| Time to full convergence | 3 h 20 m |
+| Channel utilisation | **2.3%** (budget: 5%) |
+| Standalone digests, whole mesh | 13 |
+| Digest beats suppressed | 224 — **95%** |
+| Vector requests needed | 1 |
+
+The suppression figure is the headline: on a mesh that is mostly converged, 95% of scheduled digest beats carry no information and are never sent. Opportunistic push reaches nearly everyone, so the reconciliation path — vector exchange, delta request, bundle push — is almost never used. That is the intended shape: the safety net should be idle.
 
 **Failure behaviour:** a node offline for a week comes back, broadcasts a digest showing stale rolling hashes, and peers backfill it. There's no session, no handshake, no state machine that can wedge. This is the property that makes anti-entropy the right choice over a FidoNet-style polling session — mesh links are too flaky for sessions. (The FTN gateway does use sessions, but only on its IP side; §7.7.)
 

@@ -185,6 +185,15 @@ jobs:
         run: go test ./internal/fountain/ -run XXX -fuzz FuzzDecodeSymbol -fuzztime 30s
       - name: Fuzz bundle parser
         run: go test ./internal/bundle/ -run XXX -fuzz FuzzUnpack -fuzztime 30s
+      # Gossip control messages are the newest attack surface, and a
+      # non-canonical one is worse than a parse error: two converged nodes would
+      # read identical state as divergent and exchange deltas forever.
+      - name: Fuzz gossip digest parser
+        run: go test ./internal/gossip/ -run XXX -fuzz FuzzDecodeDigest -fuzztime 30s
+      - name: Fuzz gossip range-request parser
+        run: go test ./internal/gossip/ -run XXX -fuzz FuzzDecodeRangeReq -fuzztime 30s
+      - name: Fuzz gossip vector-request parser
+        run: go test ./internal/gossip/ -run XXX -fuzz FuzzDecodeVectorReq -fuzztime 20s
 
   golden:
     name: Golden frames are stable

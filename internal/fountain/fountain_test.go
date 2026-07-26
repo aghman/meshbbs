@@ -399,6 +399,13 @@ func TestRepairCountHoldsTheFailureRate(t *testing.T) {
 		loss   float64
 		trials int
 	}{
+		// Small K is where the flat-epsilon assumption was wrong and where most
+		// real bundles live: §7.2 says most DMs and small post batches are K=1.
+		{1, 0.15, 900},
+		{1, 0.50, 900},
+		{2, 0.30, 900},
+		{3, 0.15, 900},
+		{4, 0.50, 900},
 		{5, 0.10, 900},
 		{10, 0.05, 900},
 		{10, 0.20, 900},
@@ -547,3 +554,31 @@ func FuzzDecodeSymbol(f *testing.F) {
 }
 
 var _ = fmt.Sprintf
+
+// A one-symbol bundle needs no coding at all — §7.2 item 5 calls for "optional
+// blind repeats" — and most DMs and small post batches are exactly that. A
+// repair count that treats K=1 like K=40 puts a 3x airtime bill on the most
+// common case on the mesh.
+func TestSmallBundlesDoNotPayLargeBundleOverhead(t *testing.T) {
+	for _, tc := range []struct {
+		k       int
+		loss    float64
+		maxSent int
+	}{
+		// At K=1 every symbol decodes the block, so the count is pure blind
+		// repetition: enough copies that one survives.
+		{1, 0.15, 3},
+		{1, 0.30, 4},
+		{1, 0.50, 6},
+		{2, 0.15, 6},
+		{3, 0.15, 9},
+	} {
+		sent := tc.k + RepairCount(tc.k, tc.loss)
+		t.Logf("K=%d at %2.0f%% loss: %d symbols (%.1fx the payload)",
+			tc.k, tc.loss*100, sent, float64(sent)/float64(tc.k))
+		if sent > tc.maxSent {
+			t.Errorf("K=%d at %.0f%% loss sends %d symbols, more than the %d that suffice; "+
+				"small bundles are paying large-bundle overhead", tc.k, tc.loss*100, sent, tc.maxSent)
+		}
+	}
+}

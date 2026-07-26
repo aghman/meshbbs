@@ -245,32 +245,57 @@ func TestAirtimeIsChargedWithTheFloodMultiplier(t *testing.T) {
 	t.Logf("one full packet: %s locally, %s charged to the channel at R=4", single, got)
 }
 
-// A link over its ceiling must refuse rather than transmit. This is the
-// governor's contract, and the reason Budget is expressed in airtime.
-func TestBudgetRefusesWhenExhausted(t *testing.T) {
+// A link over its duty cycle must refuse rather than transmit, and must recover
+// as time passes. Both halves matter: refusing is the governor's contract, and
+// recovering is what makes a refused send a delay rather than a lost write.
+func TestDutyCycleRefusesThenRecovers(t *testing.T) {
 	cfg := DefaultConfig(4)
 	cfg.FloodMultiplier = 1
 	net := New(cfg)
 
-	perPacket := time.Duration(233) * cfg.AirtimePerByte
-	l := net.NewLink(nodeID(1), perPacket*3) // room for exactly three
+	perPacket := time.Duration(233) * cfg.AirtimePerByte // ~2s
+	const duty = 0.05                                    // 5% of elapsed time on air
+
+	l := net.NewLink(nodeID(1), duty)
 	net.NewLink(nodeID(2), 0)
 
+	// Let some allowance accrue: 3 packets' worth needs perPacket*3/duty.
+	net.Run(time.Duration(float64(perPacket*3) / duty))
+
 	payload := make([]byte, 233)
-	sent := 0
-	for i := 0; i < 10; i++ {
-		if err := l.Send(context.Background(), link.Broadcast, payload); err == nil {
-			sent++
-		} else if err != link.ErrNoBudget {
-			t.Fatalf("unexpected error: %v", err)
+	burst := func() int {
+		sent := 0
+		for i := 0; i < 20; i++ {
+			err := l.Send(context.Background(), link.Broadcast, payload)
+			if err == nil {
+				sent++
+				continue
+			}
+			if err != link.ErrNoBudget {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			break
 		}
+		return sent
 	}
-	if sent != 3 {
-		t.Fatalf("sent %d packets against a three-packet budget", sent)
+
+	first := burst()
+	if first < 2 || first > 4 {
+		t.Fatalf("sent %d packets against an accrued three-packet allowance", first)
 	}
 	if b := l.Budget(); b.CanSend() {
-		t.Error("budget still reports it can send after being exhausted")
+		t.Error("budget still reports it can send after the allowance is spent")
 	}
+
+	// A fixed allowance would silence this node forever. A duty cycle does not.
+	net.Run(time.Duration(float64(perPacket*2) / duty))
+	if b := l.Budget(); !b.CanSend() {
+		t.Fatal("the duty-cycle budget did not recover as time passed")
+	}
+	if second := burst(); second < 1 {
+		t.Error("no packet could be sent after the budget recovered")
+	}
+	t.Logf("at a %.0f%% duty cycle: %d packets in the first burst, recovered afterwards", duty*100, first)
 }
 
 func TestOversizedDatagramRefused(t *testing.T) {

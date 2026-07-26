@@ -24,19 +24,31 @@ type Link struct {
 	// budget tracks what this node has spent, so the airtime invariant can be
 	// asserted per node rather than only network-wide.
 	spent time.Duration
-	ceil  time.Duration
+	// duty is the fraction of elapsed time this node may spend transmitting.
+	// Zero means unlimited.
+	duty  float64
+	start time.Time
 }
 
 // NewLink attaches a node to the network and returns its Link.
 //
-// ceilPerRun bounds the airtime this node may spend; zero means unlimited,
-// which is right for an IP link and wrong for a mesh.
-func (n *Network) NewLink(self identity.NodeID, ceilPerRun time.Duration) *Link {
+// dutyCycle is the fraction of elapsed time this node may spend on air; zero
+// means unlimited, which is right for an IP link and wrong for a mesh.
+//
+// A DUTY CYCLE rather than a fixed allowance, because that is what an airtime
+// governor actually is (§1.1, §7.6) and the difference changes behaviour. A
+// fixed allowance, once spent, silences a node permanently — so a test using
+// one either never triggers the governor or produces a network that cannot
+// converge, and neither tells you anything. A duty cycle refuses a burst and
+// then recovers, which is the case the sync engine has to survive: sends fail,
+// the work is not lost, and anti-entropy completes it later.
+func (n *Network) NewLink(self identity.NodeID, dutyCycle float64) *Link {
 	l := &Link{
 		net:   n,
 		self:  self,
 		inbox: make(chan link.Datagram, 4096),
-		ceil:  ceilPerRun,
+		duty:  dutyCycle,
+		start: n.clock.Now(),
 	}
 	n.AddNode(self, func(from identity.NodeID, payload []byte, at time.Time) {
 		if l.closed {
@@ -66,12 +78,17 @@ func (l *Link) Send(ctx context.Context, to identity.NodeID, payload []byte) err
 		return link.ErrTooLarge
 	}
 	cost := l.cost(len(payload))
-	if l.ceil > 0 && l.spent+cost > l.ceil {
+	if l.duty > 0 && l.spent+cost > l.allowance() {
 		return link.ErrNoBudget
 	}
 	l.spent += cost
 	l.net.send(l.self, to, payload)
 	return nil
+}
+
+// allowance is the airtime accrued so far at this node's duty cycle.
+func (l *Link) allowance() time.Duration {
+	return time.Duration(l.net.clock.Now().Sub(l.start).Seconds() * l.duty * float64(time.Second))
 }
 
 func (l *Link) cost(n int) time.Duration {
@@ -81,19 +98,21 @@ func (l *Link) cost(n int) time.Duration {
 func (l *Link) Recv() <-chan link.Datagram { return l.inbox }
 
 func (l *Link) Budget() link.Budget {
-	avail := time.Duration(0)
-	if l.ceil > 0 {
-		avail = l.ceil - l.spent
-		if avail < 0 {
-			avail = 0
+	if l.duty <= 0 {
+		return link.Budget{
+			Available:   time.Hour,
+			PerDatagram: l.cost(l.MTU()),
 		}
-	} else {
-		avail = time.Hour
 	}
+	avail := l.allowance() - l.spent
+	if avail < 0 {
+		avail = 0
+	}
+	per := l.cost(l.MTU())
 	return link.Budget{
 		Available:    avail,
-		PerDatagram:  l.cost(l.MTU()),
-		Backpressure: l.ceil > 0 && avail < l.cost(l.MTU()),
+		PerDatagram:  per,
+		Backpressure: avail < per,
 	}
 }
 

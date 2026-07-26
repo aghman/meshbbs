@@ -99,6 +99,74 @@ func (e *Encoder) Transmission(repair int) []Symbol {
 	return out
 }
 
+// Epsilon is the codec's own overhead: the symbols a decoder needs beyond K
+// because some arrivals turn out to be linearly dependent on what it already
+// holds. Two things about it were got wrong, in opposite directions, and both
+// cost real airtime.
+//
+// # It is a distribution, not a mean
+//
+// Epsilon was first set to 1.6, the measured mean. That is the wrong statistic:
+// the overhead is long-tailed (p90 = 4, p95 = 5, p99 = 7), so sizing to the
+// mean leaves roughly half of all receivers short of it, on top of whatever the
+// binomial term already gave away. Measured failure rates were 1.9% to 6.2%
+// against a 2% target, in 28 of 30 cells.
+//
+// # It is flat in K only for K >= 5
+//
+// The plateau was measured at K in {5,10,15,20,40} and holds there. Below that
+// it is badly false, and the error runs the expensive way: at K=1 the codec has
+// NO overhead at all — every symbol is a copy of the single source symbol, so
+// any one that arrives decodes the block — yet a flat 3.4 makes RepairCount
+// send SIXTEEN symbols for a one-symbol payload at 50% loss, where six suffice.
+//
+// That is a 3x airtime bill on exactly the bundles §7.2 says dominate a BBS:
+// "most DMs and most small post batches" are K=1. The simulator surfaced it as
+// a fifty-node federation sitting at 5.4% of the channel, just over the §1.1
+// budget, with nearly all of it spent on tiny bundles.
+//
+// # Where these numbers come from
+//
+// Fitted, not derived: for each K, sweep the loss rate, run thousands of
+// transmissions per cell, and find the smallest repair count that holds decode
+// failure under 2%. These values clear every measured cell — the K >= 5 plateau
+// with 14 symbols of total waste across thirty cells, the small-K ramp with at
+// most two per cell.
+//
+// TestRepairCountHoldsTheFailureRate is the regression test. If the degree
+// distribution in mask() changes, epsilon changes with it and every value here
+// must be refitted; that test will say so rather than letting it slide.
+var epsilonByK = [...]float64{
+	0: epsilonPlateau, // unused; K is at least 1
+	1: 0.0,            // provably zero: any single symbol decodes a one-symbol block
+	2: 0.9,
+	3: 2.0,
+	4: 2.5,
+}
+
+// epsilonPlateau applies from K=5 up, where the overhead stops growing with K.
+const epsilonPlateau = 3.4
+
+// failureTarget is the per-receiver decode failure rate everything here is
+// sized against. §7.2 absorbs the residue with want-repair rather than
+// over-provisioning every transmission for every peer.
+const failureTarget = 0.02
+
+// zScore is how many standard deviations of binomial loss to cover.
+//
+// It came DOWN from 2.0 as epsilon went up, which is the useful lesson here.
+// The margin was never missing, it was charged to the wrong term — and widening
+// the binomial interval to cover what was really codec overhead costs far more
+// airtime, because that term scales with N while epsilon does not.
+const zScore = 1.8
+
+func epsilonFor(k int) float64 {
+	if k > 0 && k < len(epsilonByK) {
+		return epsilonByK[k]
+	}
+	return epsilonPlateau
+}
+
 // RepairCount returns how many repair symbols to send for a given loss rate.
 //
 // §7.2 suggests ceil(alpha*K) + 1. That under-provisions, for two reasons the
@@ -110,49 +178,16 @@ func (e *Encoder) Transmission(repair int) []Symbol {
 //  2. Loss is random, so half of the receivers do worse than the mean. Sizing
 //     to the mean means about half the network fails to decode.
 //
-// Measured: at K=10 and 20% loss the design's formula sends 13 symbols and
-// only 5 of 12 receivers decoded. What is actually needed is the smallest N
-// where the number received stays above K + epsilon even z standard deviations
-// below the mean:
+// Measured: at K=10 and 20% loss the design's formula sends 13 symbols and only
+// 5 of 12 receivers decoded. What is actually needed is the smallest N where the
+// number received stays above K + epsilon even z standard deviations below the
+// mean:
 //
 //	N(1-p) - z*sqrt(N*p*(1-p)) >= K + epsilon
 //
-// Solved by search rather than algebra, because N appears on both sides and
-// the search is over at most a few dozen values.
-//
-// # Where epsilon and z come from
-//
-// Epsilon is the codec's own overhead: the symbols it needs beyond K because
-// some arrivals are linearly dependent on what it already holds. It was first
-// set to 1.6, the measured *mean*. That was the wrong statistic. The overhead
-// has a long tail — mean 1.6 but p90 = 4, p95 = 5, p99 = 7, and flat in K —
-// so sizing to the mean leaves roughly half the receivers short of it, on top
-// of whatever the binomial term already gave away.
-//
-// The constants below are fitted to a measured failure curve rather than
-// derived: for K in {5,10,15,20,40} crossed with loss in {5,10,20,30,40,50}%,
-// 3000 trials each, find the smallest repair count holding failure under 2%.
-// Against that table the original (1.6, 2.0) fell short in 28 of 30 cells,
-// with observed failure rates of 1.9% to 6.2%. These constants clear every
-// cell while overshooting by 14 symbols in total across all thirty — under
-// half a symbol each.
-//
-// Note that z came DOWN from 2.0 as epsilon went up. The margin was never
-// missing; it was being charged to the wrong term. Widening the binomial
-// interval to cover a shortfall that was really the codec's overhead cost far
-// more airtime than fixing epsilon, because the binomial term scales with N
-// while the overhead does not.
-//
-// TestRepairCountHoldsTheFailureRate is the regression test. If the degree
-// distribution in mask() changes, epsilon changes with it and these constants
-// must be refitted — that test will say so.
-const (
-	// epsilon is the codec overhead allowance, in symbols. Flat in K.
-	epsilon = 3.4
-	// zScore is how many standard deviations of binomial loss to cover.
-	zScore = 1.8
-)
-
+// Solved by search rather than algebra, because N appears on both sides and the
+// search is over at most a few dozen values. See epsilonByK for where the
+// constants come from.
 func RepairCount(k int, lossRate float64) int {
 	if lossRate <= 0 {
 		// A clean link decodes from the systematic prefix alone. One spare
@@ -165,7 +200,27 @@ func RepairCount(k int, lossRate float64) int {
 		lossRate = 0.9
 	}
 
-	target := float64(k) + epsilon
+	// K=1 is exact, not approximated.
+	//
+	// §7.2 item 5 already calls it a special case — "a single-packet bundle
+	// needs no coding, just optional blind repeats" — and most DMs and small
+	// post batches land here, so it is the case worth getting exactly right
+	// rather than within a symbol. Every symbol of a one-symbol block decodes
+	// it, so the question is only how many copies make it improbable that all
+	// are lost: the smallest n with p^n <= the failure target.
+	//
+	// The Gaussian machinery below is a normal approximation to a binomial and
+	// overshoots at tiny n, which at K=1 means paying an extra full packet on
+	// the most common bundle on the mesh.
+	if k == 1 {
+		n := int(math.Ceil(math.Log(failureTarget) / math.Log(lossRate)))
+		if n < 2 {
+			n = 2 // never send a lone copy over a lossy link
+		}
+		return n - 1
+	}
+
+	target := float64(k) + epsilonFor(k)
 
 	// N cannot exceed a few multiples of K even at extreme loss; cap the
 	// search so a nonsense loss rate cannot produce an unbounded transmission.
