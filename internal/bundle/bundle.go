@@ -54,6 +54,9 @@ var (
 	ErrTooMany    = errors.New("bundle exceeds its declared limits")
 	ErrBomb       = errors.New("bundle decompresses beyond the allowed size")
 	ErrEmptyBatch = errors.New("bundle contains no records")
+	// ErrNotCanonical is returned when input is a non-canonical encoding of what
+	// it parses to: one logical bundle must have exactly one wire form.
+	ErrNotCanonical = errors.New("non-canonical bundle encoding")
 )
 
 // Bundle is a batch of records sharing an area.
@@ -186,6 +189,41 @@ func encodeBody(b *Bundle) ([]byte, error) {
 	return buf, nil
 }
 
+// canonicalUvarint reads a uvarint and rejects overlong encodings.
+//
+// binary.Uvarint accepts padding: 0x81 0x00 decodes to 1 exactly as 0x01 does.
+// That gives one logical bundle several wire forms, which matters directly here
+// because §7.2 derives the bundle ID from these bytes — a second wire form is a
+// second bundle ID for identical content, and the resumable transmission that
+// depends on stable IDs stops resuming without any visible error.
+//
+// The same defence exists in vv and gossip. It was missing here because the
+// bundle body parser was effectively unfuzzed: reaching it through Unpack
+// requires the fuzzer to synthesize a valid zstd frame first, so essentially
+// every input died at decompression. See FuzzDecodeBody.
+func canonicalUvarint(b []byte) (uint64, int, error) {
+	val, n := binary.Uvarint(b)
+	if n <= 0 {
+		return 0, 0, ErrTruncated
+	}
+	if want := binary.AppendUvarint(nil, val); len(want) != n {
+		return 0, 0, fmt.Errorf("%w: %d bytes encode a value needing %d", ErrNotCanonical, n, len(want))
+	}
+	return val, n, nil
+}
+
+// canonicalVarint is the signed counterpart, for timestamp deltas.
+func canonicalVarint(b []byte) (int64, int, error) {
+	val, n := binary.Varint(b)
+	if n <= 0 {
+		return 0, 0, ErrTruncated
+	}
+	if want := binary.AppendVarint(nil, val); len(want) != n {
+		return 0, 0, fmt.Errorf("%w: %d bytes encode a value needing %d", ErrNotCanonical, n, len(want))
+	}
+	return val, n, nil
+}
+
 func decodeBody(b []byte) (*Bundle, error) {
 	out := &Bundle{}
 	p := 0
@@ -214,14 +252,22 @@ func decodeBody(b []byte) (*Bundle, error) {
 		return nil, err
 	}
 	origins := make([]identity.NodeID, originCount)
+	seenOrigin := make(map[identity.NodeID]bool, originCount)
 	for i := range origins {
 		copy(origins[i][:], b[p:p+identity.NodeIDLen])
 		p += identity.NodeIDLen
+		// A repeated origin gives records a choice of index for the same node,
+		// so the same bundle could be written several ways.
+		if seenOrigin[origins[i]] {
+			return nil, fmt.Errorf("%w: origin %s appears twice in the table",
+				ErrNotCanonical, origins[i])
+		}
+		seenOrigin[origins[i]] = true
 	}
 
-	count, n := binary.Uvarint(b[p:])
-	if n <= 0 {
-		return nil, ErrTruncated
+	count, n, err := canonicalUvarint(b[p:])
+	if err != nil {
+		return nil, err
 	}
 	p += n
 	if count == 0 {
@@ -232,6 +278,10 @@ func decodeBody(b []byte) (*Bundle, error) {
 	}
 
 	out.Records = make([]*record.Record, 0, count)
+	// The table must be exactly what encodeBody would build: every entry
+	// referenced, in first-appearance order. An unused entry, or a table in any
+	// other order, is a second wire form for the same set of records.
+	nextExpected := 0
 	for i := uint64(0); i < count; i++ {
 		if err := need(1); err != nil {
 			return nil, err
@@ -241,16 +291,23 @@ func decodeBody(b []byte) (*Bundle, error) {
 		if idx >= originCount {
 			return nil, fmt.Errorf("record %d references origin %d, table has %d", i, idx, originCount)
 		}
+		if idx > nextExpected {
+			return nil, fmt.Errorf("%w: record %d references origin %d before %d is used; "+
+				"the table is not in first-appearance order", ErrNotCanonical, i, idx, nextExpected)
+		}
+		if idx == nextExpected {
+			nextExpected++
+		}
 
-		delta, n := binary.Varint(b[p:])
-		if n <= 0 {
-			return nil, ErrTruncated
+		delta, n, err := canonicalVarint(b[p:])
+		if err != nil {
+			return nil, err
 		}
 		p += n
 
-		recLen, n := binary.Uvarint(b[p:])
-		if n <= 0 {
-			return nil, ErrTruncated
+		recLen, n, err := canonicalUvarint(b[p:])
+		if err != nil {
+			return nil, err
 		}
 		p += n
 		if recLen > uint64(len(b)-p) {
@@ -277,6 +334,10 @@ func decodeBody(b []byte) (*Bundle, error) {
 		out.Records = append(out.Records, r)
 	}
 
+	if nextExpected != originCount {
+		return nil, fmt.Errorf("%w: origin table declares %d entries but only %d are referenced",
+			ErrNotCanonical, originCount, nextExpected)
+	}
 	if p != len(b) {
 		return nil, fmt.Errorf("%d trailing bytes after bundle", len(b)-p)
 	}

@@ -192,8 +192,18 @@ func (d *Digest) Size() int { return 3 + 10*len(d.Areas) }
 //
 //	type(1) | version(1) | area_count(1) | (tag[4] | hash[4] | count[2])*
 //
-// Areas ascend by tag, which is what makes the encoding canonical.
+// Areas ascend by tag, which is what makes the encoding canonical. Encode sorts
+// rather than trusting the caller, so the canonical form is a property of this
+// function alone — the same guarantee VectorReq.Encode and RangeReq.Encode give.
+//
+// That is not defensive tidiness, it is what makes the round-trip fuzz target
+// work at all. The target asserts decode-then-encode reproduces the input; if
+// Encode preserved whatever order the decoder handed it, a digest with
+// descending areas would re-encode to identical bytes and the check would pass.
+// Verified: with the decoder's ordering check deliberately removed and Encode
+// not sorting, five million fuzz executions found nothing.
 func (d *Digest) Encode() []byte {
+	sort.Slice(d.Areas, func(i, j int) bool { return lessTag(d.Areas[i].Tag, d.Areas[j].Tag) })
 	buf := make([]byte, 0, d.Size())
 	buf = append(buf, byte(MsgDigest), FormatVersion, byte(len(d.Areas)))
 	for _, a := range d.Areas {

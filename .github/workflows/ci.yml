@@ -177,23 +177,36 @@ jobs:
       # real canonicality bugs — overlong varints in the record codec and the
       # version vector, and unvalidated reserved bits in the symbol header —
       # each of which gave one logical value two wire forms.
+      #
+      # Targets run through scripts/fuzz.sh rather than `go test` directly. Go's
+      # fuzzing coordinator reports "context deadline exceeded" as a FAILURE
+      # when the time budget expires while a worker call is in flight, which
+      # gives a red build with no failing input and nothing to fix. The script
+      # fails on any real finding and tolerates only that specific case; see the
+      # comment at the top of it.
       - name: Fuzz record parser
-        run: go test ./internal/record/ -run XXX -fuzz FuzzUnmarshal -fuzztime 45s
+        run: .github/scripts/fuzz.sh ./internal/record FuzzUnmarshal 45s
       - name: Fuzz version vector parser
-        run: go test ./internal/vv/ -run XXX -fuzz FuzzDecode -fuzztime 30s
+        run: .github/scripts/fuzz.sh ./internal/vv FuzzDecode 30s
       - name: Fuzz symbol parser
-        run: go test ./internal/fountain/ -run XXX -fuzz FuzzDecodeSymbol -fuzztime 30s
+        run: .github/scripts/fuzz.sh ./internal/fountain FuzzDecodeSymbol 30s
       - name: Fuzz bundle parser
-        run: go test ./internal/bundle/ -run XXX -fuzz FuzzUnpack -fuzztime 30s
+        run: .github/scripts/fuzz.sh ./internal/bundle FuzzUnpack 30s
+      # The body parser, fuzzed WITHOUT compression in the way. Going through
+      # Unpack requires a valid zstd frame first, so the parser that walks
+      # attacker-controlled structure was effectively unfuzzed and carried three
+      # canonicality bugs.
+      - name: Fuzz bundle body parser
+        run: .github/scripts/fuzz.sh ./internal/bundle FuzzDecodeBody 30s
       # Gossip control messages are the newest attack surface, and a
       # non-canonical one is worse than a parse error: two converged nodes would
       # read identical state as divergent and exchange deltas forever.
       - name: Fuzz gossip digest parser
-        run: go test ./internal/gossip/ -run XXX -fuzz FuzzDecodeDigest -fuzztime 30s
+        run: .github/scripts/fuzz.sh ./internal/gossip FuzzDecodeDigest 30s
       - name: Fuzz gossip range-request parser
-        run: go test ./internal/gossip/ -run XXX -fuzz FuzzDecodeRangeReq -fuzztime 30s
+        run: .github/scripts/fuzz.sh ./internal/gossip FuzzDecodeRangeReq 30s
       - name: Fuzz gossip vector-request parser
-        run: go test ./internal/gossip/ -run XXX -fuzz FuzzDecodeVectorReq -fuzztime 20s
+        run: .github/scripts/fuzz.sh ./internal/gossip FuzzDecodeVectorReq 20s
 
   golden:
     name: Golden frames are stable

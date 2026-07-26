@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"testing"
@@ -367,4 +368,140 @@ func FuzzUnpack(f *testing.F) {
 			t.Fatalf("accepted a bundle with %d records", len(got.Records))
 		}
 	})
+}
+
+// FuzzDecodeBody fuzzes the bundle body parser DIRECTLY, without compression.
+//
+// FuzzUnpack cannot reach this code in any useful way: to get past Unpack, the
+// fuzzer must first synthesize a valid zstd frame, so essentially every input
+// dies at decompression and the body parser — the part that actually walks
+// attacker-controlled structure — goes unexercised. Fuzzing the layer where the
+// parsing lives is the only way to test it.
+//
+// The assertion is canonicality, not merely "does not panic": a body that
+// parses must re-encode from its parsed fields to exactly the input. Anything
+// else means one logical bundle has several wire forms, which now matters
+// directly — bundle IDs are derived from the packed bytes (§7.2), so a second
+// wire form is a second bundle ID for identical content, and the resumable
+// transmission that depends on stable IDs silently stops resuming.
+func FuzzDecodeBody(f *testing.F) {
+	k, err := identity.GenerateNodeKey(rng.TestSecret(11))
+	if err != nil {
+		f.Fatal(err)
+	}
+	area := record.AreaTagFor("general")
+
+	seed := &Bundle{Area: area, BaseTS: 1000}
+	for i := 1; i <= 3; i++ {
+		r, err := record.New(k, record.Record{Seq: uint64(i), TS: uint32(1000 + i),
+			Type: record.TypePost, Area: area, Body: []byte("seed")})
+		if err != nil {
+			f.Fatal(err)
+		}
+		seed.Records = append(seed.Records, r)
+	}
+	if body, err := encodeBody(seed); err == nil {
+		f.Add(body)
+	}
+	if body, err := encodeBody(&Bundle{Area: area, BaseTS: 0, Records: seed.Records[:1]}); err == nil {
+		f.Add(body)
+	}
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		got, err := decodeBody(data)
+		if err != nil {
+			return
+		}
+		if len(got.Records) == 0 || len(got.Records) > MaxRecords {
+			t.Fatalf("accepted a bundle with %d records", len(got.Records))
+		}
+		reencoded, err := encodeBody(got)
+		if err != nil {
+			t.Fatalf("a parsed body failed to re-encode: %v", err)
+		}
+		if !bytes.Equal(reencoded, data) {
+			t.Fatalf("bundle body encoding is not canonical:\n input % x\nre-enc % x", data, reencoded)
+		}
+	})
+}
+
+// One logical bundle must have exactly one wire form.
+//
+// All three cases below were ACCEPTED until FuzzDecodeBody was written. They
+// were invisible because the only bundle fuzz target went through Unpack, which
+// requires a valid zstd frame before the body parser is reached — so the parser
+// that actually walks attacker-controlled structure was never exercised.
+//
+// This matters more than it would have a week ago: §7.2 now derives the bundle
+// ID from the packed bytes, so a second wire form is a second bundle ID for
+// identical content, and the resumable transmission that depends on stable IDs
+// stops resuming with no visible error.
+func TestBundleBodyEncodingIsCanonical(t *testing.T) {
+	k, err := identity.GenerateNodeKey(rng.TestSecret(11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	area := record.AreaTagFor("general")
+	b := &Bundle{Area: area, BaseTS: 1000}
+	r, err := record.New(k, record.Record{Seq: 1, TS: 1000, Type: record.TypePost,
+		Area: area, Body: []byte("x")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Records = append(b.Records, r)
+	body, err := encodeBody(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// area(4) + baseTS(4) + originCount(1) + one origin(8)
+	const countOffset = 4 + 4 + 1 + identity.NodeIDLen
+	cnt, n := binary.Uvarint(body[countOffset:])
+
+	t.Run("overlong record count", func(t *testing.T) {
+		bad := append([]byte{}, body[:countOffset]...)
+		bad = append(bad, byte(cnt)|0x80, 0x00) // same value, longer encoding
+		bad = append(bad, body[countOffset+n:]...)
+		if _, err := decodeBody(bad); err == nil {
+			t.Error("accepted an overlong record count; one bundle now has two wire forms")
+		}
+	})
+
+	t.Run("duplicate origin", func(t *testing.T) {
+		bad := append([]byte{}, body[:8]...)
+		bad = append(bad, 2)
+		bad = append(bad, body[9:9+identity.NodeIDLen]...)
+		bad = append(bad, body[9:9+identity.NodeIDLen]...)
+		bad = append(bad, body[9+identity.NodeIDLen:]...)
+		if _, err := decodeBody(bad); err == nil {
+			t.Error("accepted a repeated origin; records could reference either index for one node")
+		}
+	})
+
+	t.Run("unused origin", func(t *testing.T) {
+		var ghost identity.NodeID
+		ghost[0] = 0xFF
+		bad := append([]byte{}, body[:8]...)
+		bad = append(bad, 2)
+		bad = append(bad, body[9:9+identity.NodeIDLen]...)
+		bad = append(bad, ghost[:]...)
+		bad = append(bad, body[9+identity.NodeIDLen:]...)
+		if _, err := decodeBody(bad); err == nil {
+			t.Error("accepted an origin table entry no record references")
+		}
+	})
+
+	// The honest baseline: the real thing still round-trips.
+	got, err := decodeBody(body)
+	if err != nil {
+		t.Fatalf("a well-formed body was rejected: %v", err)
+	}
+	again, err := encodeBody(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again, body) {
+		t.Error("a well-formed body did not survive the round trip")
+	}
 }
