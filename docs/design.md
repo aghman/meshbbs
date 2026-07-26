@@ -2,11 +2,12 @@
 
 *A modern, cross-platform BBS in Go with SSH access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
 
-**Status:** Draft v0.10 — continuous invariants, and a measured publish ceiling
+**Status:** Draft v0.11 — SUCCESSION, lazy PROFILE, and the IP link corrected
 **Date:** 2026-07-26
 **All 15 open questions from v0.1 are answered. Decisions are recorded in §15 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §14.**
 
 *v0.3 added account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
+*v0.11 completes Phase 2: `SUCCESSION` with all four `[N2]` guardrails (§6.1.6), lazy `PROFILE` publication (§6.7), and the IP link — **corrected from "QUIC/Noise", which is not implementable as written**, to TCP with mutually-authenticated TLS 1.3 over self-signed Ed25519 certificates pinned to node IDs (§7.9). Same no-PKI property, no third-party dependency, and no extra key material to bind to the node identity.*
 *v0.10 adds the §12.3 invariant suite — monotonicity, immutability, vector honesty, signature integrity and a rolling-window airtime budget, asserted after EVERY simulated event rather than at the end of a run — and records the capacity number it produced: about six records per hour federation-wide on LongFast at R=4, against the 5% budget (§7.3).*
 *v0.9 records what building the anti-entropy engine (§7.3) and simulating fifty nodes established: `bundle_id` must be content-derived or an interrupted transmission livelocks under the airtime governor; ε is flat in K only for K ≥ 5 and K=1 is exact; the 50-node digest interval is ~5 hours, not 2–3; reply suppression is needed on the request path, not just the digest path; and control-message limits must derive from the MTU in bytes. Measured result at fifty nodes: convergence in 3h20m at 2.3% of the channel, with 95% of digest beats suppressed.*
 *v0.8 corrects two §7.2 claims that implementation disproved: the fountain degree distribution (uniform-half, not "heavy on degree 2–3" — that intuition belongs to belief propagation, and we decode by Gaussian elimination), and the repair count (`ceil(αK)+1` decoded for only 5 of 12 receivers at K=10 and 20% loss; replaced by a fitted formula with ε = 3.4, z = 1.8). Both corrections come from the Phase 2 simulator harness (§12.1) doing its job.*
@@ -118,7 +119,7 @@ There is also a social constraint that matters as much as the technical one: **a
               │                   │                   │                  │
      ┌────────▼────────┐ ┌────────▼───────┐ ┌─────────▼──────┐ ┌────────▼──────┐
      │  MESH LINK      │ │   IP LINK      │ │  SNEAKERNET    │ │  FTN GATEWAY  │
-     │  (Meshtastic)   │ │ (QUIC+Noise)   │ │ (file bundle)  │ │ (echomail)    │
+     │  (Meshtastic)   │ │ (TCP + TLS1.3) │ │ (file bundle)  │ │ (echomail)    │
      │  MTU 233, ~108B/s│ │ MTU ~1400, MB/s│ │  offline       │ │  IP-side only │
      └────────┬────────┘ └────────────────┘ └────────────────┘ └───────────────┘
               │
@@ -429,7 +430,7 @@ Two smaller bounds in the same family:
 - Content-addressed blob store (BLAKE3 → `blobs/ab/cd/abcd...`), so identical files across areas dedup.
 - **Over mesh, only the catalog replicates.** `FILE` records carry name, size, hash, description, tags, and holding node — roughly 120–200 bytes compressed. Users see the whole network's file list.
 - **Mesh file transfer does not exist as a code path.** Not a quota, not a sysop toggle, not a "tiny files only" exception — the mesh link refuses `FILE_DATA` payloads outright. v0.1 proposed an 8 KB trickle option; it is removed. Fetch paths are exactly two:
-  1. **Direct IP** from a holding BBS (QUIC/Noise link, or plain HTTPS if the sysop publishes one).
+  1. **Direct IP** from a holding BBS (the TLS 1.3 link of §7.9, or plain HTTPS if the sysop publishes one).
   2. **Sneakernet queue** — the request is recorded, and satisfied at the next bundle exchange.
 - Be honest in the UI: a file with no IP-reachable holder shows "available by request only — queued for next exchange," with the requesting user notified when it lands. Not an error, not a spinner that never resolves.
 
@@ -833,6 +834,24 @@ The subcommand automates the above and is worth building because it turns a fidd
 
 ---
 
+### 7.9 The IP link — TCP with mutually-authenticated TLS 1.3
+
+*(Corrected in v0.11. Earlier drafts said "QUIC/Noise".)*
+
+**The original specification was not implementable as written.** QUIC mandates TLS 1.3 as its handshake; there is no standard way to run a Noise handshake inside it. The two were named together because the *intent* was "no PKI" — no certificate authorities, no chain of trust to bootstrap, just two static keys authenticating each other.
+
+TLS 1.3 delivers exactly that here, because this design already has the piece that usually forces PKI: **node IDs are self-certifying**. `ID = BLAKE3(ed25519_pubkey)[:8]` (§6.1.1), so a self-signed certificate whose key hashes to the expected node ID authenticates that node completely. There is no authority to consult and — the decisive part — **no extra key material to bind to the identity**. Noise would need a separate X25519 static key, and the binding from that key to the Ed25519 node ID would be new cryptographic design to write, review and get right. Here there is nothing to bind.
+
+So the IP link is **TCP with mutually-authenticated TLS 1.3, self-signed Ed25519 certificates pinned to node IDs, and no third-party dependency at all**. QUIC's multiplexing, 0-RTT and connection migration would buy almost nothing over a protocol that sends a batch every 15–30 minutes (§7.3), and the standard library alone keeps cgo-free cross-compilation to all five targets trivially safe (§10).
+
+Three properties worth stating explicitly, because each inverts something that is true on the mesh:
+
+- **The certificate is a container, not a credential.** Nothing checks validity dates, issuer or subject. The key *is* the identity; expiry would imply a renewal process that cannot exist without an authority, and the recovery path for a compromised key is a `SUCCESSION` record (§6.1.6), not a CRL.
+- **Broadcast costs N here, not 1.** On the mesh one transmission reaches everyone, which is the entire reason §7.2 chooses a fountain code over ARQ. Over IP a "broadcast" is N separate sends. `Caps().Broadcast` is therefore **false** — meaning *not free*, not *unavailable* — so a governor reading it knows the fountain economics do not apply and that unicast repair to one lagging peer is the cheaper move.
+- **`Caps().Reliable` is true**, so L1's repair symbols are redundant over IP and a caller can skip them entirely.
+
+**Inbound is default-closed.** A link with no configured allow list accepts *nobody*; a listener on a public port that accepts any node dialling it is an open relay for the federation. Outbound dials are not gated by the list, because naming a peer to dial is itself the authorization decision — the caller asked for that exact node and the handshake proved it got it.
+
 ## 8. Security and trust
 
 ### 8.1 Threat model
@@ -1087,7 +1106,7 @@ Defaults for new areas (file): `new_area_federated = false`, `new_area_retention
 `default_theme`, `theme_dir` (default `<datadir>/themes`, scanned for `*.toml` style overrides), `allow_user_theme_override`, `default_encoding` (`cp437` | `utf8` | `auto`)
 
 **Federation — Phase 2**
-`enabled_links`, `peers` (database: node ID — which *is* the key, §6.1.1 — plus local alias, allowed areas, quotas, `trust` = `accept` | `quarantine` | `reject`), `succession_policy` (default **auto-follow** `[N2]`; `confirm` available for sysops who want the prompt), `batch_window`, `digest_base_interval`, `quarantine_policy`, `tombstone_policy` (§8.4), `dictionary_version`, `ip_link` (bind/port/Noise static key path)
+`enabled_links`, `peers` (database: node ID — which *is* the key, §6.1.1 — plus local alias, allowed areas, quotas, `trust` = `accept` | `quarantine` | `reject`), `succession_policy` (default **auto-follow** `[N2]`; `confirm` available for sysops who want the prompt), `batch_window`, `digest_base_interval`, `quarantine_policy`, `tombstone_policy` (§8.4), `dictionary_version`, `ip_link` (bind/port/peer allow list)
 
 **Mesh and the governor — Phase 3**
 - Transport: `mode` (`serial` | `tcp` | `auto`), `serial_device`, `serial_baud`, `tcp_host`, `tcp_port`
