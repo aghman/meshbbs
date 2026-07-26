@@ -122,6 +122,9 @@ type Network struct {
 	queue  eventQueue
 	nextID uint64
 
+	// hooks run after every event; see AfterEach.
+	hooks []func()
+
 	// Stats, for asserting the airtime invariant (§12.3).
 	sentDatagrams int
 	sentBytes     int
@@ -367,6 +370,20 @@ func (n *Network) Run(limit time.Duration) {
 	n.RunUntil(limit, func() bool { return false })
 }
 
+// AfterEach registers a hook run after EVERY event, before the next one starts.
+//
+// This is what makes invariant checking meaningful rather than decorative.
+// Asserting only at the end of a run catches states that persist to the end; a
+// great many real bugs are transient — a version vector that briefly goes
+// backwards, a record replaced and replaced back, an airtime budget exceeded in
+// a burst and amortised away — and every one of those is invisible to a final
+// check. Between two events the whole federation is quiescent and
+// single-threaded, so this is the only place a consistent global snapshot
+// exists at all.
+//
+// Hooks run in registration order and must not schedule events or send.
+func (n *Network) AfterEach(hook func()) { n.hooks = append(n.hooks, hook) }
+
 // step runs the next due event. It reports whether one ran.
 func (n *Network) step(deadline time.Time) bool {
 	if len(n.queue) == 0 || n.queue[0].at.After(deadline) {
@@ -377,6 +394,9 @@ func (n *Network) step(deadline time.Time) bool {
 		n.clock.Set(next.at)
 	}
 	next.run()
+	for _, h := range n.hooks {
+		h()
+	}
 	return true
 }
 

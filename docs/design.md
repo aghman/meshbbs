@@ -2,11 +2,12 @@
 
 *A modern, cross-platform BBS in Go with SSH access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
 
-**Status:** Draft v0.9 — anti-entropy measured at fifty nodes
-**Date:** 2026-07-25
+**Status:** Draft v0.10 — continuous invariants, and a measured publish ceiling
+**Date:** 2026-07-26
 **All 15 open questions from v0.1 are answered. Decisions are recorded in §15 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §14.**
 
 *v0.3 added account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
+*v0.10 adds the §12.3 invariant suite — monotonicity, immutability, vector honesty, signature integrity and a rolling-window airtime budget, asserted after EVERY simulated event rather than at the end of a run — and records the capacity number it produced: about six records per hour federation-wide on LongFast at R=4, against the 5% budget (§7.3).*
 *v0.9 records what building the anti-entropy engine (§7.3) and simulating fifty nodes established: `bundle_id` must be content-derived or an interrupted transmission livelocks under the airtime governor; ε is flat in K only for K ≥ 5 and K=1 is exact; the 50-node digest interval is ~5 hours, not 2–3; reply suppression is needed on the request path, not just the digest path; and control-message limits must derive from the MTU in bytes. Measured result at fifty nodes: convergence in 3h20m at 2.3% of the channel, with 95% of digest beats suppressed.*
 *v0.8 corrects two §7.2 claims that implementation disproved: the fountain degree distribution (uniform-half, not "heavy on degree 2–3" — that intuition belongs to belief propagation, and we decode by Gaussian elimination), and the repair count (`ceil(αK)+1` decoded for only 5 of 12 receivers at K=10 and 20% loss; replaced by a fitted formula with ε = 3.4, z = 1.8). Both corrections come from the Phase 2 simulator harness (§12.1) doing its job.*
 *v0.7 closes `N11`: door API capability levels 1–3 always available, `act_as_user` a per-door sysop grant with capability intersection (§9.1.1); `DOOR_EVENT` stays node-signed. No open questions remain except `N10`, which resolves by measurement.*
@@ -694,6 +695,21 @@ Batching is not optional at these budgets. One packet per post wastes the fixed 
 | Vector requests needed | 1 |
 
 The suppression figure is the headline: on a mesh that is mostly converged, 95% of scheduled digest beats carry no information and are never sent. Opportunistic push reaches nearly everyone, so the reconciliation path — vector exchange, delta request, bundle push — is almost never used. That is the intended shape: the safety net should be idle.
+
+**Measured publish ceiling.** Six nodes, LongFast, R = 4, 15% loss, against §1.1's 5% federation budget measured over a rolling hour:
+
+| Records/hour, federation-wide | Peak channel utilisation |
+|---:|---:|
+| 1 | 1.39% |
+| 2 | 2.04% |
+| 4 | 3.38% |
+| **6** | **4.72%** |
+| 8 | 6.04% — over budget |
+| 12 | 8.71% — over budget |
+
+**About six records per hour, for the entire federation** — roughly 144 a day, shared across every instance and every area. That is the number to design the BBS around, and it is small enough to be worth stating plainly rather than discovering after deployment. Note the 1.39% floor at one record per hour: anti-entropy and per-record framing cost something even when almost nothing is being said.
+
+It also explains why batching (below) is not optional. The figures above are for one record per bundle; amortising framing and letting zstd work across a batch is what moves the ceiling.
 
 **Failure behaviour:** a node offline for a week comes back, broadcasts a digest showing stale rolling hashes, and peers backfill it. There's no session, no handshake, no state machine that can wedge. This is the property that makes anti-entropy the right choice over a FidoNet-style polling session — mesh links are too flaky for sessions. (The FTN gateway does use sessions, but only on its IP side; §7.7.)
 

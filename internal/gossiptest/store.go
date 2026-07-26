@@ -15,6 +15,7 @@
 package gossiptest
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 
@@ -220,4 +221,209 @@ func (s *Store) IDs(area record.AreaTag) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Entry is one record's identity within an area, for invariant checking.
+type Entry struct {
+	Origin identity.NodeID
+	Seq    uint64
+	ID     record.ID
+}
+
+// Entries returns every record held in an area, sorted by (origin, seq).
+//
+// This is the raw material for the invariant checker, and it deliberately
+// exposes the (origin, seq) → ID mapping rather than just a set of IDs: the
+// interesting violations are about that mapping changing, not about the set
+// shrinking. A record replaced by a different record at the same slot leaves
+// the count identical.
+func (s *Store) Entries(area record.AreaTag) []Entry {
+	a := s.areas[area]
+	if a == nil {
+		return nil
+	}
+	var out []Entry
+	for origin, byOrigin := range a.records {
+		for seq, rec := range byOrigin {
+			out = append(out, Entry{Origin: origin, Seq: seq, ID: rec.ID()})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Origin != out[j].Origin {
+			for b := 0; b < identity.NodeIDLen; b++ {
+				if out[i].Origin[b] != out[j].Origin[b] {
+					return out[i].Origin[b] < out[j].Origin[b]
+				}
+			}
+		}
+		return out[i].Seq < out[j].Seq
+	})
+	return out
+}
+
+// VerifyAll re-verifies every record held in an area.
+//
+// Apply already verifies on the way in, so this is deliberately redundant. It
+// checks a different thing: that nothing has been mutated SINCE admission.
+// Records are immutable by contract (§6.2), and an invariant that only tests
+// the admission path cannot tell the difference between "we never accepted a
+// forgery" and "we accepted one and then quietly rewrote it".
+func (s *Store) VerifyAll(area record.AreaTag) error {
+	a := s.areas[area]
+	if a == nil {
+		return nil
+	}
+	for _, origin := range sortedOrigins(a) {
+		byOrigin := a.records[origin]
+		pub, known := s.keys[origin]
+		if !known {
+			return fmt.Errorf("holding records from %s with no key to verify them", origin.Short())
+		}
+		for _, seq := range sortedSeqs(byOrigin) {
+			rec := byOrigin[seq]
+			if err := rec.Verify(pub); err != nil {
+				return fmt.Errorf("record %s (%s seq %d) no longer verifies: %w",
+					rec.ID(), origin.Short(), seq, err)
+			}
+			// Verify alone is not enough, and the reason is subtle.
+			//
+			// §6.2.1 rule 1 requires verification to use the exact bytes that
+			// were signed, never a re-serialization of parsed fields — so
+			// Verify checks the signature against the RETAINED bytes and never
+			// looks at Body, Type or Parent. That is correct, and it means a
+			// mutated parsed field passes Verify untouched while the record
+			// displays something its author never signed.
+			//
+			// So compare the parsed view against what the signed bytes actually
+			// decode to. Re-parsing is safe here precisely because it is not
+			// being used to verify anything.
+			reparsed, err := record.Unmarshal(rec.Marshal())
+			if err != nil {
+				return fmt.Errorf("record %s no longer re-parses: %w", rec.ID(), err)
+			}
+			if !bytes.Equal(reparsed.Body, rec.Body) ||
+				reparsed.Type != rec.Type || reparsed.Area != rec.Area ||
+				reparsed.Parent != rec.Parent || reparsed.TS != rec.TS {
+				return fmt.Errorf("record %s (%s seq %d) has been mutated since admission: "+
+					"its fields no longer match its signed bytes",
+					rec.ID(), origin.Short(), seq)
+			}
+			if rec.Origin != origin || rec.Seq != seq {
+				return fmt.Errorf("record filed under (%s, %d) claims to be (%s, %d)",
+					origin.Short(), seq, rec.Origin.Short(), rec.Seq)
+			}
+		}
+	}
+	return nil
+}
+
+// ContiguousHighWater recomputes the contiguous high-water mark for an origin
+// from the records actually held.
+//
+// The invariant checker compares this against the stored vector. They are
+// maintained separately — the vector is advanced incrementally by Apply — so a
+// disagreement means the vector is describing a log that does not exist, which
+// makes every peer's delta calculation wrong.
+func (s *Store) ContiguousHighWater(area record.AreaTag, origin identity.NodeID) uint64 {
+	a := s.areas[area]
+	if a == nil {
+		return 0
+	}
+	byOrigin := a.records[origin]
+	var seq uint64
+	for byOrigin[seq+1] != nil {
+		seq++
+	}
+	return seq
+}
+
+func sortedOrigins(a *areaLog) []identity.NodeID {
+	out := make([]identity.NodeID, 0, len(a.records))
+	for o := range a.records {
+		out = append(out, o)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		for b := 0; b < identity.NodeIDLen; b++ {
+			if out[i][b] != out[j][b] {
+				return out[i][b] < out[j][b]
+			}
+		}
+		return false
+	})
+	return out
+}
+
+func sortedSeqs(m map[uint64]*record.Record) []uint64 {
+	out := make([]uint64, 0, len(m))
+	for s := range m {
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// Deliberate corruption, for testing that invariant checkers work
+// ---------------------------------------------------------------------------
+//
+// These break the guarantees the store otherwise enforces. They exist for one
+// purpose: proving that an invariant check actually rejects a violation. A
+// checker nobody has watched fail is indistinguishable from one that cannot
+// fail, and this repo has already shipped a fuzz target that was structurally
+// unable to detect the bug class it was written for.
+//
+// Never call these from a scenario test. They describe networks that cannot
+// exist, so any behaviour observed afterwards is meaningless.
+
+// CorruptDropOne deletes one record, violating monotonicity.
+func (s *Store) CorruptDropOne(area record.AreaTag) {
+	a := s.areas[area]
+	if a == nil {
+		return
+	}
+	for _, origin := range sortedOrigins(a) {
+		byOrigin := a.records[origin]
+		for _, seq := range sortedSeqs(byOrigin) {
+			delete(byOrigin, seq)
+			return
+		}
+	}
+}
+
+// CorruptReplaceOne swaps the occupant of the first slot for a different
+// record, violating immutability while leaving the record COUNT unchanged —
+// which is precisely why a count-based check cannot see it.
+func (s *Store) CorruptReplaceOne(area record.AreaTag, with *record.Record) {
+	a := s.areas[area]
+	if a == nil || with == nil {
+		return
+	}
+	for _, origin := range sortedOrigins(a) {
+		byOrigin := a.records[origin]
+		for _, seq := range sortedSeqs(byOrigin) {
+			byOrigin[seq] = with
+			return
+		}
+	}
+}
+
+// CorruptTamperOne mutates a stored record's body in place, so its signature no
+// longer covers its contents. Apply's admission check cannot see this; only
+// re-verification of what is already held can.
+func (s *Store) CorruptTamperOne(area record.AreaTag) {
+	a := s.areas[area]
+	if a == nil {
+		return
+	}
+	for _, origin := range sortedOrigins(a) {
+		byOrigin := a.records[origin]
+		for _, seq := range sortedSeqs(byOrigin) {
+			rec := byOrigin[seq]
+			if len(rec.Body) == 0 {
+				continue
+			}
+			rec.Body[0] ^= 0xFF
+			return
+		}
+	}
 }
