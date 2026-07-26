@@ -467,24 +467,46 @@ func TestTelnetRefusesConnectionsOverTheLimit(t *testing.T) {
 	}
 
 	// Freeing a slot must let a new session in.
+	//
+	// Each wait gets its OWN budget. Sharing one deadline across sequential
+	// waits means a slow runner can spend it all on the first and leave the
+	// second no attempts at all — which is exactly how this test failed on CI
+	// while passing locally.
 	held[0].Close()
 	held = held[1:]
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && srv.ActiveSessions() >= 2 {
-		time.Sleep(10 * time.Millisecond)
+
+	if !waitFor(10*time.Second, func() bool { return srv.ActiveSessions() < 2 }) {
+		t.Fatalf("closing a session did not release its slot (active=%d)", srv.ActiveSessions())
 	}
-	for time.Now().Before(deadline) {
+
+	var admitted bool
+	waitFor(10*time.Second, func() bool {
 		c, err := net.Dial("tcp", addr)
 		if err != nil {
-			time.Sleep(50 * time.Millisecond)
-			continue
+			return false
 		}
-		out := readUntil(t, c, "PLAINTEXT", 1*time.Second)
-		c.Close()
+		defer c.Close()
+		out := readUntil(t, c, "PLAINTEXT", 2*time.Second)
 		if strings.Contains(out, "PLAINTEXT") && !strings.Contains(out, "full") {
-			return // a slot was reclaimed
+			admitted = true
+			return true
 		}
-		time.Sleep(50 * time.Millisecond)
+		return false
+	})
+	if !admitted {
+		t.Fatal("a reclaimed slot did not admit a new session")
 	}
-	t.Fatal("closing a session did not free its slot")
+}
+
+// waitFor polls cond until it holds or the budget runs out. It reports whether
+// cond became true.
+func waitFor(budget time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return cond()
 }
