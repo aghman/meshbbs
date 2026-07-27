@@ -218,6 +218,12 @@ jobs:
       # codebase where an attacker-adjacent number sizes an allocation.
       - name: Fuzz Meshtastic frame reader
         run: .github/scripts/fuzz.sh ./internal/meshtastic FuzzReadFrame 30s
+      # The announcement parser decides which node ID a radio address belongs
+      # to, and it runs before any of the trust machinery above it. A parser bug
+      # that let the ID and the key disagree would hand an attacker a peer's
+      # inbound traffic.
+      - name: Fuzz mesh announcement parser
+        run: .github/scripts/fuzz.sh ./internal/meshlink FuzzDecodeAnnounce 30s
 
   golden:
     name: Golden frames are stable

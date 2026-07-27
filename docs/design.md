@@ -2,11 +2,12 @@
 
 *A modern, cross-platform BBS in Go with SSH access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
 
-**Status:** Draft v0.12 — the local Meshtastic wire, from building it
+**Status:** Draft v0.13 — node IDs bound to radios, and the mesh as a Link
 **Date:** 2026-07-26
 **All 15 open questions from v0.1 are answered. Decisions are recorded in §15 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §14.**
 
 *v0.3 added account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
+*v0.13 fills a gap this document had: nothing said how an 8-byte node ID maps to a 4-byte Meshtastic radio address (§7.1.2, `[N12]`). Resolved by a signed, self-certifying `ANNOUNCE` that binds the two, with the radio number inside the signature so a captured announcement cannot be replayed from another radio, and demand-driven `WHO_IS` discovery rather than announcing often enough to be heard — which would cost about 1% of the whole channel at fifty instances. No packet carries identity bytes.*
 *v0.12 opens Phase 3 with the local wire (§7.1.1): the config exchange that must complete before a node will transmit, the resynchronising framer a shared-with-debug-output UART requires, and the correction that **USB VID/PID scanning cannot work on macOS** without the cgo dependency §4 forbids — detection ranks and explains candidate ports instead of picking one.*
 *v0.11 completes Phase 2: `SUCCESSION` with all four `[N2]` guardrails (§6.1.6), lazy `PROFILE` publication (§6.7), and the IP link — **corrected from "QUIC/Noise", which is not implementable as written**, to TCP with mutually-authenticated TLS 1.3 over self-signed Ed25519 certificates pinned to node IDs (§7.9). Same no-PKI property, no third-party dependency, and no extra key material to bind to the node identity.*
 *v0.10 adds the §12.3 invariant suite — monotonicity, immutability, vector honesty, signature integrity and a rolling-window airtime budget, asserted after EVERY simulated event rather than at the end of a run — and records the capacity number it produced: about six records per hour federation-wide on LongFast at R=4, against the 5% budget (§7.3).*
@@ -573,6 +574,29 @@ Written after building it. The framing is as simple as §4 `[D3]` claimed, but t
 - **Two different maxima.** The local frame limit is 512 bytes (`MAX_TO_FROM_RADIO_SIZE`); the mesh MTU is 233. They are unrelated numbers and conflating them would either truncate a `NodeInfo` or, far worse, let something oversized for the air look acceptable locally.
 
 Waking a sleeping or desynchronised node is 32 bytes of `0xC3` — deliberately never `0x94`, so a node left mid-frame by a client that vanished cannot mistake the wake sequence for a header.
+
+#### 7.1.2 Addressing — binding node IDs to radios `[N12]`
+
+**A gap this document had.** The federation addresses peers by node ID: 8 bytes, `BLAKE3(pubkey)`, self-certifying, no registry (§6.1.1). Meshtastic addresses radios by a 4-byte node number assigned by firmware. Nothing here said how one maps to the other, and the `nodes` table had no column for it. Three answers were considered:
+
+| | Per-packet cost | Per bundle at K=15 | Resolves an unknown peer? |
+|---|---|---|---|
+| Full 8-byte sender ID in every packet | 3.4% of MTU | 120 B | Yes |
+| 4-byte ID prefix, resolved against the roster | 1.7% of MTU | 60 B | **No** — a prefix means nothing without the roster |
+| **Learned binding from a signed `ANNOUNCE`** | **0** | **8 B, once** | Yes, on demand |
+
+**Decided: learn it.** Carrying identity in every packet re-inflates precisely what §6.1.3 hoisted out of records, and the 4-byte compromise pays airtime forever without even fixing the bootstrap case it appears to address. So no packet carries identity bytes at all, and the binding comes from an announcement that is self-certifying in the same way node IDs are:
+
+```
+ANNOUNCE:  type(1) | pubkey(32) | radio_num(4) | unix_secs(4) | signature(64)   = 105 B
+```
+
+- **The radio number is inside the signed body.** Without that, an attacker could rebroadcast a peer's announcement from their own radio and inherit its unicast traffic. Signing the claim makes a captured frame useless anywhere but where it came from, and the receiver checks it against the Meshtastic header.
+- **The timestamp is for ordering, not dating.** A node's radio is not part of its identity — sysops replace hardware — so a later announcement rebinds. The timestamp is what stops that being a free redirection primitive: bindings only move *forward* in a peer's own time, so replaying an old announcement cannot drag a node back to a radio it has left. Announcements more than a day ahead of local time are refused, since a node with a broken clock could otherwise pin its binding permanently.
+- **Discovery is demand-driven, not broadcast-driven.** A node announces on connect and every 12 hours, but the connect-time announcement only reaches peers that are already listening — the first node on a mesh announces to nobody. Having every peer answer a newcomer would rebuild §7.3's reply storm at the link layer, so instead an unattributable sender is asked directly: a 1-byte unicast `WHO_IS`, rate-limited to once per radio per 15 minutes, answered with a unicast `ANNOUNCE`. Two packets, only when there is something to learn. Announcing often enough to avoid the question would cost about **1% of the whole channel** at fifty instances — a fifth of the entire federation budget spent saying hello.
+- **An unattributed datagram is dropped, not guessed at.** L1 keys decoder state on the sender and derives repair masks from it (§7.2), so a datagram filed under the wrong node ID would not merely be misplaced — it would corrupt a decode.
+
+**The frame type byte is shared between L0 and L1.** The layer above already spends byte 0 on a frame type, so the link reads that byte rather than prepending one of its own: `1` control, `2` symbol, `3` `ANNOUNCE`, `4` `WHO_IS`. A second header byte would cost one byte per *symbol* — about 15 per bundle — to buy layering purity, which §12.7's byte budget does not have room for. The MTU available to the sync protocol therefore stays the full 233 bytes.
 
 **Reliability.** Meshtastic offers `want_ack` with limited firmware-level retries, but it is not a reliable transport and shouldn't be treated as one. Use `want_ack` only for small unicast control packets (delta requests) and let L1 handle bulk reliability. Also respect the hop limit (0–7, default 3) — **set it explicitly and as low as the topology allows**, since hop limit is a direct multiplier on R (§1.1) and therefore on the airtime cost of everything we send.
 
@@ -1332,6 +1356,8 @@ Phases 2 and 4 are parallelizable if there's more than one person working on it.
 **`N10` — What is R on a real mesh?** `[N6]` settled the *method*, not the *number*. §7.8 specifies how to measure the flood multiplier by hand with stock Meshtastic tooling, and what `mesh survey` automates. The design still runs on a guessed default of 4, and every airtime figure in this document scales linearly with it. Ideally measured before Phase 3 finalizes the governor's defaults. **If R turns out to be 8**, the per-node budget halves to ~5 full packets/day, the batching windows in §7.3 want lengthening, and the default `hop_limit` deserves a hard look — §7.8.2's hop-limit sweep is the part that tells you what to change.
 
 ### Answered — see §15.2
+
+**`N12` — How does a node ID map to a radio address?** Raised and resolved during Phase 3: a signed `ANNOUNCE` binds them, `WHO_IS` discovers on demand, and no packet carries identity bytes. Full reasoning and the two rejected alternatives in §7.1.2.
 
 **`N11` — How much authority does a door get?** Resolved: capability levels 1–3 always available, `act_as_user` a per-door sysop grant, capabilities intersect rather than escalate, tokens scoped per invocation, `DOOR_EVENT` node-signed. Full model in §9.1.1.
 
