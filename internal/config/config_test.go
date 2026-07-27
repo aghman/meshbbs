@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTOML(t *testing.T, body string) string {
@@ -23,7 +24,10 @@ func TestUnknownKeyIsAnError(t *testing.T) {
 	cases := []struct{ name, body string }{
 		{"misspelled key", "[node]\ndisplay_nam = \"x\"\n"},
 		{"plausible-but-wrong", "[log]\nlevel = \"info\"\nlogformat = \"json\"\n"},
-		{"unknown section", "[mesh]\nchannel_name = \"bbsnet\"\n"},
+		{"unknown section", "[doors]\nenabled = true\n"},
+		// [mesh] became a real section in Phase 3; a wrong key INSIDE it must
+		// still fail, which is the case a growing config file keeps hitting.
+		{"unknown key in a known section", "[mesh]\nchannel = \"bbsnet\"\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -228,4 +232,93 @@ func TestSecretResolution(t *testing.T) {
 			t.Error("empty secret should not be considered set")
 		}
 	})
+}
+
+// Quiet hours are written the way a sysop would write them without reading
+// documentation, and a window that wraps midnight is the case they exist for.
+func TestQuietHourWindows(t *testing.T) {
+	c := Default()
+	c.Mesh.QuietHours = "22:00-06:00, 13:00-13:30"
+
+	got, err := c.QuietHourWindows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d windows, want 2", len(got))
+	}
+	if got[0].Start != 22*time.Hour || got[0].End != 6*time.Hour {
+		t.Errorf("overnight window = %+v", got[0])
+	}
+	if got[1].Start != 13*time.Hour || got[1].End != 13*time.Hour+30*time.Minute {
+		t.Errorf("daytime window = %+v", got[1])
+	}
+
+	for _, bad := range []string{"22:00", "22:00-", "25:00-06:00", "22:00-22:00", "10pm-6am"} {
+		c.Mesh.QuietHours = bad
+		if _, err := c.QuietHourWindows(); err == nil {
+			t.Errorf("accepted %q as a quiet-hours window", bad)
+		}
+	}
+}
+
+// §8.3: the override is a phrase, not a flag, so nobody sets it while skimming.
+func TestPart97OverrideMustBeExact(t *testing.T) {
+	c := Default()
+	c.Mesh.Enabled = true
+
+	if c.AcceptsPart97Responsibility() {
+		t.Error("an empty override was accepted")
+	}
+	c.Mesh.HamModeOverride = "true"
+	if c.AcceptsPart97Responsibility() {
+		t.Error("\"true\" was accepted as the override")
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("a near-miss override passed validation silently")
+	}
+
+	c.Mesh.HamModeOverride = HamModeOverridePhrase
+	if !c.AcceptsPart97Responsibility() {
+		t.Error("the documented phrase was not accepted")
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("valid config rejected: %v", err)
+	}
+}
+
+// The ceiling is what the whole BBS network takes from other people's mesh, so
+// a typo must not sail through (§7.6).
+func TestMeshValidation(t *testing.T) {
+	base := func() Config {
+		c := Default()
+		c.Mesh.Enabled = true
+		return c
+	}
+	cases := map[string]func(*Config){
+		"ceiling over the hard max": func(c *Config) { c.Mesh.AirtimeCeilingPct = 60 },
+		"ceiling of zero":           func(c *Config) { c.Mesh.AirtimeCeilingPct = 0 },
+		"hop limit out of range":    func(c *Config) { c.Mesh.HopLimit = 9 },
+		"no instances":              func(c *Config) { c.Mesh.ExpectedInstanceCount = 0 },
+		"R below one":               func(c *Config) { c.Mesh.FloodMultiplier = 0.5 },
+		"unknown mode":              func(c *Config) { c.Mesh.Mode = "bluetooth" },
+		"tcp with no host":          func(c *Config) { c.Mesh.Mode = "tcp" },
+		"no channel":                func(c *Config) { c.Mesh.ChannelName = "" },
+	}
+	for name, mut := range cases {
+		c := base()
+		mut(&c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+
+	// And none of it applies when the radio is off, since a BBS with no mesh is
+	// a complete BBS.
+	c := Default()
+	c.Mesh.AirtimeCeilingPct = 999
+	c.Mesh.Mode = "nonsense"
+	if err := c.Validate(); err != nil {
+		t.Errorf("mesh settings were validated while mesh.enabled is false: %v", err)
+	}
 }

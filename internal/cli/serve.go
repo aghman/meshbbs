@@ -118,6 +118,19 @@ Serves SSH on the configured port. Users connect with:
 				return err
 			}
 
+			// The mesh comes up before the SSH server accepts anyone, so a
+			// misconfigured radio, an absent channel or a ham-mode violation
+			// stops startup instead of leaving an instance that looks healthy
+			// and silently federates nothing.
+			var fed *federation
+			if e.cfg.Mesh.Enabled {
+				fed, err = startFederation(ctx, e, key, st, log)
+				if err != nil {
+					return fmt.Errorf("mesh: %w", err)
+				}
+				defer fed.Close()
+			}
+
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "%s is up.\n\n", e.cfg.Node.DisplayName)
 			fmt.Fprintf(out, "  node id   %s\n", key.ID().String())
@@ -125,7 +138,20 @@ Serves SSH on the configured port. Users connect with:
 			fmt.Fprintf(out, "  themes    %v\n", themes.Names())
 			fmt.Fprintf(out, "  guests    %v\n", e.cfg.Users.GuestEnabled)
 			fmt.Fprintf(out, "  register  %s\n", e.cfg.Users.RegistrationMode)
-			fmt.Fprintf(out, "  files     %s (sftp)\n\n", filesDir)
+			fmt.Fprintf(out, "  files     %s (sftp)\n", filesDir)
+			if fed != nil {
+				radio := fed.link.Radio()
+				fmt.Fprintf(out, "  mesh      %s, channel %q\n",
+					fed.link.Name(), e.cfg.Mesh.ChannelName)
+				if radio != nil {
+					fmt.Fprintf(out, "  radio     %s %s, hop limit %d\n",
+						radio.HardwareModel, radio.ModemPreset, radio.HopLimit)
+				}
+				// §7.6 requires the derived budget in human terms, at startup
+				// and on the status screen — not buried in a config file.
+				fmt.Fprintf(out, "  airtime   %s\n", fed.Summary())
+			}
+			fmt.Fprintln(out)
 			fmt.Fprintf(out, "Connect with:  ssh new@localhost -p %d\n", port)
 			fmt.Fprintf(out, "Ctrl+C to stop.\n\n")
 

@@ -19,6 +19,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/aghman/meshbbs/internal/governor"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -47,6 +48,7 @@ type Config struct {
 	Telnet  Telnet  `toml:"telnet" doc:"The legacy plaintext front end, off by default ([D12])."`
 	Users   Users   `toml:"users" doc:"Registration and account policy (§6.7)."`
 	Theme   Theme   `toml:"theme" doc:"Appearance (§5.4)."`
+	Mesh    Mesh    `toml:"mesh" doc:"The Meshtastic link and the airtime governor (§7.1, §7.6)."`
 	Log     Log     `toml:"log" doc:"Logging and observability."`
 	Storage Storage `toml:"storage" doc:"Database and on-disk layout."`
 }
@@ -96,6 +98,36 @@ type Node struct {
 	SysopContact string      `toml:"sysop_contact" default:"" doc:"Free-text contact address for the sysop, published in the NODE record."`
 	Timezone     string      `toml:"timezone" default:"Local" doc:"IANA timezone name used for display. Wall-clock time is advisory (§6.2.1)."`
 	Environment  Environment `toml:"environment" default:"production" doc:"'development' or 'production'. The dev subcommands refuse to run against a production datadir (§6.7)."`
+}
+
+// Mesh configures the radio link and the airtime governor (§11.5, Phase 3).
+//
+// Off by default. A BBS with no radio is a complete BBS — Phase 1 shipped one —
+// and turning this on commits the instance to transmitting on a shared band, so
+// it is a decision a sysop makes rather than one they inherit.
+//
+// Deliberately absent: the channel PSK, the port number and the channel index.
+// §11.5 lists them, but meshbbs never writes radio configuration — the sysop
+// owns their node, sets the channel up in the Meshtastic app, and we resolve it
+// by NAME because indices are a local arrangement that differs between radios.
+type Mesh struct {
+	Enabled bool `toml:"enabled" default:"false" doc:"Federate over a Meshtastic radio. Off by default: enabling it transmits on a shared band."`
+
+	Mode         string `toml:"mode" default:"auto" doc:"How to reach the radio: 'serial', 'tcp', or 'auto' (try the configured serial device or auto-detect, then fall back to tcp_host)."`
+	SerialDevice string `toml:"serial_device" default:"" doc:"Serial port, e.g. /dev/ttyUSB0 or COM3. Empty auto-detects; run 'meshbbs mesh ports' to see candidates."`
+	SerialBaud   int    `toml:"serial_baud" default:"115200" doc:"Serial baud rate. Every current firmware uses 115200."`
+	TCPHost      string `toml:"tcp_host" default:"" doc:"Host of a node on WiFi. Port defaults to 4403 if not given."`
+
+	ChannelName string `toml:"channel_name" default:"bbsnet" doc:"Name of the Meshtastic channel carrying BBS traffic (§7.1). Create it in the Meshtastic app as a secondary channel with the same name and key on every instance."`
+	HopLimit    int    `toml:"hop_limit" default:"0" doc:"Hop limit for BBS packets, 0-7. Zero uses the radio's own setting. Hop limit multiplies what every packet costs the mesh (§1.1), so set it as low as your topology allows."`
+
+	AirtimeCeilingPct       float64 `toml:"airtime_ceiling_pct" default:"5" doc:"Share of the channel the WHOLE BBS network should use, as a percentage. Divided by expected_instance_count to get this node's allowance. Clamped to 15 in code (§7.6)."`
+	ExpectedInstanceCount   int     `toml:"expected_instance_count" default:"50" doc:"How many instances divide the ceiling. The design plans for 50 ([D2])."`
+	FloodMultiplier         float64 `toml:"flood_multiplier" default:"4" doc:"R: how many times the mesh rebroadcasts each packet. Every airtime figure scales linearly with it, and 4 is a GUESS — run 'meshbbs mesh survey' to measure yours (§7.8)."`
+	FloodMultiplierOverride bool    `toml:"flood_multiplier_override" default:"false" doc:"Pin flood_multiplier and disable live refinement. Testing only: it stops the node correcting a value that is too low."`
+	QuietHours              string  `toml:"quiet_hours" default:"" doc:"Comma-separated local-time windows of zero transmission, e.g. '22:00-06:00'. Windows may wrap midnight."`
+
+	HamModeOverride string `toml:"ham_mode_override" default:"" doc:"Set to 'i_accept_part97_responsibility' to transmit encrypted traffic while the radio reports a licensed operator. FCC Part 97 prohibits obscuring the meaning of amateur transmissions; the licence at risk is yours (§8.3)."`
 }
 
 // Log configures slog (§11.5, Phase 0).
@@ -217,6 +249,53 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.Mesh.Enabled {
+		switch c.Mesh.Mode {
+		case "serial", "tcp", "auto":
+		default:
+			problems = append(problems, fmt.Sprintf(
+				"mesh.mode is %q, want serial, tcp, or auto", c.Mesh.Mode))
+		}
+		if c.Mesh.Mode == "tcp" && strings.TrimSpace(c.Mesh.TCPHost) == "" {
+			problems = append(problems, "mesh.mode is \"tcp\" but mesh.tcp_host is empty")
+		}
+		if strings.TrimSpace(c.Mesh.ChannelName) == "" {
+			problems = append(problems, "mesh.channel_name must not be empty")
+		}
+		if c.Mesh.HopLimit < 0 || c.Mesh.HopLimit > 7 {
+			problems = append(problems, fmt.Sprintf(
+				"mesh.hop_limit is %d, want 0-7", c.Mesh.HopLimit))
+		}
+		if c.Mesh.SerialBaud < 1200 {
+			problems = append(problems, fmt.Sprintf("mesh.serial_baud is %d", c.Mesh.SerialBaud))
+		}
+		// The ceiling is clamped rather than rejected in the governor, but a
+		// sysop who typed 60 should hear about it here rather than discover
+		// months later that it never took effect.
+		if c.Mesh.AirtimeCeilingPct <= 0 || c.Mesh.AirtimeCeilingPct > MaxAirtimeCeilingPct {
+			problems = append(problems, fmt.Sprintf(
+				"mesh.airtime_ceiling_pct is %g, want a positive value up to %g — "+
+					"the ceiling is what the whole BBS network takes from other people's mesh (§7.6)",
+				c.Mesh.AirtimeCeilingPct, MaxAirtimeCeilingPct))
+		}
+		if c.Mesh.ExpectedInstanceCount < 1 {
+			problems = append(problems, "mesh.expected_instance_count must be at least 1")
+		}
+		if c.Mesh.FloodMultiplier < 1 {
+			problems = append(problems, fmt.Sprintf(
+				"mesh.flood_multiplier is %g, want at least 1 — our own transmission always happens",
+				c.Mesh.FloodMultiplier))
+		}
+		if _, err := c.QuietHourWindows(); err != nil {
+			problems = append(problems, err.Error())
+		}
+		if o := strings.TrimSpace(c.Mesh.HamModeOverride); o != "" && o != HamModeOverridePhrase {
+			problems = append(problems, fmt.Sprintf(
+				"mesh.ham_mode_override is %q; it only takes effect when set to exactly %q",
+				o, HamModeOverridePhrase))
+		}
+	}
+
 	if strings.TrimSpace(c.Storage.Database) == "" {
 		problems = append(problems, "storage.database must not be empty")
 	}
@@ -233,6 +312,64 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(problems, "\n  - "))
 	}
 	return nil
+}
+
+// MaxAirtimeCeilingPct is the hard limit on the mesh-wide share (§7.6).
+const MaxAirtimeCeilingPct = 15.0
+
+// HamModeOverridePhrase is the exact value that disables the Part 97 block.
+//
+// A phrase rather than a boolean so that nobody sets it while skimming: writing
+// it out is the acknowledgement (§8.3).
+const HamModeOverridePhrase = "i_accept_part97_responsibility"
+
+// AcceptsPart97Responsibility reports whether the override is properly set.
+func (c *Config) AcceptsPart97Responsibility() bool {
+	return strings.TrimSpace(c.Mesh.HamModeOverride) == HamModeOverridePhrase
+}
+
+// QuietHourWindows parses mesh.quiet_hours into governor windows.
+//
+// The format is what a sysop would write without reading documentation:
+// "22:00-06:00, 13:00-13:30". A window whose end precedes its start wraps
+// midnight, because "quiet overnight" is the case this exists for.
+func (c *Config) QuietHourWindows() ([]governor.Window, error) {
+	raw := strings.TrimSpace(c.Mesh.QuietHours)
+	if raw == "" {
+		return nil, nil
+	}
+	var out []governor.Window
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		halves := strings.SplitN(part, "-", 2)
+		if len(halves) != 2 {
+			return nil, fmt.Errorf("mesh.quiet_hours entry %q is not a range like 22:00-06:00", part)
+		}
+		start, err := parseClock(strings.TrimSpace(halves[0]))
+		if err != nil {
+			return nil, fmt.Errorf("mesh.quiet_hours entry %q: %w", part, err)
+		}
+		end, err := parseClock(strings.TrimSpace(halves[1]))
+		if err != nil {
+			return nil, fmt.Errorf("mesh.quiet_hours entry %q: %w", part, err)
+		}
+		if start == end {
+			return nil, fmt.Errorf("mesh.quiet_hours entry %q starts and ends at the same time", part)
+		}
+		out = append(out, governor.Window{Start: start, End: end})
+	}
+	return out, nil
+}
+
+func parseClock(s string) (time.Duration, error) {
+	t, err := time.Parse("15:04", s)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a 24-hour time like 22:00", s)
+	}
+	return time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute, nil
 }
 
 // ResolvedDataDir returns the data directory, falling back to the OS

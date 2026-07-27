@@ -7,6 +7,19 @@ Generated from the source. Do not edit by hand.
 | `log.file` | string | *(empty)* | `MESHBBS_LOG_FILE` | Path to a log file. Empty logs to stderr. |
 | `log.format` | string | `text` | `MESHBBS_LOG_FORMAT` | text or json. |
 | `log.level` | string | `info` | `MESHBBS_LOG_LEVEL` | debug, info, warn, or error. |
+| `mesh.airtime_ceiling_pct` | float64 | `5` | `MESHBBS_MESH_AIRTIME_CEILING_PCT` | Share of the channel the WHOLE BBS network should use, as a percentage. Divided by expected_instance_count to get this node's allowance. Clamped to 15 in code (§7.6). |
+| `mesh.channel_name` | string | `bbsnet` | `MESHBBS_MESH_CHANNEL_NAME` | Name of the Meshtastic channel carrying BBS traffic (§7.1). Create it in the Meshtastic app as a secondary channel with the same name and key on every instance. |
+| `mesh.enabled` | bool | `false` | `MESHBBS_MESH_ENABLED` | Federate over a Meshtastic radio. Off by default: enabling it transmits on a shared band. |
+| `mesh.expected_instance_count` | int | `50` | `MESHBBS_MESH_EXPECTED_INSTANCE_COUNT` | How many instances divide the ceiling. The design plans for 50 ([D2]). |
+| `mesh.flood_multiplier` | float64 | `4` | `MESHBBS_MESH_FLOOD_MULTIPLIER` | R: how many times the mesh rebroadcasts each packet. Every airtime figure scales linearly with it, and 4 is a GUESS — run 'meshbbs mesh survey' to measure yours (§7.8). |
+| `mesh.flood_multiplier_override` | bool | `false` | `MESHBBS_MESH_FLOOD_MULTIPLIER_OVERRIDE` | Pin flood_multiplier and disable live refinement. Testing only: it stops the node correcting a value that is too low. |
+| `mesh.ham_mode_override` | string | *(empty)* | `MESHBBS_MESH_HAM_MODE_OVERRIDE` | Set to 'i_accept_part97_responsibility' to transmit encrypted traffic while the radio reports a licensed operator. FCC Part 97 prohibits obscuring the meaning of amateur transmissions; the licence at risk is yours (§8.3). |
+| `mesh.hop_limit` | int | `0` | `MESHBBS_MESH_HOP_LIMIT` | Hop limit for BBS packets, 0-7. Zero uses the radio's own setting. Hop limit multiplies what every packet costs the mesh (§1.1), so set it as low as your topology allows. |
+| `mesh.mode` | string | `auto` | `MESHBBS_MESH_MODE` | How to reach the radio: 'serial', 'tcp', or 'auto' (try the configured serial device or auto-detect, then fall back to tcp_host). |
+| `mesh.quiet_hours` | string | *(empty)* | `MESHBBS_MESH_QUIET_HOURS` | Comma-separated local-time windows of zero transmission, e.g. '22:00-06:00'. Windows may wrap midnight. |
+| `mesh.serial_baud` | int | `115200` | `MESHBBS_MESH_SERIAL_BAUD` | Serial baud rate. Every current firmware uses 115200. |
+| `mesh.serial_device` | string | *(empty)* | `MESHBBS_MESH_SERIAL_DEVICE` | Serial port, e.g. /dev/ttyUSB0 or COM3. Empty auto-detects; run 'meshbbs mesh ports' to see candidates. |
+| `mesh.tcp_host` | string | *(empty)* | `MESHBBS_MESH_TCP_HOST` | Host of a node on WiFi. Port defaults to 4403 if not given. |
 | `node.display_name` | string | `meshbbs` | `MESHBBS_NODE_DISPLAY_NAME` | Self-declared label published in this node's NODE record. Not unique, not authoritative, never used for routing (§6.1.4). |
 | `node.environment` | string | `production` | `MESHBBS_NODE_ENVIRONMENT` | 'development' or 'production'. The dev subcommands refuse to run against a production datadir (§6.7). |
 | `node.sysop_contact` | string | *(empty)* | `MESHBBS_NODE_SYSOP_CONTACT` | Free-text contact address for the sysop, published in the NODE record. |
@@ -23,6 +36,7 @@ Generated from the source. Do not edit by hand.
 | `telnet.bind` | string | `0.0.0.0` | `MESHBBS_TELNET_BIND` | Address to listen on. |
 | `telnet.enabled` | bool | `false` | `MESHBBS_TELNET_ENABLED` | Serve telnet. OFF by default: telnet is plaintext, so anything typed can be read by anyone on the network path ([D12]). |
 | `telnet.guest_only` | bool | `true` | `MESHBBS_TELNET_GUEST_ONLY` | Serve read-only guest sessions only. Recommended: browsing over plaintext costs nothing, typing a password over it does. |
+| `telnet.max_sessions` | int | `16` | `MESHBBS_TELNET_MAX_SESSIONS` | Maximum concurrent telnet sessions. This is a public plaintext port, so it is capped. |
 | `telnet.port` | int | `2323` | `MESHBBS_TELNET_PORT` | Port to listen on. 23 is conventional but needs root. |
 | `theme.default` | string | `classic` | `MESHBBS_THEME_DEFAULT` | Built-in or file theme name. Run the BBS and press N for the list. |
 | `theme.default_encoding` | string | `auto` | `MESHBBS_THEME_DEFAULT_ENCODING` | auto, utf8, or cp437. 'auto' guesses from the client's locale and terminal type. |

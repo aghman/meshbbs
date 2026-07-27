@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -152,5 +154,54 @@ func TestMeshInfoFlagsDisabledTransmit(t *testing.T) {
 func TestMeshPortsRuns(t *testing.T) {
 	if _, err := run(t, "--data-dir", t.TempDir(), "mesh", "ports"); err != nil {
 		t.Fatalf("mesh ports: %v", err)
+	}
+}
+
+// The mesh keys have to reach the generated reference, since §11.5's whole
+// point is that the documentation is the source rather than a copy of it.
+func TestConfigReferenceIncludesMeshKeys(t *testing.T) {
+	dir := initInstance(t)
+	out, err := run(t, "--data-dir", dir, "config", "reference")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"mesh.enabled", "mesh.channel_name", "mesh.airtime_ceiling_pct",
+		"mesh.flood_multiplier", "mesh.quiet_hours", "mesh.ham_mode_override",
+	} {
+		if !strings.Contains(out, key) {
+			t.Errorf("config reference omits %s", key)
+		}
+	}
+	// The two values a sysop most needs warned about.
+	if !strings.Contains(out, "GUESS") {
+		t.Error("the reference does not flag flood_multiplier as a guess")
+	}
+	if !strings.Contains(out, "Part 97") {
+		t.Error("the reference does not explain what the ham override accepts")
+	}
+}
+
+// Enabling the mesh with no reachable radio must fail startup with something a
+// sysop can act on, rather than leaving an instance that looks healthy and
+// federates nothing.
+func TestServeFailsClearlyWithNoRadio(t *testing.T) {
+	dir := initInstance(t)
+	cfgPath := filepath.Join(dir, "config.toml")
+	body, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, []byte("\n[mesh]\nenabled = true\nmode = \"tcp\"\ntcp_host = \"127.0.0.1:1\"\n")...)
+	if err := os.WriteFile(cfgPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "--data-dir", dir, "serve")
+	if err == nil {
+		t.Fatal("serve started with an unreachable radio")
+	}
+	if !strings.Contains(err.Error(), "mesh") {
+		t.Errorf("the failure does not say it was the mesh: %v\n%s", err, out)
 	}
 }
