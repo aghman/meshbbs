@@ -212,6 +212,12 @@ jobs:
       # boundary.
       - name: Fuzz profile parser
         run: .github/scripts/fuzz.sh ./internal/profile FuzzUnmarshalProfileBody 20s
+      # The serial framer sees whatever the wire produces: firmware debug text,
+      # a fragment left over from a client that died mid-frame, and pure noise
+      # at the wrong baud rate. Its length field is also the one place in the
+      # codebase where an attacker-adjacent number sizes an allocation.
+      - name: Fuzz Meshtastic frame reader
+        run: .github/scripts/fuzz.sh ./internal/meshtastic FuzzReadFrame 30s
 
   golden:
     name: Golden frames are stable

@@ -13,8 +13,9 @@ and no address authority — and sysops give peers short local names (`austin@pn
 name hosts in an SSH config. A gateway can bridge selected echo areas to existing FidoNet-style
 message networks.
 
-**Status:** Phase 1 complete — a usable single-node BBS. Federation over the mesh is Phase 2/3, so
-instances do not talk to each other yet.
+**Status:** Phase 2 complete — a usable single-node BBS, plus the sync protocol and its simulator,
+with instances able to federate over IP. Phase 3 is in progress: the Meshtastic link itself, so
+federation over the mesh does not work yet.
 
 ## Try it
 
@@ -61,6 +62,24 @@ recovered, and the instance would have to re-establish with its peers as a new n
 go test ./...
 go run ./tools/checkdeterminism ./...        # enforces the design §12.1 constraints
 go test ./internal/tui/ -update              # regenerate golden screen frames
+```
+
+Building needs nothing but a Go toolchain. The Meshtastic protobuf bindings in
+`internal/meshtastic/meshpb` are generated but committed, so neither `protoc` nor the
+`third_party/meshtastic-protobufs` submodule is required to build or test. They are needed only to
+regenerate:
+
+```
+git submodule update --init third_party/meshtastic-protobufs
+scripts/genproto.sh
+```
+
+With a Meshtastic node plugged in:
+
+```
+./meshbbs mesh ports                   # which serial port is the radio on
+./meshbbs mesh info                    # what the radio says about itself
+./meshbbs mesh info --tcp mesh.local   # or a node on WiFi
 ```
 
 The determinism check is not a style linter. Deterministic simulation is how the federation

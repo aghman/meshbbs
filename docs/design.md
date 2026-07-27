@@ -2,11 +2,12 @@
 
 *A modern, cross-platform BBS in Go with SSH access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
 
-**Status:** Draft v0.11 — SUCCESSION, lazy PROFILE, and the IP link corrected
+**Status:** Draft v0.12 — the local Meshtastic wire, from building it
 **Date:** 2026-07-26
 **All 15 open questions from v0.1 are answered. Decisions are recorded in §15 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §14.**
 
 *v0.3 added account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
+*v0.12 opens Phase 3 with the local wire (§7.1.1): the config exchange that must complete before a node will transmit, the resynchronising framer a shared-with-debug-output UART requires, and the correction that **USB VID/PID scanning cannot work on macOS** without the cgo dependency §4 forbids — detection ranks and explains candidate ports instead of picking one.*
 *v0.11 completes Phase 2: `SUCCESSION` with all four `[N2]` guardrails (§6.1.6), lazy `PROFILE` publication (§6.7), and the IP link — **corrected from "QUIC/Noise", which is not implementable as written**, to TCP with mutually-authenticated TLS 1.3 over self-signed Ed25519 certificates pinned to node IDs (§7.9). Same no-PKI property, no third-party dependency, and no extra key material to bind to the node identity.*
 *v0.10 adds the §12.3 invariant suite — monotonicity, immutability, vector honesty, signature integrity and a rolling-window airtime budget, asserted after EVERY simulated event rather than at the end of a run — and records the capacity number it produced: about six records per hour federation-wide on LongFast at R=4, against the 5% budget (§7.3).*
 *v0.9 records what building the anti-entropy engine (§7.3) and simulating fifty nodes established: `bundle_id` must be content-derived or an interrupted transmission livelocks under the airtime governor; ε is flat in K only for K ≥ 5 and K=1 is exact; the 50-node digest interval is ~5 hours, not 2–3; reply suppression is needed on the request path, not just the digest path; and control-message limits must derive from the MTU in bytes. Measured result at fifty nodes: convergence in 3h20m at 2.3% of the channel, with 95% of digest beats suppressed.*
@@ -561,7 +562,17 @@ Call it **BSMP** (BBS Sync over Mesh Protocol). Five layers, each with one job.
 - **TCP** — the node's WiFi API on port 4403, same framing. Best when the node is mounted somewhere with better RF than the server closet.
 - BLE is not supported. `[D13]`
 
-The adapter auto-detects: scan serial ports for Meshtastic VID/PIDs, then try the configured TCP host.
+The adapter auto-detects: scan serial ports for Meshtastic VID/PIDs, then try the configured TCP host. **Corrected in v0.12 — VID/PID scanning is not available everywhere.** Reading USB identifiers is pure Go on Linux (sysfs) and Windows (the registry), but on macOS it requires IOKit through cgo, and §4 makes cgo-free builds non-negotiable. macOS therefore matches device names (`cu.usbmodem*`, `cu.usbserial*`, `cu.wchusbserial*`) instead, which is weaker evidence — so detection *ranks* candidate ports and explains each guess rather than silently picking one, and the config file can always name the port outright. Two details that are not cosmetic: `/dev/tty.*` is excluded in favour of `/dev/cu.*`, because opening the tty twin blocks until carrier detect and presents as the BBS hanging at startup; and most Meshtastic boards use generic USB-UART bridges, so even a VID/PID match identifies a *chip*, not a radio.
+
+#### 7.1.1 What the local wire actually looks like
+
+Written after building it. The framing is as simple as §4 `[D3]` claimed, but three properties of the stream are load-bearing and none is in the protobuf definitions:
+
+- **The serial line is not a clean frame stream.** Firmware debug output shares the same UART, so plain text arrives interleaved between frames. The reader therefore resynchronises: anything that is not a well-formed header is skipped one byte at a time. Skipped bytes are counted, because a port producing bytes and no frames is the signature of a wrong baud rate — a diagnostic worth surfacing rather than a silent hang. Our resync advances a **single** byte on a mismatch, where the reference client drops the whole two-byte candidate and so loses a frame preceded by a stray `0x94` — exactly what a truncated previous frame leaves behind.
+- **Connecting begins with a config exchange.** The client sends `want_config_id`; the node answers with a burst of its own state, terminated by a matching `config_complete_id`, and will not accept packets to send until that completes. The ID is what distinguishes our dump from the tail of a previous client's. This is also where the governor gets its inputs — region, modem preset, hop limit — and where §8.3's ham-mode check can see which channel slots carry a PSK.
+- **Two different maxima.** The local frame limit is 512 bytes (`MAX_TO_FROM_RADIO_SIZE`); the mesh MTU is 233. They are unrelated numbers and conflating them would either truncate a `NodeInfo` or, far worse, let something oversized for the air look acceptable locally.
+
+Waking a sleeping or desynchronised node is 32 bytes of `0xC3` — deliberately never `0x94`, so a node left mid-frame by a client that vanished cannot mistake the wake sequence for a header.
 
 **Reliability.** Meshtastic offers `want_ack` with limited firmware-level retries, but it is not a reliable transport and shouldn't be treated as one. Use `want_ack` only for small unicast control packets (delta requests) and let L1 handle bulk reliability. Also respect the hop limit (0–7, default 3) — **set it explicitly and as low as the topology allows**, since hop limit is a direct multiplier on R (§1.1) and therefore on the airtime cost of everything we send.
 
