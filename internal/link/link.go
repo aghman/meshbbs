@@ -24,6 +24,33 @@ import (
 	"github.com/aghman/meshbbs/internal/identity"
 )
 
+// Frame types occupy the first byte of every BSMP payload.
+//
+// # Why one registry, here
+//
+// The type byte is shared between layers: L1 writes it (a control message, a
+// fountain symbol) and a mesh link reads it, both to price traffic by priority
+// and to claim two values for its own use. One MTU is small enough that a
+// second header byte — one per symbol, about fifteen per bundle — is not
+// affordable purely to keep the layers from looking at each other's first byte
+// (§12.7).
+//
+// It lives in this package rather than in either user because both a transport
+// and the sync protocol above it need it, and neither should have to import the
+// other to name a constant.
+const (
+	// FrameControl is a gossip control message: a digest, a delta request, a
+	// version vector (§7.3).
+	FrameControl byte = 1
+	// FrameSymbol is a fountain symbol carrying part of a bundle (§7.2).
+	FrameSymbol byte = 2
+	// FrameAnnounce and FrameWhoIs are claimed by the mesh link, which uses
+	// them to bind node IDs to radio addresses (§7.1.2). Other transports know
+	// their own peers and never send these.
+	FrameAnnounce byte = 3
+	FrameWhoIs    byte = 4
+)
+
 // ErrClosed is returned by a Link that has been shut down.
 var ErrClosed = errors.New("link closed")
 

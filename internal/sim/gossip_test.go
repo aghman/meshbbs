@@ -1,21 +1,18 @@
 package sim
 
 import (
-	"context"
-	"encoding/binary"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/aghman/meshbbs/internal/bsmp"
 	"github.com/aghman/meshbbs/internal/bundle"
-	"github.com/aghman/meshbbs/internal/fountain"
 	"github.com/aghman/meshbbs/internal/gossip"
 	"github.com/aghman/meshbbs/internal/gossiptest"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/link"
 	"github.com/aghman/meshbbs/internal/record"
 	"github.com/aghman/meshbbs/internal/rng"
-	"lukechampine.com/blake3"
 )
 
 // This file runs a real federation — real engines, real records, real
@@ -42,19 +39,8 @@ type node struct {
 	store  *gossiptest.Store
 	engine *gossip.Engine
 	link   *Link
-	out    *outbox
-
-	// decoders is fountain state keyed by (sender, bundleID). Keying on sender
-	// as well as bundle ID is required, not optional: bundle IDs are random
-	// per sender, so two nodes will eventually collide on one and silently
-	// corrupt each other's decodes (§7.2).
-	decoders map[decKey]*fountain.Decoder
-	// origLens carries each block's unpadded length, which the symbol header
-	// does not.
-	origLens map[decKey]int
-	// doneBundles suppresses re-applying a block we already decoded, since
-	// symbols keep arriving after the decode completes.
-	doneBundles map[decKey]bool
+	out    *bsmp.Outbox
+	in     *bsmp.Inbox
 }
 
 type decKey struct {
@@ -62,179 +48,14 @@ type decKey struct {
 	bundleID uint32
 }
 
-// outbox implements gossip.Outbox over a sim Link.
-type outbox struct {
-	link *Link
-	rnd  rng.Source
-	dict *bundle.Dictionary
-	loss float64
-
-	// SymbolsSent counts fountain symbols put on the air, so a test can price
-	// reconciliation in packets rather than guessing.
-	SymbolsSent  int
-	MessagesSent int
-	Refused      int
-
-	// cursor tracks how many symbols have been sent for each bundle, so a
-	// transmission the governor interrupted resumes instead of restarting.
-	cursor map[uint32]int
-}
-
-func (o *outbox) SendMessage(to identity.NodeID, payload []byte) error {
-	frame := append([]byte{frameControl}, payload...)
-	if len(frame) > o.link.MTU() {
-		// Control messages are supposed to fit one packet by construction
-		// (gossip.MaxControlMessage). If one does not, that is a bug worth
-		// failing loudly for rather than silently fragmenting.
-		return fmt.Errorf("control message of %d bytes exceeds the %d-byte MTU", len(frame), o.link.MTU())
-	}
-	err := o.link.Send(context.Background(), to, frame)
-	if err == link.ErrNoBudget {
-		o.Refused++
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	o.MessagesSent++
-	return nil
-}
-
-// maxSymbolsPerBundle bounds how many symbols one block may ever cost, across
-// all resumed attempts, so a node that can never be heard stops paying forever.
-const maxSymbolsPerBundle = 4 * fountain.MaxK
-
-func (o *outbox) SendRecords(area record.AreaTag, recs []*record.Record) error {
-	b := &bundle.Bundle{Area: area, Records: recs}
-	packed, err := bundle.Pack(b, o.dict)
-	if err != nil {
-		return err
-	}
-
-	// The bundle ID is derived from the CONTENT, not drawn at random.
-	//
-	// §7.2 specifies "bundle_id ... a random uint32 chosen independently by
-	// each node". That livelocks under an airtime governor, and the simulator
-	// caught it: when the governor interrupts a fountain transmission partway,
-	// a random ID means the retry is a different block, so every symbol the
-	// receivers already hold becomes worthless. A node under a tight budget
-	// then makes partial progress, discards it, and repeats — measured at 30
-	// simulated days, 43 minutes of airtime, and zero records delivered.
-	//
-	// Content-derived IDs make an interrupted transmission RESUMABLE: the same
-	// records produce the same block, so symbols accumulate across attempts and
-	// a node converges over several budget windows instead of never.
-	sum := blake3.Sum256(packed)
-	bundleID := binary.BigEndian.Uint32(sum[:4])
-
-	symSize := o.link.MTU() - frameOverhead - fountain.HeaderSize
-	enc, err := fountain.NewEncoder(o.link.self, bundleID, packed, symSize)
-	if err != nil {
-		return err
-	}
-
-	// Resume where the last attempt stopped. Sending symbols 0..n again would
-	// re-deliver what receivers already have; a fountain code's whole advantage
-	// is that ANY further symbol helps, so continue past the cursor.
-	start := o.cursor[bundleID]
-	if start >= maxSymbolsPerBundle {
-		return nil
-	}
-
-	// The repair count comes from the observed loss rate — the adaptive alpha
-	// of §7.2. Here it is the configured rate; a real node estimates it from
-	// whether its bundles are landing.
-	total := enc.K() + fountain.RepairCount(enc.K(), o.loss)
-	if start >= total {
-		// Already sent a full transmission and peers are still asking, so send
-		// further repair symbols rather than repeating the same ones.
-		total = start + fountain.RepairCount(enc.K(), o.loss)
-	}
-	if total > maxSymbolsPerBundle {
-		total = maxSymbolsPerBundle
-	}
-
-	for i := start; i < total; i++ {
-		s := enc.Symbol(uint16(i))
-		frame := make([]byte, 0, frameOverhead+fountain.HeaderSize+symSize)
-		frame = append(frame, frameSymbol)
-		frame = binary.BigEndian.AppendUint32(frame, uint32(enc.OrigLen()))
-		frame = append(frame, s.Encode()...)
-
-		err := o.link.Send(context.Background(), link.Broadcast, frame)
-		if err == link.ErrNoBudget {
-			o.Refused++
-			o.cursor[bundleID] = i // resume from here when the budget recovers
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		o.SymbolsSent++
-	}
-	o.cursor[bundleID] = total
-	return nil
-}
-
-func (o *outbox) Budget() link.Budget { return o.link.Budget() }
-
-// receive handles one inbound frame.
-func (n *node) receive(dg link.Datagram, dicts *bundle.DictionarySet) error {
-	if len(dg.Data) == 0 {
-		return nil
-	}
-	switch dg.Data[0] {
-	case frameControl:
-		return n.engine.Receive(dg.From, dg.Data[1:])
-
-	case frameSymbol:
-		if len(dg.Data) < 1+4+fountain.HeaderSize {
-			return nil // truncated; the medium is allowed to do that
-		}
-		origLen := int(binary.BigEndian.Uint32(dg.Data[1:5]))
-		s, err := fountain.DecodeSymbol(dg.Data[5:])
-		if err != nil {
-			return nil // a corrupted symbol is not a protocol violation
-		}
-		key := decKey{from: dg.From, bundleID: s.BundleID}
-		if n.doneBundles[key] {
-			return nil
-		}
-		dec := n.decoders[key]
-		if dec == nil {
-			if origLen <= 0 || origLen > 1<<20 {
-				return nil
-			}
-			dec, err = fountain.NewDecoder(dg.From, s.BundleID, int(s.K), len(s.Data), origLen)
-			if err != nil {
-				return nil
-			}
-			n.decoders[key] = dec
-			n.origLens[key] = origLen
-		}
-		if _, err := dec.Add(s); err != nil {
-			return nil
-		}
-		if !dec.Done() {
-			return nil
-		}
-
-		packed, err := dec.Payload()
-		if err != nil {
-			return nil
-		}
-		n.doneBundles[key] = true
-		delete(n.decoders, key)
-
-		b, err := bundle.Unpack(packed, dicts)
-		if err != nil {
-			return nil
-		}
-		_, err = n.engine.ApplyRecords(b.Area, b.Records)
-		return err
-	}
-	return nil
-}
+// The transport under test is the SHIPPED one.
+//
+// internal/bsmp used to live here as a "test transport", which meant the
+// simulator proved things about code that was never going to run on a radio.
+// Now the fifty-node convergence runs, the airtime budget and the invariant
+// suite all exercise the real packing, fountain coding and reassembly — and a
+// regression in any of it fails here first, where the failure is reproducible
+// from a seed.
 
 // federation is a whole simulated mesh of BBS instances.
 type federation struct {
@@ -271,23 +92,27 @@ func newFederation(t *testing.T, cfg Config, count int, dutyCycle float64) *fede
 			t.Fatal(err)
 		}
 		n := &node{
-			key:         key,
-			id:          key.ID(),
-			store:       gossiptest.NewStore(area),
-			decoders:    map[decKey]*fountain.Decoder{},
-			origLens:    map[decKey]int{},
-			doneBundles: map[decKey]bool{},
+			key:   key,
+			id:    key.ID(),
+			store: gossiptest.NewStore(area),
 		}
 		n.link = net.NewLink(n.id, dutyCycle)
-		n.out = &outbox{
-			link:   n.link,
-			rnd:    net.Rand(fmt.Sprintf("outbox-%d", i)),
-			dict:   dict,
-			loss:   cfg.LossRate,
-			cursor: map[uint32]int{},
+		out, err := bsmp.NewOutbox(bsmp.Config{
+			Self: n.id, Link: n.link, Dictionary: dict, LossRate: cfg.LossRate,
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
+		n.out = out
 		n.engine = gossip.New(n.id, n.store, n.out, net.Clock(),
 			net.Rand(fmt.Sprintf("engine-%d", i)), gcfg)
+		in, err := bsmp.NewInbox(bsmp.InboxConfig{
+			Engine: n.engine, Dictionaries: dicts, Clock: net.Clock(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n.in = in
 		f.nodes = append(f.nodes, n)
 	}
 
@@ -308,7 +133,7 @@ func newFederation(t *testing.T, cfg Config, count int, dutyCycle float64) *fede
 		n := f.nodes[i]
 		net.Every(5*time.Second, func() {
 			n.link.Pump(func(dg link.Datagram) {
-				if err := n.receive(dg, dicts); err != nil {
+				if err := n.in.Deliver(dg); err != nil {
 					t.Errorf("node %s: %v", n.id.Short(), err)
 				}
 			})
@@ -394,7 +219,7 @@ func (f *federation) report(t *testing.T) {
 			n.id.Short(), n.store.Total(),
 			s.DigestsSent, s.DigestsSuppressed, s.DigestsHeard,
 			s.VectorReqsSent, s.VectorReqsDropped, s.RangeReqsSent,
-			n.out.SymbolsSent, n.link.Spent().Round(time.Second))
+			n.out.Stats().SymbolsSent, n.link.Spent().Round(time.Second))
 	}
 	st := f.net.Stats()
 	t.Logf("  network: %d datagrams, %d bytes, %s of channel time, %d delivered, %d dropped",
@@ -545,7 +370,7 @@ func TestConvergesUnderAnAirtimeCeiling(t *testing.T) {
 
 	refused := 0
 	for _, n := range f.nodes {
-		refused += n.out.Refused
+		refused += n.out.Stats().Refused
 	}
 	t.Logf("the governor refused %d transmissions", refused)
 	if refused == 0 {
@@ -655,7 +480,7 @@ func TestFiftyNodeFederationConverges(t *testing.T) {
 		suppressed += s.DigestsSuppressed
 		vecreqs += s.VectorReqsSent
 		dropped += s.VectorReqsDropped
-		symbols += n.out.SymbolsSent
+		symbols += n.out.Stats().SymbolsSent
 	}
 
 	t.Logf("50 nodes, %d records, converged=%v after %s of simulated time", want, ok, elapsed.Round(time.Minute))
@@ -703,7 +528,7 @@ func TestFederationRunIsReproducible(t *testing.T) {
 			out += fmt.Sprintf("|%s d%d/%d v%d/%d r%d s%d a%s",
 				n.id.Short(), s.DigestsSent, s.DigestsSuppressed,
 				s.VectorReqsSent, s.VectorReqsDropped, s.RangeReqsSent,
-				n.out.SymbolsSent, n.link.Spent())
+				n.out.Stats().SymbolsSent, n.link.Spent())
 		}
 		st := f.net.Stats()
 		return out + fmt.Sprintf(" ||net %d/%d/%s", st.Datagrams, st.Delivered, st.Airtime)

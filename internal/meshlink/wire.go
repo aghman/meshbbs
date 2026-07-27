@@ -30,32 +30,28 @@ import (
 	"time"
 
 	"github.com/aghman/meshbbs/internal/identity"
+	"github.com/aghman/meshbbs/internal/link"
 )
 
 // Frame types occupy the first byte of every BSMP payload.
 //
-// # Why the link reads a byte it does not own
+// The link reads a byte it does not own: the layer above already spends byte 0
+// on a frame type, so a second header byte would cost one byte per SYMBOL —
+// about fifteen per bundle at K=15 — purely to keep the layers from looking at
+// each other's first byte, which §12.7's byte budget cannot afford.
 //
-// The layer above already spends byte 0 on a frame type (a gossip control
-// message, a fountain symbol), so the link reads that byte rather than
-// prepending one of its own. A second header byte would cost 1 byte per SYMBOL
-// — about 15 bytes per bundle at K=15 — to buy layering purity on a link where
-// §12.7 makes the byte budget a test.
-//
-// The consequence is that this registry is shared: L0 and L1 draw type codes
-// from one space, and it lives here because the link is what has to
-// discriminate. Values 1 and 2 are the layer above's and are passed through
-// untouched, byte 0 included.
+// The registry itself lives in internal/link, since the sync protocol writes
+// these bytes and this package reads them. Aliased here for the call sites.
 const (
 	// FrameControl is a gossip control message (§7.3). Opaque here.
-	FrameControl byte = 1
+	FrameControl = link.FrameControl
 	// FrameSymbol is a fountain symbol (§7.2). Opaque here.
-	FrameSymbol byte = 2
+	FrameSymbol = link.FrameSymbol
 	// FrameAnnounce binds this radio to a node ID. Consumed by the link.
-	FrameAnnounce byte = 3
+	FrameAnnounce = link.FrameAnnounce
 	// FrameWhoIs asks an unattributed radio to announce itself. Consumed by
 	// the link.
-	FrameWhoIs byte = 4
+	FrameWhoIs = link.FrameWhoIs
 )
 
 // announceBody is the signed portion of an announcement:
