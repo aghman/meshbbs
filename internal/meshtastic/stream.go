@@ -150,6 +150,9 @@ func (c *Conn) Heartbeat() error {
 // Skipped reports bytes discarded outside frames; see FrameReader.Skipped.
 func (c *Conn) Skipped() uint64 { return c.fr.Skipped() }
 
+// Frames reports frames successfully read; see FrameReader.Frames.
+func (c *Conn) Frames() uint64 { return c.fr.Frames() }
+
 // Close shuts the stream down. It is idempotent, and unblocks a concurrent
 // Recv — which is the only way to interrupt one, since neither a serial port
 // nor a blocked protobuf read has anything finer to cancel.

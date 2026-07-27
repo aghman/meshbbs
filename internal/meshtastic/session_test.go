@@ -202,3 +202,20 @@ func TestConfigureHonoursContextCancellation(t *testing.T) {
 		t.Error("connection still usable after a cancelled handshake")
 	}
 }
+
+// Reading the diagnostic counters after a cancelled handshake races the read
+// loop, which outlives the cancellation by however long the close takes to
+// land. `mesh info` does exactly this on every timeout.
+func TestCountersAreSafeToReadAfterCancellation(t *testing.T) {
+	c := startFakeRadio(t, Options{}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := Configure(ctx, c, ConfigRequest{ID: 1}); err == nil {
+		t.Fatal("expected the handshake to time out")
+	}
+	if c.Frames() != 0 {
+		t.Errorf("Frames() = %d, want 0 from a silent radio", c.Frames())
+	}
+	_ = c.Skipped()
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/aghman/meshbbs/internal/meshtastic"
@@ -126,7 +127,7 @@ With no flags it auto-detects a serial port. Use --tcp for a node on WiFi.`,
 
 			info, err := meshtastic.Configure(ctx, conn, meshtastic.ConfigRequest{ID: id})
 			if err != nil {
-				return meshInfoHint(err, conn)
+				return meshInfoHint(err, conn, conn.Name())
 			}
 
 			printRadioInfo(out, info)
@@ -164,34 +165,62 @@ func printRadioInfo(out io.Writer, info *meshtastic.RadioInfo) {
 		fmt.Fprintf(out, "  transmit        DISABLED — this node can hear but not speak\n")
 	}
 
+	// A radio always reports all eight slots, and on a stock device seven of
+	// them are disabled. Listing them in full buries the one line that matters
+	// under seven that do not — so the unused slots collapse to their numbers,
+	// which is the form a sysop actually needs: §7.1 wants a dedicated `bbsnet`
+	// channel, and the question being asked here is "which slot is free?".
 	fmt.Fprintf(out, "\nChannels\n")
-	if len(info.Channels) == 0 {
-		fmt.Fprintf(out, "  (none reported)\n")
-	}
+	var free []string
+	active := 0
 	for _, ch := range info.Channels {
+		if ch.Role == "DISABLED" {
+			free = append(free, fmt.Sprint(ch.Index))
+			continue
+		}
+		active++
 		name := ch.Name
 		if name == "" {
-			name = "(default)"
+			// An empty name means the preset's own default ("LongFast" and so
+			// on), not an unnamed channel.
+			name = "(preset default)"
 		}
 		enc := "no encryption"
 		if ch.Encrypted {
 			enc = "encrypted"
 		}
-		fmt.Fprintf(out, "  %d  %-16s %-10s %s\n", ch.Index, name, ch.Role, enc)
+		fmt.Fprintf(out, "  %d  %-18s %-10s %s\n", ch.Index, name, ch.Role, enc)
+	}
+	if active == 0 {
+		fmt.Fprintf(out, "  (none configured)\n")
+	}
+	if len(free) > 0 {
+		fmt.Fprintf(out, "  unused slots: %s\n", strings.Join(free, ", "))
 	}
 	fmt.Fprintf(out, "\nRegion and preset determine airtime; hop limit multiplies it.\n")
 }
 
-// meshInfoHint turns the most common failure into an actionable message.
+// meshInfoHint turns the two failures that actually happen into advice.
 //
-// A stream that produces bytes but no frames is nearly always a baud rate
-// mismatch or a port belonging to something else entirely, and the skipped-byte
-// counter is what distinguishes that from a node which simply is not talking.
-func meshInfoHint(err error, conn *meshtastic.Conn) error {
-	if n := conn.Skipped(); n > 256 {
+// Both were found by pointing this command at a real radio, and they present
+// almost identically — the command hangs and then reports a timeout — while
+// having nothing to do with each other. The frame and skipped-byte counters are
+// what tell them apart.
+func meshInfoHint(err error, conn *meshtastic.Conn, where string) error {
+	switch {
+	case conn.Skipped() > 256 && conn.Frames() == 0:
+		// Bytes, but never a valid header. A wrong baud rate, or a port that
+		// belongs to something else entirely.
 		return fmt.Errorf("%w\n"+
-			"(%d bytes arrived but no valid frames: wrong baud rate, or this port "+
-			"belongs to another device)", err, n)
+			"(%d bytes arrived but not one valid frame: wrong baud rate, or %s "+
+			"is not a Meshtastic device)", err, conn.Skipped(), where)
+	case conn.Frames() == 0:
+		// Silence. Over TCP this is what connecting to the web UI's port looks
+		// like: the connection succeeds, the server waits for a request it
+		// understands, and neither side ever speaks.
+		return fmt.Errorf("%w\n"+
+			"(connected to %s but it sent nothing: check this is the Meshtastic "+
+			"API port %d, not the web interface)", err, where, meshtastic.DefaultTCPPort)
 	}
 	return err
 }

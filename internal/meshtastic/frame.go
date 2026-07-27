@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 )
 
 const (
@@ -81,8 +82,14 @@ func AppendFrame(dst, payload []byte) ([]byte, error) {
 // bytes is the signature of a wrong baud rate — a diagnostic worth having
 // rather than a silent hang.
 type FrameReader struct {
-	br      *bufio.Reader
-	skipped uint64
+	br *bufio.Reader
+
+	// Counters are atomic because they are read for diagnostics from a
+	// different goroutine than the one reading frames — Configure runs its read
+	// loop in a goroutine that outlives a cancelled handshake by however long
+	// the close takes to land.
+	skipped atomic.Uint64
+	frames  atomic.Uint64
 
 	onText func(string)
 	line   []byte
@@ -156,6 +163,7 @@ func (fr *FrameReader) ReadFrame() ([]byte, error) {
 			}
 			return nil, err
 		}
+		fr.frames.Add(1)
 		return buf, nil
 	}
 }
@@ -165,7 +173,15 @@ func (fr *FrameReader) ReadFrame() ([]byte, error) {
 // Some skipping is normal (device log output). A count that climbs while no
 // frames arrive means the stream is not a Meshtastic stream: wrong baud rate,
 // wrong port, or a device in bootloader mode.
-func (fr *FrameReader) Skipped() uint64 { return fr.skipped }
+func (fr *FrameReader) Skipped() uint64 { return fr.skipped.Load() }
+
+// Frames counts frames successfully read.
+//
+// Zero frames on a connection the node accepted is a different fault from a
+// stream full of skipped bytes, and the two want different advice: the first
+// says "this is not the API port, or the device is not running", the second
+// says "wrong baud rate".
+func (fr *FrameReader) Frames() uint64 { return fr.frames.Load() }
 
 // skipByte consumes one byte outside a frame and routes it to the log sink.
 func (fr *FrameReader) skipByte() {
@@ -173,7 +189,7 @@ func (fr *FrameReader) skipByte() {
 	if err != nil {
 		return
 	}
-	fr.skipped++
+	fr.skipped.Add(1)
 	if fr.onText == nil {
 		return
 	}

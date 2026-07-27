@@ -234,3 +234,24 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// The frame counter is what tells "this is not a Meshtastic stream" apart from
+// "the node accepted the connection and then said nothing" — two failures that
+// look identical from the outside.
+func TestFrameCounters(t *testing.T) {
+	stream := append([]byte("garbage that is not a frame\n"), frame(t, []byte("f"))...)
+	fr := NewFrameReader(bytes.NewReader(stream), nil)
+
+	if fr.Frames() != 0 || fr.Skipped() != 0 {
+		t.Fatalf("counters start at %d/%d", fr.Frames(), fr.Skipped())
+	}
+	if _, err := fr.ReadFrame(); err != nil {
+		t.Fatal(err)
+	}
+	if fr.Frames() != 1 {
+		t.Errorf("Frames() = %d, want 1", fr.Frames())
+	}
+	if fr.Skipped() != 28 {
+		t.Errorf("Skipped() = %d, want the 28 bytes of preamble", fr.Skipped())
+	}
+}

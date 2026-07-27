@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"net"
 	"strings"
 	"testing"
@@ -105,6 +106,46 @@ func TestMeshInfoNeedsNoInstance(t *testing.T) {
 	// part of the minimum a sysop is shown.
 	if !strings.Contains(out, "hop limit") {
 		t.Errorf("output does not report the hop limit:\n%s", out)
+	}
+}
+
+// A real radio reports all eight slots whether or not they are in use. Printing
+// seven DISABLED rows buries the one line that matters, so unused slots collapse
+// to a list of numbers — which is also the question a sysop is asking, since
+// §7.1 wants a dedicated `bbsnet` channel in one of them.
+func TestMeshInfoCollapsesUnusedChannelSlots(t *testing.T) {
+	var buf bytes.Buffer
+	channels := []meshtastic.ChannelInfo{
+		{Index: 0, Role: "PRIMARY", Encrypted: true},
+		{Index: 1, Role: "DISABLED"},
+		{Index: 2, Name: "bbsnet", Role: "SECONDARY"},
+		{Index: 3, Role: "DISABLED"},
+		{Index: 4, Role: "DISABLED"},
+	}
+	printRadioInfo(&buf, &meshtastic.RadioInfo{UsePreset: true, TxEnabled: true, Channels: channels})
+	out := buf.String()
+
+	if strings.Contains(out, "DISABLED") {
+		t.Errorf("unused slots are still listed in full:\n%s", out)
+	}
+	if !strings.Contains(out, "unused slots: 1, 3, 4") {
+		t.Errorf("unused slot numbers missing:\n%s", out)
+	}
+	// An empty name on an active channel means the preset default, not "no name".
+	if !strings.Contains(out, "(preset default)") {
+		t.Errorf("empty channel name rendered misleadingly:\n%s", out)
+	}
+	if !strings.Contains(out, "bbsnet") {
+		t.Errorf("active channel missing:\n%s", out)
+	}
+}
+
+// A radio that can hear but not transmit is silently useless for federation.
+func TestMeshInfoFlagsDisabledTransmit(t *testing.T) {
+	var buf bytes.Buffer
+	printRadioInfo(&buf, &meshtastic.RadioInfo{UsePreset: true, TxEnabled: false})
+	if !strings.Contains(buf.String(), "DISABLED") {
+		t.Errorf("a node with tx_enabled = false is not flagged:\n%s", buf.String())
 	}
 }
 
