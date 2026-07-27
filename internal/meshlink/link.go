@@ -507,6 +507,13 @@ func (l *Link) announcement() []byte {
 	return EncodeAnnounce(l.cfg.Key, num, l.clk.Now())
 }
 
+// Announce broadcasts this node's radio binding immediately.
+//
+// Exposed because a sysop who has just moved to new hardware should not have to
+// wait up to twelve hours for peers to find them again, and because the
+// connect-time announcement only reaches peers that were already listening.
+func (l *Link) Announce(ctx context.Context) error { return l.announce(ctx) }
+
 func (l *Link) announce(ctx context.Context) error {
 	if err := l.sendFrame(ctx, broadcastAddr, l.announcement(), false); err != nil {
 		return err

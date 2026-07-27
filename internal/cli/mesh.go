@@ -10,6 +10,7 @@ import (
 
 	"github.com/aghman/meshbbs/internal/meshtastic"
 	"github.com/aghman/meshbbs/internal/rng"
+	"github.com/aghman/meshbbs/internal/survey"
 	"github.com/spf13/cobra"
 )
 
@@ -30,7 +31,7 @@ func newMeshCmd(e *env) *cobra.Command {
 	// survey` writes its report through the same environment as every other
 	// command that produces a file.
 	_ = e
-	cmd.AddCommand(newMeshPortsCmd(), newMeshInfoCmd())
+	cmd.AddCommand(newMeshPortsCmd(), newMeshInfoCmd(), newMeshSurveyCmd())
 	return cmd
 }
 
@@ -197,6 +198,25 @@ func printRadioInfo(out io.Writer, info *meshtastic.RadioInfo) {
 	if len(free) > 0 {
 		fmt.Fprintf(out, "  unused slots: %s\n", strings.Join(free, ", "))
 	}
+	// The telemetry interval is not trivia: §7.8.1 measures R from two numbers
+	// the node only refreshes on this cadence, so at the 30-minute default a
+	// survey cannot sample often enough to measure anything.
+	fmt.Fprintf(out, "\nTelemetry\n")
+	// A stock node reports 2147483647 here — INT32_MAX as an "unset, use the
+	// firmware default" sentinel. Rendering that literally gives "596523h",
+	// which is not a number anyone should have to interpret.
+	if d, ok := survey.TelemetryCadence(info.TelemetryIntervalSecs); ok {
+		fmt.Fprintf(out, "  metrics update  every %s\n", d)
+	} else {
+		fmt.Fprintf(out, "  metrics update  firmware default (%s)\n", survey.DefaultTelemetryInterval)
+	}
+	if m := info.Metrics; m != nil {
+		fmt.Fprintf(out, "  channel busy    %.2f%%\n", m.ChannelUtilization)
+		fmt.Fprintf(out, "  our transmit    %.4f%%\n", m.AirUtilTx)
+		fmt.Fprintf(out, "  uptime          %s\n",
+			(time.Duration(m.UptimeSecs) * time.Second).String())
+	}
+
 	fmt.Fprintf(out, "\nRegion and preset determine airtime; hop limit multiplies it.\n")
 }
 

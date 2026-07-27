@@ -38,6 +38,30 @@ type RadioInfo struct {
 	TxEnabled    bool
 
 	Channels []ChannelInfo
+
+	// Metrics is the node's own latest telemetry, if it reported any.
+	//
+	// §7.8.1 builds the whole R measurement on two of these numbers, so the
+	// survey needs them — and needs to know how often they are refreshed, which
+	// TelemetryIntervalSecs answers.
+	Metrics *DeviceMetrics
+	// TelemetryIntervalSecs is how often the node updates and broadcasts its
+	// device metrics. Zero means the node did not say, in which case the
+	// firmware default (30 minutes) applies.
+	TelemetryIntervalSecs uint32
+}
+
+// DeviceMetrics is what a node reports about its own radio use.
+type DeviceMetrics struct {
+	// ChannelUtilization is the percentage of time the channel was busy, as
+	// observed by this node.
+	ChannelUtilization float32
+	// AirUtilTx is the percentage of time this node spent transmitting.
+	AirUtilTx float32
+	// UptimeSecs distinguishes a fresh reading from a repeat of a stale one:
+	// the metrics themselves can legitimately be unchanged, uptime cannot.
+	UptimeSecs uint32
+	BatteryPct uint32
 }
 
 // ChannelInfo describes one of the node's eight channel slots.
@@ -144,6 +168,23 @@ func readConfig(c *Conn, req ConfigRequest) (*RadioInfo, error) {
 			info.CodingRate = lora.GetCodingRate()
 			info.HopLimit = lora.GetHopLimit()
 			info.TxEnabled = lora.GetTxEnabled()
+
+		case msg.GetModuleConfig().GetTelemetry() != nil:
+			info.TelemetryIntervalSecs = msg.GetModuleConfig().GetTelemetry().GetDeviceUpdateInterval()
+
+		case msg.GetNodeInfo() != nil:
+			// Only our own entry. Every other node's metrics are whatever it
+			// last broadcast, which is not a measurement of anything here.
+			n := msg.GetNodeInfo()
+			if info.NodeNum != 0 && n.GetNum() == info.NodeNum && n.GetDeviceMetrics() != nil {
+				d := n.GetDeviceMetrics()
+				info.Metrics = &DeviceMetrics{
+					ChannelUtilization: d.GetChannelUtilization(),
+					AirUtilTx:          d.GetAirUtilTx(),
+					UptimeSecs:         d.GetUptimeSeconds(),
+					BatteryPct:         d.GetBatteryLevel(),
+				}
+			}
 
 		case msg.GetChannel() != nil:
 			ch := msg.GetChannel()
