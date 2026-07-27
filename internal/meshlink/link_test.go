@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aghman/meshbbs/internal/governor"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/link"
 	"github.com/aghman/meshbbs/internal/meshtastic/meshpb"
@@ -207,11 +208,14 @@ func TestLinkReconnectsAfterTheRadioDropsOut(t *testing.T) {
 	settle(t, a, b)
 
 	m.dropConnection(0xA1)
+	// Wait on the counter, not on the dial count: the radio is dialled and the
+	// link marked connected a moment before the reconnect is tallied, so
+	// waiting on the former and asserting the latter is a race in the test.
 	waitFor(t, 5*time.Second, "a to reconnect", func() bool {
-		return m.dialCount(0xA1) > 1 && a.Connected()
+		return a.Stats().Reconnects > 0 && a.Connected()
 	})
-	if a.Stats().Reconnects == 0 {
-		t.Error("reconnect was not counted")
+	if m.dialCount(0xA1) < 2 {
+		t.Errorf("radio was dialled %d times, want at least 2", m.dialCount(0xA1))
 	}
 
 	if err := a.Send(context.Background(), kb.ID(), []byte{FrameControl, 'x'}); err != nil {
@@ -305,8 +309,8 @@ func TestNoGovernorMeansNoTransmission(t *testing.T) {
 // window is spent.
 type refusing struct{}
 
-func (refusing) Charge(int) bool     { return false }
-func (refusing) Budget() link.Budget { return link.Budget{Backpressure: true} }
+func (refusing) Allow(int, governor.Class) bool { return false }
+func (refusing) Budget() link.Budget            { return link.Budget{Backpressure: true} }
 
 func TestGovernorRefusalIsReportedAndCounted(t *testing.T) {
 	m := newFakeMesh(t)

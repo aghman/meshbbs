@@ -2,11 +2,12 @@
 
 *A modern, cross-platform BBS in Go with SSH access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
 
-**Status:** Draft v0.14 — two radios, over the air
+**Status:** Draft v0.15 — the airtime governor
 **Date:** 2026-07-26
 **All 15 open questions from v0.1 are answered. Decisions are recorded in §15 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §14.**
 
 *v0.3 added account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
+*v0.15 implements §7.6 and corrects its central justification: bytes are a bad proxy for airtime not because airtime is superlinear in payload but because it is affine, which under-prices SMALL packets by an order of magnitude. Cost is charged per packet. Also records the refusal reasons a status screen needs to tell "over budget" from "the channel is busy", both of which look like silence.*
 *v0.14 records the first two-instance run over real LoRa (§7.1.2.1): discovery, broadcast and attribution all work, and two things hardware taught that no amount of simulation would. Packet IDs are part of the wire contract — Meshtastic drops duplicate `(sender, packet_id)` pairs, so a deterministically seeded node goes silent after a restart. And unicast is PKC-encrypted by firmware 2.5+, so direct packets to a peer whose Meshtastic key we have not exchanged are acknowledged by the firmware and never seen by the application; broadcast, which uses the channel PSK, is unaffected.*
 *v0.13 fills a gap this document had: nothing said how an 8-byte node ID maps to a 4-byte Meshtastic radio address (§7.1.2, `[N12]`). Resolved by a signed, self-certifying `ANNOUNCE` that binds the two, with the radio number inside the signature so a captured announcement cannot be replayed from another radio, and demand-driven `WHO_IS` discovery rather than announcing often enough to be heard — which would cost about 1% of the whole channel at fifty instances. No packet carries identity bytes.*
 *v0.12 opens Phase 3 with the local wire (§7.1.1): the config exchange that must complete before a node will transmit, the resynchronising framer a shared-with-debug-output UART requires, and the correction that **USB VID/PID scanning cannot work on macOS** without the cgo dependency §4 forbids — detection ranks and explains candidate ports instead of picking one.*
@@ -792,7 +793,7 @@ Restating the §1 conclusion as an enforced rule, because it will be tempting to
 
 The most important piece of civic infrastructure in the system, and the 50-instance answer `[D2]` makes it more important, not less.
 
-- **Token bucket sized in *mesh* airtime-seconds.** Compute per-packet airtime from the active preset using the Semtech formula (Appendix A), then **multiply by the estimated flood multiplier R** to get the cost charged against the budget. Bytes are a bad proxy (airtime is superlinear in payload at high SF) and local TX time is also a bad proxy (it ignores rebroadcast, §1.1).
+- **Token bucket sized in *mesh* airtime-seconds.** Compute per-packet airtime from the active preset using the Semtech formula (Appendix A), then **multiply by the estimated flood multiplier R** to get the cost charged against the budget. Bytes are a bad proxy and local TX time is also a bad proxy (it ignores rebroadcast, §1.1). **Corrected in v0.15:** earlier drafts said bytes fail "because airtime is superlinear in payload at high SF". Appendix A's own numbers say the opposite, and the direction changes what the governor must do. Airtime is *affine* in payload — a large fixed cost plus a linear term — so per byte it is strongly SUBlinear: 436 ms for a one-byte payload against 9.3 ms/byte for a full one. A byte-denominated budget therefore does not under-price large packets, it wildly under-prices **small** ones: 233 bytes in a single packet costs 2.16 s, and the same 233 bytes sent one byte at a time costs 101 s. **Cost is charged per packet**, or a chatty protocol that stays inside a byte budget can still take the channel apart.
   - Estimate R from observed traffic: count distinct rebroadcasts of our own packets seen coming back, plus the node's neighbour table. Default to 4 before enough data exists. Expose it in the sysop status screen — a sysop watching R climb is a sysop who understands their mesh.
 - **Configurable ceiling, expressed as a mesh-wide share, default 5%**, hard max enforced in code at 15%. The ceiling is what *the BBS network as a whole* should consume; each node's own allocation is `ceiling / expected_instance_count`, which the node learns from the `NODE` roster (§6.1). At 50 instances that is 0.1% each, ~21 s of local TX/day.
   - **Sysops must not have to compute this.** The first-run wizard and the status screen both show the derived figure in human terms: "your share: about 11 full packets/day, or 25 short posts."
@@ -1437,7 +1438,7 @@ Tair     = Tpre + n_pay * Ts
 Validation: SF11 / BW250 kHz / CR 4/5 (LongFast), PL=16 → **354 ms**, exactly matching Meshtastic's documented figure. PL=256 → **2.157 s** vs. their stated "~2 s". PL=100 (a digest) → **1.010 s**; PL=233 (full app payload) → **1.993 s**.
 
 Two things the governor must do with this:
-- Budget in **airtime-seconds**, not bytes — airtime is superlinear in payload at high SF.
+- Budget in **airtime-seconds**, not bytes, and charge **per packet** — airtime is affine in payload, so the fixed preamble and header dominate small packets and a byte budget under-prices them by an order of magnitude (§7.6).
 - **Multiply by R**, the flood multiplier (§1.1), to get the cost to the commons rather than the cost to us.
 
 ## Appendix B — Payload budget for a typical forum post

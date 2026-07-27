@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aghman/meshbbs/internal/clock"
+	"github.com/aghman/meshbbs/internal/governor"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/link"
 	"github.com/aghman/meshbbs/internal/meshtastic"
@@ -472,6 +473,11 @@ func (l *Link) deliver(p *meshpb.MeshPacket) {
 		return
 	}
 	if p.GetFrom() == self {
+		// Not noise: a packet of ours coming back is a rebroadcast, which is
+		// the one thing about R this node can observe for itself (§7.6).
+		if w, ok := l.cfg.Governor.(EchoWatcher); ok {
+			w.NoteEcho()
+		}
 		l.drop("our own broadcast, heard back")
 		return
 	}
@@ -500,6 +506,15 @@ func (l *Link) deliver(p *meshpb.MeshPacket) {
 		l.unattributed.Add(1)
 		l.askWhoIs(p.GetFrom())
 		return
+	}
+
+	// Per-peer inbound quota (§7.6). A peer over quota is dropped here rather
+	// than in the sync engine, so a flood costs us nothing above the radio.
+	if lim, ok := l.cfg.Governor.(InboundLimiter); ok {
+		if !lim.NoteInbound(from, len(payload)) {
+			l.drop("peer is over its inbound quota")
+			return
+		}
 	}
 
 	l.received.Add(1)
@@ -587,7 +602,21 @@ func (l *Link) Name() string { return "mesh" }
 func (l *Link) MTU() int { return meshtastic.MTU }
 
 // Send transmits one datagram, subject to the governor.
+//
+// The priority class is inferred from the frame type, which is all this layer
+// can see: a control frame is control traffic, and anything else is bulk. The
+// sync engine knows more — whether a bundle is mail or a forum post — and says
+// so through SendClass.
 func (l *Link) Send(ctx context.Context, to identity.NodeID, payload []byte) error {
+	class := governor.ClassForum
+	if len(payload) > 0 && payload[0] == FrameControl {
+		class = governor.ClassControl
+	}
+	return l.SendClass(ctx, to, payload, class)
+}
+
+// SendClass transmits one datagram at an explicit priority.
+func (l *Link) SendClass(ctx context.Context, to identity.NodeID, payload []byte, class governor.Class) error {
 	if len(payload) > l.MTU() {
 		return link.ErrTooLarge
 	}
@@ -619,7 +648,7 @@ func (l *Link) Send(ctx context.Context, to identity.NodeID, payload []byte) err
 	if !l.Connected() {
 		return ErrNotConnected
 	}
-	if !gov.Charge(len(payload)) {
+	if !gov.Allow(len(payload), class) {
 		l.refused.Add(1)
 		return link.ErrNoBudget
 	}
