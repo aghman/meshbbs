@@ -118,6 +118,9 @@ func (r *fakeRadio) writeLoop(conn net.Conn, out chan *meshpb.FromRadio) {
 func (r *fakeRadio) readLoop(conn net.Conn, out chan *meshpb.FromRadio) {
 	defer func() {
 		conn.Close()
+		// Closing under the same lock enqueue holds: another radio's transmit
+		// can be delivering into this queue at the moment the connection ends,
+		// and close-while-sending is a panic, not a race we can shrug at.
 		r.mu.Lock()
 		if r.out == out {
 			close(out)
@@ -197,12 +200,19 @@ func (r *fakeRadio) sendConfig(out chan *meshpb.FromRadio, id uint32) {
 	}
 }
 
+// enqueue delivers to the radio's current queue, if it still has one.
+//
+// The send is non-blocking, so holding the lock cannot stall a delivery to
+// another radio.
 func (r *fakeRadio) enqueue(out chan *meshpb.FromRadio, msg *meshpb.FromRadio) {
-	defer func() { _ = recover() }() // the connection may have been dropped
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.out != out {
+		return // this connection has ended
+	}
 	select {
 	case out <- msg:
 	default:
-		r.mesh.t.Logf("radio 0x%08x dropped a message: queue full", r.num)
 	}
 }
 

@@ -407,3 +407,45 @@ func TestCloseIsIdempotentAndClosesRecv(t *testing.T) {
 		t.Error("Send succeeded after Close")
 	}
 }
+
+// Packet IDs must not repeat across restarts, even when everything else is
+// deterministically seeded.
+//
+// Meshtastic suppresses duplicates by (sender, packet_id) for minutes, so a
+// node that replays IDs after a restart is silently unreachable — which is
+// exactly what the first two-radio bring-up hit: two links with fixed seeds
+// found each other on the first run and never again.
+func TestPacketIDsDoNotRepeatAcrossRestarts(t *testing.T) {
+	ids := func() []uint32 {
+		m := newFakeMesh(t)
+		l := startLink(t, m, nodeKey(t, 1), 0xA1)
+		var out []uint32
+		for i := 0; i < 8; i++ {
+			out = append(out, l.nextID())
+		}
+		return out
+	}
+
+	first, second := ids(), ids()
+	same := 0
+	for i := range first {
+		if first[i] == second[i] {
+			same++
+		}
+	}
+	if same == len(first) {
+		t.Fatal("two links with identical config produced identical packet IDs; " +
+			"every peer would drop the second run's traffic as duplicates")
+	}
+}
+
+// But an explicitly supplied source is still honoured, so a test that wants
+// reproducible IDs can have them.
+func TestPacketIDsCanBeInjected(t *testing.T) {
+	m := newFakeMesh(t)
+	a := startLink(t, m, nodeKey(t, 1), 0xA1, func(c *Config) { c.PacketIDs = rng.NewSeeded(99) })
+	b := startLink(t, m, nodeKey(t, 2), 0xB2, func(c *Config) { c.PacketIDs = rng.NewSeeded(99) })
+	if a.nextID() != b.nextID() {
+		t.Error("an injected packet-ID source was not used")
+	}
+}

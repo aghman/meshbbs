@@ -2,6 +2,7 @@ package meshlink
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -34,6 +35,10 @@ var (
 	ErrReservedFrame = errors.New("meshlink: frame type is reserved for the link")
 )
 
+// Broadcast is the peer ID meaning "every listener on this mesh". It is
+// link.Broadcast, re-exported so callers of this package need not import both.
+func Broadcast() identity.NodeID { return link.Broadcast }
+
 // Dialer opens a connection to the local radio. Serial and TCP both fit.
 type Dialer func(ctx context.Context) (*meshtastic.Conn, error)
 
@@ -49,9 +54,28 @@ type Config struct {
 	Channel string
 	// Governor decides what may be transmitted. Nil refuses everything.
 	Governor Governor
-	// Clock and Rand are injected per §12.1.
+	// Clock and Rand are injected per §12.1. Rand covers jitter and config
+	// handshake IDs — anything a test may legitimately want to replay.
 	Clock clock.Clock
 	Rand  rng.Source
+
+	// PacketIDs draws Meshtastic packet identifiers. It defaults to a source
+	// seeded from system entropy, and MUST NOT be a fixed seed in production.
+	//
+	// # Why this is not just Rand
+	//
+	// Meshtastic firmware suppresses duplicates by (sender, packet_id) for
+	// several minutes. A node that restarts and replays the same ID sequence
+	// therefore has its traffic silently dropped by every peer that heard the
+	// previous run — no error, no NAK, just an unreachable instance.
+	//
+	// This is not hypothetical: it is what the first two-radio bring-up ran
+	// into. Two links with fixed seeds discovered each other on the very first
+	// run and never again, because every later run reused the packet IDs the
+	// radios had already seen. Deterministic seeding is exactly right for the
+	// simulator (§12.1) and exactly wrong for packet IDs, so they get separate
+	// sources.
+	PacketIDs rng.Source
 
 	// HopLimit overrides the radio's own setting. Zero uses the radio's.
 	//
@@ -78,6 +102,15 @@ type Config struct {
 	// OnEvent receives one-line operational notes for the log: connects,
 	// disconnects, peers learned. Optional.
 	OnEvent func(string)
+	// OnTrace, if set, reports EVERY packet the radio hands us and what became
+	// of it.
+	//
+	// "Federation is not working" has too many possible causes to guess at from
+	// the outside — wrong channel, wrong portnum, a peer we cannot attribute,
+	// our own echo — and each looks identical from a silent inbox. This is how
+	// a sysop tells them apart, and how the first two-radio bring-up was
+	// debugged.
+	OnTrace func(string)
 }
 
 // Stats are counters for the sysop status screen (§11.6).
@@ -143,6 +176,13 @@ func New(cfg Config) (*Link, error) {
 	}
 	if cfg.Rand == nil {
 		return nil, errors.New("meshlink: no random source configured")
+	}
+	if cfg.PacketIDs == nil {
+		var seed [8]byte
+		if _, err := rng.NewSecret().Read(seed[:]); err != nil {
+			return nil, fmt.Errorf("meshlink: seeding packet IDs: %w", err)
+		}
+		cfg.PacketIDs = rng.NewSeeded(binary.BigEndian.Uint64(seed[:]))
 	}
 	if cfg.AnnounceInterval <= 0 {
 		cfg.AnnounceInterval = 12 * time.Hour
@@ -401,12 +441,22 @@ func (l *Link) readLoop(ctx context.Context) error {
 // deliver turns one received packet into a datagram, or handles it here.
 func (l *Link) deliver(p *meshpb.MeshPacket) {
 	d := p.GetDecoded()
+	l.trace(func() string {
+		kind := "decoded"
+		if d == nil {
+			kind = fmt.Sprintf("encrypted(%dB)", len(p.GetEncrypted()))
+		}
+		return fmt.Sprintf("rx from=0x%08x ch=%d port=%v %s len=%d",
+			p.GetFrom(), p.GetChannel(), d.GetPortnum(), kind, len(d.GetPayload()))
+	})
 	if d == nil {
 		// An `encrypted` payload means the radio holds no key for that
 		// channel. Not ours, and not something we can or should decrypt.
+		l.drop("no key for that channel")
 		return
 	}
 	if d.GetPortnum() != meshpb.PortNum_PRIVATE_APP {
+		l.drop("not our portnum: " + d.GetPortnum().String())
 		return
 	}
 	l.mu.Lock()
@@ -418,13 +468,16 @@ func (l *Link) deliver(p *meshpb.MeshPacket) {
 	l.mu.Unlock()
 
 	if p.GetChannel() != ours {
+		l.drop(fmt.Sprintf("channel %d, we are on %d", p.GetChannel(), ours))
 		return
 	}
 	if p.GetFrom() == self {
-		return // our own broadcast, heard back
+		l.drop("our own broadcast, heard back")
+		return
 	}
 	payload := d.GetPayload()
 	if len(payload) == 0 {
+		l.drop("empty payload")
 		return
 	}
 
@@ -439,6 +492,7 @@ func (l *Link) deliver(p *meshpb.MeshPacket) {
 
 	from, ok := l.peers.idFor(p.GetFrom())
 	if !ok {
+		l.drop(fmt.Sprintf("no node ID known for radio 0x%08x yet", p.GetFrom()))
 		// Undeliverable, because the layer above keys fountain decoder state on
 		// the sender and derives repair masks from it (§7.2): a datagram
 		// attributed to the wrong node ID would not merely be misfiled, it
@@ -685,11 +739,12 @@ func (l *Link) Close() error {
 	return nil
 }
 
-// nextID draws a packet identifier from the injected source.
+// nextID draws a packet identifier. See Config.PacketIDs for why this does not
+// come from Rand.
 func (l *Link) nextID() uint32 {
 	l.randMu.Lock()
 	defer l.randMu.Unlock()
-	return uint32(l.cfg.Rand.Uint64())
+	return uint32(l.cfg.PacketIDs.Uint64())
 }
 
 // jitter returns a random duration in [0, d).
@@ -714,6 +769,16 @@ func (l *Link) event(s string) {
 		l.cfg.OnEvent(s)
 	}
 }
+
+// trace takes a closure so the formatting cost is not paid when tracing is off,
+// which matters on a path that runs for every packet on the channel.
+func (l *Link) trace(f func() string) {
+	if l.cfg.OnTrace != nil {
+		l.cfg.OnTrace(f())
+	}
+}
+
+func (l *Link) drop(why string) { l.trace(func() string { return "  dropped: " + why }) }
 
 func errText(err error) string {
 	if err == nil {
