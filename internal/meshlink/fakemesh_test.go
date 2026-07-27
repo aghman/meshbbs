@@ -55,6 +55,8 @@ type fakeRadio struct {
 	// injected is delivered in the middle of the config dump, which is when a
 	// real radio keeps handing over traffic it is hearing.
 	injected []*meshpb.MeshPacket
+	// licensed reports ham mode, which a radio carries in its own NodeInfo.
+	licensed bool
 }
 
 // injectDuringConfig arranges for packets to arrive mid-handshake.
@@ -74,6 +76,16 @@ func defaultChannels() []meshtastic.ChannelInfo {
 		{Index: 1, Name: "bbsnet", Role: "SECONDARY", Encrypted: true},
 		{Index: 2, Role: "DISABLED"},
 	}
+}
+
+// addLicensedRadio registers a radio whose operator has declared an amateur
+// licence — Meshtastic's ham mode (§8.3).
+func (m *fakeMesh) addLicensedRadio(num uint32, channels []meshtastic.ChannelInfo) Dialer {
+	d := m.addRadio(num, channels)
+	m.mu.Lock()
+	m.radios[num].licensed = true
+	m.mu.Unlock()
+	return d
 }
 
 // addRadio registers a radio and returns a Dialer for it.
@@ -149,8 +161,16 @@ func (r *fakeRadio) readLoop(conn net.Conn, out chan *meshpb.FromRadio) {
 }
 
 func (r *fakeRadio) sendConfig(out chan *meshpb.FromRadio, id uint32) {
+	r.mu.Lock()
+	licensed := r.licensed
+	r.mu.Unlock()
+
 	msgs := []*meshpb.FromRadio{
 		{PayloadVariant: &meshpb.FromRadio_MyInfo{MyInfo: &meshpb.MyNodeInfo{MyNodeNum: r.num}}},
+		{PayloadVariant: &meshpb.FromRadio_NodeInfo{NodeInfo: &meshpb.NodeInfo{
+			Num:  r.num,
+			User: &meshpb.User{IsLicensed: licensed},
+		}}},
 		{PayloadVariant: &meshpb.FromRadio_Metadata{Metadata: &meshpb.DeviceMetadata{
 			FirmwareVersion: "2.7.15.fake", HwModel: meshpb.HardwareModel_HELTEC_V3,
 		}}},

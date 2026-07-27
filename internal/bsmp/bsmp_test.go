@@ -485,3 +485,68 @@ func TestStalePartialsExpire(t *testing.T) {
 		t.Error("a six-hour-old partial decode was never expired")
 	}
 }
+
+// §8.3: under an amateur licence, encrypted mail may not be transmitted — and
+// this is the point every DM crosses on its way to the air, whether we wrote it
+// or are relaying someone else's. Part 97 does not distinguish between those.
+func TestHamModeBlocksDMBundles(t *testing.T) {
+	key, err := identity.GenerateNodeKey(rng.TestSecret(9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dict, _ := testDicts(t)
+	fl := &fakeLink{mtu: 233}
+
+	mail := record.AreaTag{'m', 'a', 'i', 'l'}
+	pub := record.AreaTag{'n', 'e', 'w', 's'}
+	licensed := true
+	var refused []record.AreaTag
+
+	out, err := NewOutbox(Config{
+		Self: key.ID(), Link: fl, Dictionary: dict,
+		Classify: func(a record.AreaTag) governor.Class {
+			if a == mail {
+				return governor.ClassDM
+			}
+			return governor.ClassForum
+		},
+		AllowEncryptedDMs: func() bool { return !licensed },
+		OnRefusedDM:       func(a record.AreaTag) { refused = append(refused, a) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := out.SendRecords(mail, testRecords(t, key, mail, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if len(fl.sent) != 0 {
+		t.Fatalf("%d DM symbols went on the air under an amateur licence", len(fl.sent))
+	}
+	if len(refused) != 1 || refused[0] != mail {
+		t.Errorf("the refusal did not reach the sysop log: %v", refused)
+	}
+	if out.Stats().RefusedHamMode != 1 {
+		t.Errorf("RefusedHamMode = %d, want 1", out.Stats().RefusedHamMode)
+	}
+
+	// The important half: public traffic federates normally. A ham-mode
+	// instance gives up private mail over the mesh and nothing else.
+	if err := out.SendRecords(pub, testRecords(t, key, pub, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if len(fl.sent) == 0 {
+		t.Fatal("public forum traffic was blocked in ham mode")
+	}
+
+	// And the block lifts without a restart when the sysop leaves ham mode,
+	// which is why the gate is a function rather than a bool.
+	licensed = false
+	before := len(fl.sent)
+	if err := out.SendRecords(mail, testRecords(t, key, mail, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if len(fl.sent) == before {
+		t.Error("mail is still blocked after leaving ham mode")
+	}
+}

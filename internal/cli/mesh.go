@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aghman/meshbbs/internal/hammode"
 	"github.com/aghman/meshbbs/internal/meshtastic"
 	"github.com/aghman/meshbbs/internal/rng"
 	"github.com/aghman/meshbbs/internal/survey"
@@ -165,6 +166,12 @@ func printRadioInfo(out io.Writer, info *meshtastic.RadioInfo) {
 	if !info.TxEnabled {
 		fmt.Fprintf(out, "  transmit        DISABLED — this node can hear but not speak\n")
 	}
+	// Ham mode changes what this instance may legally transmit (§8.3), so it
+	// belongs next to the radio settings rather than in a log a sysop reads
+	// after something has already gone out.
+	if info.IsLicensed {
+		fmt.Fprintf(out, "  ham mode        ON — licensed operator, FCC Part 97 applies\n")
+	}
 
 	// A radio always reports all eight slots, and on a stock device seven of
 	// them are disabled. Listing them in full buries the one line that matters
@@ -215,6 +222,10 @@ func printRadioInfo(out io.Writer, info *meshtastic.RadioInfo) {
 		fmt.Fprintf(out, "  our transmit    %.4f%%\n", m.AirUtilTx)
 		fmt.Fprintf(out, "  uptime          %s\n",
 			(time.Duration(m.UptimeSecs) * time.Second).String())
+	}
+
+	if info.IsLicensed {
+		fmt.Fprintf(out, "\n%s\n", hammode.Policy{Licensed: true}.Banner())
 	}
 
 	fmt.Fprintf(out, "\nRegion and preset determine airtime; hop limit multiplies it.\n")

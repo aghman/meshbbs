@@ -39,6 +39,15 @@ type RadioInfo struct {
 
 	Channels []ChannelInfo
 
+	// IsLicensed is Meshtastic's "ham mode": the operator has declared an
+	// amateur licence, which unlocks higher transmit power and puts them under
+	// FCC Part 97 — where encrypting to obscure meaning is prohibited (§8.3).
+	//
+	// It is read from our own NodeInfo rather than assumed, because a sysop can
+	// turn it on in the app long after meshbbs was configured, and the check
+	// that matters happens at startup.
+	IsLicensed bool
+
 	// Metrics is the node's own latest telemetry, if it reported any.
 	//
 	// §7.8.1 builds the whole R measurement on two of these numbers, so the
@@ -176,14 +185,16 @@ func readConfig(c *Conn, req ConfigRequest) (*RadioInfo, error) {
 			// Only our own entry. Every other node's metrics are whatever it
 			// last broadcast, which is not a measurement of anything here.
 			n := msg.GetNodeInfo()
-			if info.NodeNum != 0 && n.GetNum() == info.NodeNum && n.GetDeviceMetrics() != nil {
-				d := n.GetDeviceMetrics()
-				info.Metrics = &DeviceMetrics{
-					ChannelUtilization: d.GetChannelUtilization(),
-					AirUtilTx:          d.GetAirUtilTx(),
-					UptimeSecs:         d.GetUptimeSeconds(),
-					BatteryPct:         d.GetBatteryLevel(),
+			if info.NodeNum != 0 && n.GetNum() == info.NodeNum {
+				if d := n.GetDeviceMetrics(); d != nil {
+					info.Metrics = &DeviceMetrics{
+						ChannelUtilization: d.GetChannelUtilization(),
+						AirUtilTx:          d.GetAirUtilTx(),
+						UptimeSecs:         d.GetUptimeSeconds(),
+						BatteryPct:         d.GetBatteryLevel(),
+					}
 				}
+				info.IsLicensed = n.GetUser().GetIsLicensed()
 			}
 
 		case msg.GetChannel() != nil:

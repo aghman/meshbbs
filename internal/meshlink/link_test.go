@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aghman/meshbbs/internal/governor"
+	"github.com/aghman/meshbbs/internal/hammode"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/link"
 	"github.com/aghman/meshbbs/internal/meshtastic/meshpb"
@@ -451,5 +452,62 @@ func TestPacketIDsCanBeInjected(t *testing.T) {
 	b := startLink(t, m, nodeKey(t, 2), 0xB2, func(c *Config) { c.PacketIDs = rng.NewSeeded(99) })
 	if a.nextID() != b.nextID() {
 		t.Error("an injected packet-ID source was not used")
+	}
+}
+
+// §8.3: a ham-mode node may not run an encrypted channel, and the instance
+// refuses to start rather than transmitting on one. The check needs the radio's
+// answer to two questions, so it happens at connect.
+func TestHamModeRefusesAnEncryptedChannel(t *testing.T) {
+	m := newFakeMesh(t)
+	ka := nodeKey(t, 1)
+
+	l, err := New(Config{
+		Key:      ka,
+		Dial:     m.addLicensedRadio(0xA1, defaultChannels()),
+		Channel:  "bbsnet",
+		Governor: Unmetered{},
+		Rand:     rng.NewSeeded(1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = l.Start(context.Background())
+	if err == nil {
+		l.Close()
+		t.Fatal("started in ham mode with an encrypted channel")
+	}
+	if !errors.Is(err, hammode.ErrEncryptedChannel) {
+		t.Fatalf("err = %v, want ErrEncryptedChannel", err)
+	}
+
+	// With the override, it starts — and the banner says what was accepted.
+	var events []string
+	l2, err := New(Config{
+		Key:            ka,
+		Dial:           m.addLicensedRadio(0xA2, defaultChannels()),
+		Channel:        "bbsnet",
+		Governor:       Unmetered{},
+		Rand:           rng.NewSeeded(2),
+		Part97Override: true,
+		OnEvent:        func(s string) { events = append(events, s) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l2.Start(context.Background()); err != nil {
+		t.Fatalf("the override did not permit startup: %v", err)
+	}
+	defer l2.Close()
+
+	if !l2.Part97().Licensed {
+		t.Error("the link did not notice ham mode")
+	}
+	if l2.Part97().Restricted() {
+		t.Error("still restricted despite the override")
+	}
+	joined := strings.Join(events, "\n")
+	if !strings.Contains(joined, "Part 97") {
+		t.Errorf("no Part 97 banner was logged at startup:\n%s", joined)
 	}
 }

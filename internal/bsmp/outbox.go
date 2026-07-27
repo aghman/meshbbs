@@ -96,6 +96,17 @@ type Config struct {
 	// LossRate seeds the repair-symbol count. §7.2 makes this adaptive; until
 	// the engine feeds back what is landing, it is a configured starting point.
 	LossRate float64
+
+	// AllowEncryptedDMs gates private mail leaving this node (§8.3).
+	//
+	// A function rather than a bool because ham mode is discovered when the
+	// radio is read and can change on a reconnect — a sysop who enables it in
+	// the Meshtastic app should not have to restart the BBS for the block to
+	// take effect. Nil allows DMs, which is right for IP links and ISM bands.
+	AllowEncryptedDMs func() bool
+	// OnRefusedDM reports mail the policy stopped, so it reaches the sysop log
+	// rather than vanishing.
+	OnRefusedDM func(record.AreaTag)
 }
 
 // Outbox implements gossip.Outbox over a link.
@@ -116,6 +127,8 @@ type Stats struct {
 	BundlesSent  int
 	Refused      int
 	Abandoned    int
+	// RefusedHamMode counts DM bundles the Part 97 block stopped (§8.3).
+	RefusedHamMode int
 }
 
 // NewOutbox builds an outbox.
@@ -212,6 +225,19 @@ func (o *Outbox) SendRecords(area record.AreaTag, recs []*record.Record) error {
 	}
 
 	class := o.cfg.Classify(area)
+
+	// §8.3: under an amateur licence, encrypted mail may not be transmitted.
+	// Enforced here because this is the single point every DM crosses on its
+	// way to the air — whether we wrote it or are relaying someone else's,
+	// which Part 97 does not distinguish between.
+	if class == governor.ClassDM && o.cfg.AllowEncryptedDMs != nil && !o.cfg.AllowEncryptedDMs() {
+		o.count(func(s *Stats) { s.RefusedHamMode++ })
+		if o.cfg.OnRefusedDM != nil {
+			o.cfg.OnRefusedDM(area)
+		}
+		return nil
+	}
+
 	for i := start; i < total; i++ {
 		s := enc.Symbol(uint16(i))
 		frame := make([]byte, 0, frameOverhead+fountain.HeaderSize+symSize)

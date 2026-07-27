@@ -11,6 +11,7 @@ import (
 
 	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/governor"
+	"github.com/aghman/meshbbs/internal/hammode"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/link"
 	"github.com/aghman/meshbbs/internal/meshtastic"
@@ -77,6 +78,13 @@ type Config struct {
 	// simulator (§12.1) and exactly wrong for packet IDs, so they get separate
 	// sources.
 	PacketIDs rng.Source
+
+	// Part97Override is the sysop's acceptance of responsibility for
+	// transmitting encrypted traffic under an amateur licence (§8.3). It is
+	// plumbed rather than assumed because the check that matters — an encrypted
+	// channel on a ham-mode node — can only be made once the radio has told us
+	// both things, which is at connect time.
+	Part97Override bool
 
 	// HopLimit overrides the radio's own setting. Zero uses the radio's.
 	//
@@ -146,6 +154,7 @@ type Link struct {
 	mu       sync.Mutex
 	conn     *meshtastic.Conn
 	radio    *meshtastic.RadioInfo
+	policy   hammode.Policy
 	chanIdx  uint32
 	hopLimit uint32
 	closed   bool
@@ -270,6 +279,19 @@ func (l *Link) connect(ctx context.Context) error {
 		return err
 	}
 
+	// §8.3: a ham-mode node may not run an encrypted channel. Checked here
+	// rather than at config load because it needs the radio's own answer to
+	// both questions, and a sysop can enable ham mode long after configuring
+	// meshbbs.
+	policy := hammode.FromRadio(info, l.cfg.Part97Override)
+	if err := policy.CheckChannel(info.Channels, l.cfg.Channel); err != nil {
+		conn.Close()
+		return err
+	}
+	if b := policy.Banner(); b != "" {
+		l.event(b)
+	}
+
 	hop := l.cfg.HopLimit
 	if hop == 0 {
 		hop = info.HopLimit
@@ -282,6 +304,7 @@ func (l *Link) connect(ctx context.Context) error {
 		return link.ErrClosed
 	}
 	l.conn, l.radio, l.chanIdx, l.hopLimit = conn, info, idx, hop
+	l.policy = policy
 	l.mu.Unlock()
 	l.connected.Store(true)
 
@@ -720,6 +743,14 @@ func (l *Link) Caps() link.Caps {
 
 // Connected reports whether a radio is currently attached.
 func (l *Link) Connected() bool { return l.connected.Load() }
+
+// Part97 reports the ham-mode policy in force, which is only known once the
+// radio has been read.
+func (l *Link) Part97() hammode.Policy {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.policy
+}
 
 // Radio returns what the attached node reported, or nil when disconnected.
 func (l *Link) Radio() *meshtastic.RadioInfo {
