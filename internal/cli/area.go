@@ -55,7 +55,10 @@ func newAreaListCmd(e *env) *cobra.Command {
 				// The tag is what appears on the wire and in a digest, so it is
 				// worth showing: it is the only way to match a log line about
 				// area 79D42C56 to the area a sysop knows by name.
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", a.Name, a.Tag, fed, a.Description)
+				// Hex, not the raw bytes: a tag is four arbitrary bytes of a
+				// hash, and printing them as text produces mojibake in the one
+				// column whose whole purpose is matching a log line to a name.
+				fmt.Fprintf(w, "%s\t%x\t%s\t%s\n", a.Name, a.Tag[:], fed, a.Description)
 			}
 			return w.Flush()
 		},
