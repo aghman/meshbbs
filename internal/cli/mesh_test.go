@@ -205,3 +205,44 @@ func TestServeFailsClearlyWithNoRadio(t *testing.T) {
 		t.Errorf("the failure does not say it was the mesh: %v\n%s", err, out)
 	}
 }
+
+// Federating an area is the decision that puts a conversation on other people's
+// radios. It needs a supported way to make it — the alternative is a sysop
+// editing the database by hand, which is what this replaces.
+func TestAreaFederateRoundTrip(t *testing.T) {
+	dir := initInstance(t)
+
+	// Areas exist once the BBS has run; seed one the same way serve does.
+	if _, err := run(t, "--data-dir", dir, "dev", "seed", "--seed", "1", "--users", "1", "--posts", "1"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "--data-dir", dir, "area", "list")
+	if err != nil {
+		t.Fatalf("area list: %v", err)
+	}
+	if !strings.Contains(out, "local only") {
+		t.Errorf("areas are not local-only by default:\n%s", out)
+	}
+
+	if _, err := run(t, "--data-dir", dir, "area", "federate", "general"); err != nil {
+		t.Fatalf("area federate: %v", err)
+	}
+	out, _ = run(t, "--data-dir", dir, "area", "list")
+	if !strings.Contains(out, "yes") {
+		t.Errorf("the area did not become federated:\n%s", out)
+	}
+
+	// And off again — which must say plainly that it does not unsend anything.
+	out, err = run(t, "--data-dir", dir, "area", "federate", "general", "--off")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "cannot be unsent") {
+		t.Errorf("taking an area off the mesh implies posts are withdrawn:\n%s", out)
+	}
+
+	if _, err := run(t, "--data-dir", dir, "area", "federate", "nosucharea"); err == nil {
+		t.Error("federated an area that does not exist")
+	}
+}

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/aghman/meshbbs/internal/bbs"
 	"os"
 	"path/filepath"
 
@@ -138,6 +139,17 @@ the instance would have to re-establish with its peers as a new node.`,
 			if err := st.PutRecord(ctx, nodeRec); err != nil {
 				return err
 			}
+			// Seed the default areas here rather than at first serve.
+			//
+			// It is idempotent either way, but doing it at init means a fresh
+			// instance HAS its areas before anything else runs: `area list`
+			// answers, `area federate` works, and `dev seed` writes posts into
+			// areas that exist. Creating them only at serve left a window where
+			// records referred to areas the areas table had never heard of.
+			if err := bbs.New(st, key, e.clock).SeedDefaultAreas(ctx); err != nil {
+				return err
+			}
+
 			if err := st.PutNode(ctx, store.Node{
 				ID:           key.ID(),
 				PublicKey:    key.Public,
