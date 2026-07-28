@@ -246,3 +246,40 @@ func TestAreaFederateRoundTrip(t *testing.T) {
 		t.Error("federated an area that does not exist")
 	}
 }
+
+// An area's tag is derived from its name, which is the entire coordination
+// mechanism between instances: same name, same tag, same conversation. There is
+// no registry to consult, exactly as there is none for node IDs.
+func TestAreaCreateDerivesTheTagFromTheName(t *testing.T) {
+	one := initInstance(t)
+	two := initInstance(t)
+
+	var tags []string
+	for _, dir := range []string{one, two} {
+		out, err := run(t, "--data-dir", dir, "area", "create", "swapmeet", "--federated")
+		if err != nil {
+			t.Fatalf("area create: %v", err)
+		}
+		if !strings.Contains(out, "federates") {
+			t.Errorf("creating a federated area did not say so:\n%s", out)
+		}
+		list, _ := run(t, "--data-dir", dir, "area", "list")
+		for _, line := range strings.Split(list, "\n") {
+			if strings.HasPrefix(line, "swapmeet") {
+				tags = append(tags, strings.Fields(line)[1])
+			}
+		}
+	}
+	if len(tags) != 2 {
+		t.Fatalf("expected a tag from each instance, got %v", tags)
+	}
+	if tags[0] != tags[1] {
+		t.Errorf("two instances derived different tags for one name: %v", tags)
+	}
+
+	// A duplicate name is refused rather than silently creating a second area
+	// that shares a tag.
+	if _, err := run(t, "--data-dir", one, "area", "create", "swapmeet"); err == nil {
+		t.Error("created the same area twice")
+	}
+}

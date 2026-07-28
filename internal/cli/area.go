@@ -19,7 +19,7 @@ func newAreaCmd(e *env) *cobra.Command {
 		Use:   "area",
 		Short: "Inspect and federate message areas",
 	}
-	cmd.AddCommand(newAreaListCmd(e), newAreaFederateCmd(e))
+	cmd.AddCommand(newAreaListCmd(e), newAreaCreateCmd(e), newAreaFederateCmd(e))
 	return cmd
 }
 
@@ -63,6 +63,51 @@ func newAreaListCmd(e *env) *cobra.Command {
 			return w.Flush()
 		},
 	}
+}
+
+func newAreaCreateCmd(e *env) *cobra.Command {
+	var description string
+	var federated bool
+
+	cmd := &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a message area",
+		Long: `Create a message area.
+
+The area's wire tag is derived from its name, so two instances that create the
+same name get the same tag and federate into the same conversation. That is the
+whole coordination mechanism: there is no registry of area names and no
+authority to ask, exactly as there is none for node IDs (§6.1.1).
+
+It also means a typo makes a different area, silently. Check the tag against
+your peers if a federated area does not seem to be reaching them.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			st, err := e.openStore(ctx)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			area, err := st.CreateArea(ctx, args[0], description, federated)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Created %s (tag %x)\n", area.Name, area.Tag[:])
+			if federated {
+				fmt.Fprintf(out, "It federates. Peers need an area with the same name to receive it.\n")
+			} else {
+				fmt.Fprintf(out, "It is local only. Run \"meshbbs area federate %s\" to put it on the mesh.\n", area.Name)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&description, "description", "", "what the area is for")
+	cmd.Flags().BoolVar(&federated, "federated", false, "put it on the mesh immediately")
+	return cmd
 }
 
 func newAreaFederateCmd(e *env) *cobra.Command {
