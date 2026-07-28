@@ -94,11 +94,26 @@ func (g *GossipStore) Refresh() error {
 	return nil
 }
 
+// RosterArea is the area NODE and SUCCESSION records live in.
+//
+// It is the zero tag because those records carry no area of their own: they are
+// about the network rather than about a conversation in it. It is ALWAYS
+// federated, whatever the sysop has configured, and that is not an oversight —
+// it is the bootstrap. §6.1.2 makes the roster idempotent, replayable and safe
+// to serve to anyone, because it is nothing but public keys; without it in
+// sync, a peer's first post arrives from an origin nobody can verify and is
+// quarantined forever.
+var RosterArea = record.AreaTag{}
+
 // Areas implements gossip.Store.
+//
+// The roster is always included, ahead of the sysop's own areas.
 func (g *GossipStore) Areas() []record.AreaTag {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return append([]record.AreaTag(nil), g.areas...)
+	out := make([]record.AreaTag, 0, len(g.areas)+1)
+	out = append(out, RosterArea)
+	return append(out, g.areas...)
 }
 
 // Vector implements gossip.Store, returning the CONTIGUOUS high-water mark per
@@ -219,15 +234,32 @@ func (g *GossipStore) Apply(area record.AreaTag, recs []*record.Record) (int, er
 			g.onError(fmt.Errorf("record %s claims area %s inside a %s bundle", r.ID(), r.Area, area))
 			continue
 		}
-		pub, err := g.keyFor(r.Origin)
-		if err != nil {
-			g.onError(fmt.Errorf("no key for origin %s yet: %w", r.Origin.Short(), err))
-			continue
-		}
-		if err := r.Verify(pub); err != nil {
-			g.onError(fmt.Errorf("record %s from %s failed verification: %w",
-				r.ID(), r.Origin.Short(), err))
-			continue
+		// A NODE record is verified WITHOUT a prior key, because it carries the
+		// key and the origin ID is that key's hash (§6.1.1, §6.1.2). This is
+		// the bootstrap: it is how a peer we have never heard of becomes a peer
+		// whose posts we can check. Anything else needs the roster first.
+		if r.Type == record.TypeNode {
+			if _, err := record.VerifyNodeRecord(r); err != nil {
+				g.onError(fmt.Errorf("NODE record from %s failed verification: %w",
+					r.Origin.Short(), err))
+				continue
+			}
+			if err := g.st.PutNodeFromRecord(g.ctx, r); err != nil {
+				g.onError(fmt.Errorf("storing NODE record from %s: %w", r.Origin.Short(), err))
+				continue
+			}
+			g.forget(r.Origin)
+		} else {
+			pub, err := g.keyFor(r.Origin)
+			if err != nil {
+				g.onError(fmt.Errorf("no key for origin %s yet: %w", r.Origin.Short(), err))
+				continue
+			}
+			if err := r.Verify(pub); err != nil {
+				g.onError(fmt.Errorf("record %s from %s failed verification: %w",
+					r.ID(), r.Origin.Short(), err))
+				continue
+			}
 		}
 
 		// Ask before writing, because PutRecord is idempotent and cannot tell
@@ -281,6 +313,14 @@ func (g *GossipStore) keyFor(id identity.NodeID) ([]byte, error) {
 	g.keys[id] = n.PublicKey
 	g.mu.Unlock()
 	return n.PublicKey, nil
+}
+
+// forget drops a cached key, so a SUCCESSION or a re-published NODE record
+// takes effect rather than being masked by what we looked up first (§6.1.6).
+func (g *GossipStore) forget(id identity.NodeID) {
+	g.mu.Lock()
+	delete(g.keys, id)
+	g.mu.Unlock()
 }
 
 // SortAreas orders tags deterministically, for callers building digests.

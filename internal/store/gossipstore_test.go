@@ -59,14 +59,26 @@ func trustedKey(t *testing.T, st *Store, ctx context.Context, seed uint64) ident
 	return key
 }
 
-// Only federated areas reach the engine: a local-only area is one a sysop chose
-// not to put on the air, and leaking it would be a privacy failure, not a bug.
+// Only federated areas reach the engine — plus the roster, which is always
+// synced because it is how trust bootstraps. A local-only area is one a sysop
+// chose not to put on the air, and leaking it would be a privacy failure.
 func TestOnlyFederatedAreasAreOffered(t *testing.T) {
 	_, g, _, area := gossipFixture(t)
 
 	areas := g.Areas()
-	if len(areas) != 1 || areas[0] != area {
-		t.Fatalf("areas = %v, want only the federated one", areas)
+	if len(areas) != 2 {
+		t.Fatalf("areas = %v, want the roster and the one federated area", areas)
+	}
+	if areas[0] != RosterArea {
+		t.Errorf("areas[0] = %v, want the roster area", areas[0])
+	}
+	if areas[1] != area {
+		t.Errorf("areas[1] = %v, want the federated area", areas[1])
+	}
+	for _, a := range areas {
+		if a != RosterArea && a != area {
+			t.Errorf("a non-federated area leaked to the engine: %v", a)
+		}
 	}
 }
 
@@ -278,13 +290,69 @@ func TestRefreshPicksUpNewAreas(t *testing.T) {
 	if _, err := st.CreateArea(ctx, "newsroom", "", true); err != nil {
 		t.Fatal(err)
 	}
-	if len(g.Areas()) != 1 {
+	// Roster plus the one area the fixture federated.
+	if len(g.Areas()) != 2 {
 		t.Error("a new area appeared without a refresh")
 	}
 	if err := g.Refresh(); err != nil {
 		t.Fatal(err)
 	}
-	if len(g.Areas()) != 2 {
-		t.Errorf("areas = %v after refresh, want 2", g.Areas())
+	if len(g.Areas()) != 3 {
+		t.Errorf("areas = %v after refresh, want the roster and two areas", g.Areas())
+	}
+}
+
+// The bootstrap, and the reason the roster area is always federated: a peer we
+// have never heard of must be able to become one whose posts we can verify,
+// using nothing but what arrives over the air.
+func TestNodeRecordsBootstrapTheirOwnTrust(t *testing.T) {
+	st, g, ctx, area := gossipFixture(t)
+
+	stranger, err := identity.GenerateNodeKey(rng.TestSecret(42))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A post from a node we hold no key for is quarantined.
+	post := signedRecord(t, stranger, area, 2)
+	if added, err := g.Apply(area, []*record.Record{post}); err != nil || added != 0 {
+		t.Fatalf("added = %d, err = %v — an unknown origin's post was accepted", added, err)
+	}
+
+	// Its NODE record arrives, carrying the key that hashes to its own origin.
+	nodeRec, err := record.NewNodeRecord(stranger, 1, 1_800_000_000, "stranger", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, err := g.Apply(RosterArea, []*record.Record{nodeRec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 1 {
+		t.Fatalf("the NODE record was not accepted (added = %d)", added)
+	}
+
+	// And now the same post verifies.
+	added, err = g.Apply(area, []*record.Record{post})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 1 {
+		t.Fatal("a post still failed to verify after its NODE record arrived")
+	}
+
+	// The roster row is real, not just the record.
+	if _, err := st.GetNode(ctx, stranger.ID()); err != nil {
+		t.Errorf("the peer is not in the roster: %v", err)
+	}
+}
+
+// The roster syncs whatever the sysop configured, because it is how trust
+// bootstraps rather than something they opted into.
+func TestRosterAreaIsAlwaysFederated(t *testing.T) {
+	_, g, _, _ := gossipFixture(t)
+	areas := g.Areas()
+	if len(areas) == 0 || areas[0] != RosterArea {
+		t.Fatalf("areas = %v, want the roster area first", areas)
 	}
 }
