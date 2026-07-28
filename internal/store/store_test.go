@@ -120,10 +120,11 @@ func TestPutRecordRejectsSeqConflict(t *testing.T) {
 // §6.2.1 rule 3: the high-water mark advances durably, and never repeats.
 func TestNextSeqIsMonotonic(t *testing.T) {
 	s, ctx := testStore(t)
+	area := record.AreaTagFor("general")
 	seen := map[uint64]bool{}
 	var last uint64
 	for i := 0; i < 100; i++ {
-		n, err := s.NextSeq(ctx)
+		n, err := s.NextSeq(ctx, area)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -149,11 +150,12 @@ func TestSeqRegressionIsDetectedAndRepaired(t *testing.T) {
 	self := k.ID()
 
 	// Write records at seq 1..5, as a healthy node would.
+	area := record.AreaTag{}
 	for seq := uint64(1); seq <= 5; seq++ {
-		if _, err := s.NextSeq(ctx); err != nil {
+		if _, err := s.NextSeq(ctx, area); err != nil {
 			t.Fatal(err)
 		}
-		r, err := record.New(k, record.Record{Seq: seq, Type: record.TypePost, Body: []byte("post")})
+		r, err := record.New(k, record.Record{Seq: seq, Type: record.TypePost, Area: area, Body: []byte("post")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -180,10 +182,10 @@ func TestSeqRegressionIsDetectedAndRepaired(t *testing.T) {
 	}
 
 	// Simulate the restore: roll the durable mark back to 2 while the records
-	// at 3..5 remain. This is exactly what an older backup of seq_state, or a
-	// partially restored database, looks like.
+	// at 3..5 remain. This is exactly what an older backup of the sequence
+	// state, or a partially restored database, looks like.
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE seq_state SET high_water = 2 WHERE only_row = 1`); err != nil {
+		`UPDATE area_seq_state SET high_water = 2 WHERE area = ?`, area[:]); err != nil {
 		t.Fatal(err)
 	}
 
@@ -208,7 +210,7 @@ func TestSeqRegressionIsDetectedAndRepaired(t *testing.T) {
 	}
 
 	// Sequence numbers issued after repair must not collide with stored ones.
-	next, err := s.NextSeq(ctx)
+	next, err := s.NextSeq(ctx, area)
 	if err != nil {
 		t.Fatal(err)
 	}

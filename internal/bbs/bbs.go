@@ -286,7 +286,7 @@ func (s *Service) OpenDM(ctx context.Context, nick, passphrase string, sealed []
 // the high-water mark durably before the record exists, so a crash burns a
 // sequence number rather than risking its reuse with different content.
 func (s *Service) newRecord(ctx context.Context, typ record.Type, area record.AreaTag, body []byte) (*record.Record, error) {
-	seq, err := s.store.NextSeq(ctx)
+	seq, err := s.store.NextSeq(ctx, area)
 	if err != nil {
 		return nil, err
 	}

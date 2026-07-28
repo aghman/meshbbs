@@ -356,3 +356,86 @@ func TestRosterAreaIsAlwaysFederated(t *testing.T) {
 		t.Fatalf("areas = %v, want the roster area first", areas)
 	}
 }
+
+// The bug this migration exists for: sequences allocated globally leave every
+// per-area vector empty, so nodes advertise nothing and never converge.
+//
+// With per-area allocation, a node posting into three areas produces a dense
+// run in each, and each area's vector reports it.
+func TestPerAreaSequencesKeepVectorsDense(t *testing.T) {
+	st, g, ctx, general := gossipFixture(t)
+	key := trustedKey(t, st, ctx, 1)
+
+	tech, err := st.CreateArea(ctx, "tech", "radios", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Interleave writes across three areas, as a real instance does.
+	for i := 0; i < 3; i++ {
+		for _, area := range []record.AreaTag{general, tech.Tag, RosterArea} {
+			seq, err := st.NextSeq(ctx, area)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := record.New(key, record.Record{
+				Origin: key.ID(), Seq: seq, TS: uint32(1_800_000_000 + i),
+				Type: record.TypePost, Area: area, Body: []byte("post"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.PutRecord(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// Each area must report a full contiguous run of 3. Under global
+	// allocation these were 1,4,7 / 2,5,8 / 3,6,9 and every vector read zero.
+	for _, area := range []record.AreaTag{general, tech.Tag, RosterArea} {
+		if got := g.Vector(area).Get(key.ID()); got != 3 {
+			t.Errorf("area %s vector = %d, want 3", area, got)
+		}
+	}
+}
+
+// One origin may hold the same sequence in two areas — that is what per-area
+// allocation means — but never twice in one area, which is equivocation.
+func TestSameSequenceInDifferentAreasIsFine(t *testing.T) {
+	st, _, ctx, general := gossipFixture(t)
+	key := trustedKey(t, st, ctx, 1)
+	tech, err := st.CreateArea(ctx, "tech", "radios", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, area := range []record.AreaTag{general, tech.Tag} {
+		r, err := record.New(key, record.Record{
+			Origin: key.ID(), Seq: 1, TS: 1_800_000_000,
+			Type: record.TypePost, Area: area, Body: []byte("post"),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.PutRecord(ctx, r); err != nil {
+			t.Fatalf("seq 1 in area %s was refused: %v", area, err)
+		}
+	}
+
+	// The same coordinate twice in ONE area, with different content, is still
+	// refused: §6.2.1 rule 3's divergence.
+	clash, err := record.New(key, record.Record{
+		Origin: key.ID(), Seq: 1, TS: 1_800_000_099,
+		Type: record.TypePost, Area: general, Body: []byte("a different post"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutRecord(ctx, clash); err == nil {
+		t.Fatal("two different records were accepted at one (origin, area, seq)")
+	}
+}

@@ -81,11 +81,14 @@ all.`,
 
 				areas := []string{"general", "tech", "swap"}
 				for i := 0; i < posts; i++ {
-					seqNum, err := st.NextSeq(ctx)
+					// The area is chosen FIRST, because sequences are allocated
+					// per area (migration 0003) and a number drawn from the
+					// wrong one would leave a gap that never closes.
+					area := areas[postSrc.IntN(len(areas))]
+					seqNum, err := st.NextSeq(ctx, record.AreaTagFor(area))
 					if err != nil {
 						return err
 					}
-					area := areas[postSrc.IntN(len(areas))]
 					body := fmt.Sprintf("seeded post %d in %s", i, area)
 					r, err := record.New(key, record.Record{
 						Seq:  seqNum,

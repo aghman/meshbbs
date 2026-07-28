@@ -127,7 +127,9 @@ the instance would have to re-establish with its peers as a new node.`,
 			// Publish our own NODE record so the roster has an entry for us
 			// from the very first boot, and so seq 1 is spent on something
 			// meaningful.
-			seq, err := st.NextSeq(ctx)
+			// NODE records live in the roster area (§6.1.2), which is where
+			// their sequence is allocated from.
+			seq, err := st.NextSeq(ctx, store.RosterArea)
 			if err != nil {
 				return err
 			}

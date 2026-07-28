@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+
+	"github.com/aghman/meshbbs/internal/record"
 )
 
 // ensureDir creates a directory with restrictive permissions.
@@ -14,7 +16,13 @@ func ensureDir(dir string) error {
 	return nil
 }
 
-// SeqState is the durable sequence high-water mark and incarnation counter.
+// SeqState is this node's incarnation counter and, for compatibility with
+// callers that still want one number, the highest sequence it has issued in any
+// area.
+//
+// The incarnation is genuinely global: §6.2.1 rule 3 uses it to tell peers that
+// this node's history needs re-verification, which is a statement about the log
+// as a whole and not about one area.
 type SeqState struct {
 	HighWater   uint64
 	Incarnation uint32
@@ -23,13 +31,29 @@ type SeqState struct {
 // SeqState returns the current state.
 func (s *Store) SeqState(ctx context.Context) (SeqState, error) {
 	var st SeqState
-	err := s.db.QueryRowContext(ctx,
-		`SELECT high_water, incarnation FROM seq_state WHERE only_row = 1`).
-		Scan(&st.HighWater, &st.Incarnation)
-	if err != nil {
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT incarnation FROM seq_state WHERE only_row = 1`).Scan(&st.Incarnation); err != nil {
 		return SeqState{}, fmt.Errorf("read seq state: %w", err)
 	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(high_water), 0) FROM area_seq_state`).Scan(&st.HighWater); err != nil {
+		return SeqState{}, fmt.Errorf("read area high-water marks: %w", err)
+	}
 	return st, nil
+}
+
+// AreaHighWater returns the highest sequence issued in one area.
+func (s *Store) AreaHighWater(ctx context.Context, area record.AreaTag) (uint64, error) {
+	var high uint64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(high_water, 0) FROM area_seq_state WHERE area = ?`, area[:]).Scan(&high)
+	if isNoRows(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read area high-water: %w", err)
+	}
+	return high, nil
 }
 
 // NextSeq durably reserves and returns the next sequence number for records
@@ -42,7 +66,7 @@ func (s *Store) SeqState(ctx context.Context) (SeqState, error) {
 // peer that has seen seq <= N will never request N again, that divergence is
 // permanent and completely silent. Burning a sequence number on a crash is
 // free; reusing one is unrecoverable.
-func (s *Store) NextSeq(ctx context.Context) (uint64, error) {
+func (s *Store) NextSeq(ctx context.Context, area record.AreaTag) (uint64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin seq transaction: %w", err)
@@ -50,16 +74,18 @@ func (s *Store) NextSeq(ctx context.Context) (uint64, error) {
 	defer tx.Rollback()
 
 	var high uint64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT high_water FROM seq_state WHERE only_row = 1`).Scan(&high); err != nil {
-		return 0, fmt.Errorf("read seq high-water: %w", err)
+	err = tx.QueryRowContext(ctx,
+		`SELECT high_water FROM area_seq_state WHERE area = ?`, area[:]).Scan(&high)
+	if err != nil && !isNoRows(err) {
+		return 0, fmt.Errorf("read area seq high-water: %w", err)
 	}
 
 	next := high + 1
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE seq_state SET high_water = ?, updated_at = ? WHERE only_row = 1`,
-		next, s.now()); err != nil {
-		return 0, fmt.Errorf("advance seq high-water: %w", err)
+		`INSERT INTO area_seq_state (area, high_water, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(area) DO UPDATE SET high_water = excluded.high_water, updated_at = excluded.updated_at`,
+		area[:], next, s.now()); err != nil {
+		return 0, fmt.Errorf("advance area seq high-water: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit seq advance: %w", err)
@@ -87,30 +113,62 @@ func (s *Store) CheckSeqIntegrity(ctx context.Context, selfID []byte) (bool, err
 	}
 	defer tx.Rollback()
 
-	var high uint64
-	var incarnation uint32
-	if err := tx.QueryRowContext(ctx,
-		`SELECT high_water, incarnation FROM seq_state WHERE only_row = 1`).
-		Scan(&high, &incarnation); err != nil {
-		return false, fmt.Errorf("read seq state: %w", err)
+	// Every area is checked, because a restore can leave any one of them
+	// behind. One regression anywhere is enough to make this node's log
+	// untrustworthy to peers, so the incarnation bumps once for all of them
+	// rather than once each.
+	rows, err := tx.QueryContext(ctx,
+		`SELECT r.area, MAX(r.seq) FROM records r WHERE r.origin = ? GROUP BY r.area`, selfID)
+	if err != nil {
+		return false, fmt.Errorf("read local sequences by area: %w", err)
+	}
+	type behind struct {
+		area []byte
+		max  uint64
+	}
+	var regressed []behind
+	for rows.Next() {
+		var area []byte
+		var maxSeq uint64
+		if err := rows.Scan(&area, &maxSeq); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("scan local sequence: %w", err)
+		}
+		regressed = append(regressed, behind{area: area, max: maxSeq})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate local sequences: %w", err)
 	}
 
-	// COALESCE so an empty log yields 0 rather than NULL.
-	var maxSeq uint64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(seq), 0) FROM records WHERE origin = ?`, selfID).
-		Scan(&maxSeq); err != nil {
-		return false, fmt.Errorf("read max local seq: %w", err)
+	var repaired []behind
+	for _, b := range regressed {
+		var high uint64
+		err := tx.QueryRowContext(ctx,
+			`SELECT high_water FROM area_seq_state WHERE area = ?`, b.area).Scan(&high)
+		if err != nil && !isNoRows(err) {
+			return false, fmt.Errorf("read area high-water: %w", err)
+		}
+		if b.max > high {
+			repaired = append(repaired, b)
+		}
 	}
-
-	if maxSeq <= high {
+	if len(repaired) == 0 {
 		return false, nil
 	}
 
+	for _, b := range repaired {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO area_seq_state (area, high_water, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(area) DO UPDATE SET high_water = excluded.high_water, updated_at = excluded.updated_at`,
+			b.area, b.max, s.now()); err != nil {
+			return false, fmt.Errorf("repair area high-water: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE seq_state SET high_water = ?, incarnation = ?, updated_at = ? WHERE only_row = 1`,
-		maxSeq, incarnation+1, s.now()); err != nil {
-		return false, fmt.Errorf("repair seq high-water: %w", err)
+		`UPDATE seq_state SET incarnation = incarnation + 1, updated_at = ? WHERE only_row = 1`,
+		s.now()); err != nil {
+		return false, fmt.Errorf("bump incarnation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit seq repair: %w", err)

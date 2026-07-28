@@ -44,14 +44,18 @@ func (s *Store) PutRecord(ctx context.Context, r *record.Record) error {
 
 	// A different record at the same coordinate is a divergence, not a
 	// duplicate. Refuse it loudly.
+	//
+	// The coordinate is (origin, AREA, seq): sequences are allocated per area
+	// (migration 0003), so one origin holding seq 4 in two different areas is
+	// ordinary, and only a clash within one area is equivocation.
 	var conflicts int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM records WHERE origin = ? AND seq = ?`,
-		origin[:], r.Seq).Scan(&conflicts); err != nil {
+		`SELECT COUNT(*) FROM records WHERE origin = ? AND area = ? AND seq = ?`,
+		origin[:], r.Area[:], r.Seq).Scan(&conflicts); err != nil {
 		return fmt.Errorf("check for seq conflict: %w", err)
 	}
 	if conflicts > 0 {
-		return fmt.Errorf("%w: origin %s seq %d", ErrSeqConflict, origin, r.Seq)
+		return fmt.Errorf("%w: origin %s area %s seq %d", ErrSeqConflict, origin, r.Area, r.Seq)
 	}
 
 	var parent any
@@ -111,6 +115,17 @@ func (s *Store) CountRecords(ctx context.Context) (int64, error) {
 //
 // "Contiguous" is the operative word: with gaps at 1,2,4 the answer is 2, not
 // 4, because a version vector asserts everything up to N has been received.
+// HighWaterFor returns the highest sequence held for an origin in one area.
+func (s *Store) HighWaterForArea(ctx context.Context, origin identity.NodeID, area record.AreaTag) (uint64, error) {
+	var high uint64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(seq), 0) FROM records WHERE origin = ? AND area = ?`,
+		origin[:], area[:]).Scan(&high); err != nil {
+		return 0, fmt.Errorf("read area high-water for %s: %w", origin, err)
+	}
+	return high, nil
+}
+
 func (s *Store) HighWaterFor(ctx context.Context, origin identity.NodeID) (uint64, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT seq FROM records WHERE origin = ? ORDER BY seq ASC`, origin[:])
