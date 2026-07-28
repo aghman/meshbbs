@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/identity"
@@ -25,7 +26,52 @@ type Service struct {
 	store *store.Store
 	key   identity.NodeKey
 	clock clock.Clock
+
+	mu        sync.RWMutex
+	publisher Publisher
 }
+
+// Publisher is how a locally written record reaches the federation.
+//
+// It is an interface set at runtime rather than a constructor argument because
+// a BBS runs perfectly well without one — Phase 1 shipped that way, and an
+// instance with no radio still has forums. When federation is up, the sync
+// engine is what lands here.
+type Publisher interface {
+	Publish(area record.AreaTag, recs []*record.Record) error
+}
+
+// SetPublisher wires local writes to the federation, or unwires them with nil.
+func (s *Service) SetPublisher(p Publisher) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publisher = p
+}
+
+// publish hands a new record to the federation, if there is one.
+//
+// # Why a failure here does not fail the post
+//
+// The record is already written and indexed: the user's post exists, and it is
+// theirs. Federation is how OTHER instances find out, and §7.3's whole design
+// is that a missed transmission is repaired by anti-entropy rather than retried
+// by the caller. Returning an error would tell a user their post failed when it
+// did not, and would tempt them to write it again.
+func (s *Service) publish(area record.AreaTag, rec *record.Record) {
+	s.mu.RLock()
+	p := s.publisher
+	s.mu.RUnlock()
+	if p == nil {
+		return
+	}
+	if err := p.Publish(area, []*record.Record{rec}); err != nil {
+		OnPublishError(err)
+	}
+}
+
+// OnPublishError reports a federation failure. Set by serve; the default is
+// silence, since a BBS without a radio has nothing to report.
+var OnPublishError = func(error) {}
 
 // New builds a Service.
 func New(st *store.Store, key identity.NodeKey, clk clock.Clock) *Service {
@@ -92,6 +138,21 @@ func (s *Service) Post(ctx context.Context, author, areaName, subject, text stri
 	}
 	if err := s.store.IndexPost(ctx, rec.ID(), author, subject); err != nil {
 		return record.ID{}, err
+	}
+
+	// Hand it to the federation immediately when the area is on the mesh.
+	//
+	// Without this a new post waits for the next anti-entropy beat, which at
+	// fifty instances is hours (§7.3). Anti-entropy would eventually carry it,
+	// but "eventually" is the wrong answer for the post someone just wrote:
+	// §7.3 has a push path precisely so the common case is prompt and the slow
+	// path is only for repair.
+	//
+	// Local-only areas are never published. That is the sysop's decision about
+	// what belongs on other people's radios, and it is checked here as well as
+	// in the engine.
+	if area.Federated {
+		s.publish(area.Tag, rec)
 	}
 	return rec.ID(), nil
 }

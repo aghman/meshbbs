@@ -353,3 +353,85 @@ func TestSubjectIsEncryptedNotJustTheBody(t *testing.T) {
 		t.Fatalf("subject did not survive the round trip: %q", payload.Subject)
 	}
 }
+
+// recordingPublisher stands in for the sync engine.
+type recordingPublisher struct {
+	areas []record.AreaTag
+	recs  []*record.Record
+	err   error
+}
+
+func (p *recordingPublisher) Publish(area record.AreaTag, recs []*record.Record) error {
+	p.areas = append(p.areas, area)
+	p.recs = append(p.recs, recs...)
+	return p.err
+}
+
+// A post in a federated area reaches the federation immediately, rather than
+// waiting for an anti-entropy beat that at fifty instances is hours away.
+func TestFederatedPostsArePublished(t *testing.T) {
+	svc, st, ctx := testService(t)
+	mkUser(t, svc, st, ctx, "bob", "hunter2", store.CapPostFederated)
+	pub := &recordingPublisher{}
+	svc.SetPublisher(pub)
+
+	if _, err := st.CreateArea(ctx, "onair", "federated", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Post(ctx, "bob", "onair", "subject", "body"); err != nil {
+		t.Fatal(err)
+	}
+	if len(pub.recs) != 1 {
+		t.Fatalf("published %d records, want 1", len(pub.recs))
+	}
+	if pub.recs[0].Type != record.TypePost {
+		t.Errorf("published a %v", pub.recs[0].Type)
+	}
+}
+
+// A local-only area is the sysop's decision about what does NOT belong on other
+// people's radios, and it is enforced before anything reaches the engine.
+func TestLocalAreasAreNeverPublished(t *testing.T) {
+	svc, st, ctx := testService(t)
+	mkUser(t, svc, st, ctx, "bob", "hunter2")
+	pub := &recordingPublisher{}
+	svc.SetPublisher(pub)
+
+	if _, err := st.CreateArea(ctx, "private", "local", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Post(ctx, "bob", "private", "subject", "body"); err != nil {
+		t.Fatal(err)
+	}
+	if len(pub.recs) != 0 {
+		t.Fatalf("a local-only post was handed to the federation")
+	}
+}
+
+// The post is already written and indexed when publication is attempted, so a
+// federation failure must not tell the user their post failed.
+func TestPublishFailureDoesNotFailThePost(t *testing.T) {
+	svc, st, ctx := testService(t)
+	mkUser(t, svc, st, ctx, "bob", "hunter2", store.CapPostFederated)
+	pub := &recordingPublisher{err: errors.New("radio is on fire")}
+	svc.SetPublisher(pub)
+
+	var reported error
+	saved := OnPublishError
+	OnPublishError = func(err error) { reported = err }
+	defer func() { OnPublishError = saved }()
+
+	if _, err := st.CreateArea(ctx, "onair2", "federated", true); err != nil {
+		t.Fatal(err)
+	}
+	id, err := svc.Post(ctx, "bob", "onair2", "subject", "body")
+	if err != nil {
+		t.Fatalf("a federation failure failed the post: %v", err)
+	}
+	if _, err := st.GetRecord(ctx, id); err != nil {
+		t.Errorf("the post was not stored: %v", err)
+	}
+	if reported == nil {
+		t.Error("the failure was not reported to the sysop log")
+	}
+}

@@ -129,6 +129,13 @@ Serves SSH on the configured port. Users connect with:
 					return fmt.Errorf("mesh: %w", err)
 				}
 				defer fed.Close()
+
+				// New posts in federated areas go out now rather than waiting
+				// for the next anti-entropy beat (§7.3's push path).
+				bbs.OnPublishError = func(err error) {
+					log.Error("publishing to the mesh", "err", err)
+				}
+				svc.SetPublisher(fed.engine)
 			}
 
 			out := cmd.OutOrStdout()
