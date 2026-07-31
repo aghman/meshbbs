@@ -187,6 +187,16 @@ const tickInterval = 5 * time.Second
 // asking more often would only sample the same reading again.
 const telemetryInterval = time.Minute
 
+// statusInterval is how often federation activity is summarised to the log.
+//
+// This exists because a mesh federation is silent by design — §7.3's digest
+// beat is half an hour at two peers and hours at fifty — so "nothing in the log"
+// is indistinguishable from "nothing working". Eighteen hours of a two-node test
+// produced no output at all and no convergence, and there was no way to tell
+// which stage had stalled. A periodic line makes the difference visible without
+// waiting for a failure to announce itself.
+const statusInterval = 5 * time.Minute
+
 // run pumps datagrams into the engine and ticks it.
 //
 // The timers come from the injected clock rather than time.NewTicker, per
@@ -196,6 +206,7 @@ const telemetryInterval = time.Minute
 func (f *federation) run(ctx context.Context) {
 	tick := f.clk.After(tickInterval)
 	telemetry := f.clk.After(telemetryInterval)
+	status := f.clk.After(statusInterval)
 
 	for {
 		select {
@@ -229,8 +240,48 @@ func (f *federation) run(ctx context.Context) {
 				f.gov.Observe(float64(info.Metrics.ChannelUtilization),
 					float64(info.Metrics.AirUtilTx))
 			}
+
+		case <-status:
+			status = f.clk.After(statusInterval)
+			f.logStatus()
 		}
 	}
+}
+
+// logStatus summarises what federation has done lately.
+//
+// Every counter here answers a question a sysop actually asks when posts are
+// not arriving, in the order the traffic flows: are we speaking (digests,
+// symbols), is anyone answering (heard, requests), is anything landing
+// (bundles, records), and if not, who refused (budget, quota, unattributed).
+func (f *federation) logStatus() {
+	eng := f.engine.Stats()
+	out := f.outbox.Stats()
+	in := f.inbox.Stats()
+	lnk := f.link.Stats()
+	gov := f.gov.Stats()
+	budget := f.gov.Budget()
+
+	f.log.Info("federation status",
+		"peers", f.engine.PeerCount(),
+		"bound", lnk.PeersKnown,
+		"digests_sent", eng.DigestsSent,
+		"digests_heard", eng.DigestsHeard,
+		"digests_suppressed", eng.DigestsSuppressed,
+		"vector_reqs", eng.VectorReqsSent,
+		"range_reqs", eng.RangeReqsSent,
+		"records_pushed", eng.RecordsPushed,
+		"symbols_sent", out.SymbolsSent,
+		"bundles_decoded", in.Decoded,
+		"records_added", in.RecordsAdded,
+		"rx_rejected", in.Rejected,
+		"unattributed", lnk.Unattributed,
+		"tx_refused_budget", gov.RefusedBudget,
+		"tx_refused_busy", gov.RefusedBusy,
+		"tx_refused_quiet", gov.RefusedQuiet,
+		"budget_available", budget.Available.Round(time.Second),
+		"backpressure", budget.Backpressure,
+	)
 }
 
 // Close shuts the mesh side down.
