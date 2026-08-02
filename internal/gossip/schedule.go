@@ -239,6 +239,12 @@ func (s *Scheduler) Due() (bool, string) {
 	return true, ""
 }
 
+// NextDue reports when the next beat is expected, for status reporting.
+//
+// Read-only on purpose: Due() has side effects (it consumes a suppression), so
+// a status line that called it would change the behaviour it was reporting on.
+func (s *Scheduler) NextDue() time.Time { return s.due }
+
 // MarkSent records a standalone digest transmission.
 func (s *Scheduler) MarkSent(sizeBytes int) {
 	s.sent++

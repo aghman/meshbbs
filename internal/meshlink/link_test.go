@@ -11,6 +11,7 @@ import (
 	"github.com/aghman/meshbbs/internal/hammode"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/link"
+	"github.com/aghman/meshbbs/internal/meshtastic"
 	"github.com/aghman/meshbbs/internal/meshtastic/meshpb"
 	"github.com/aghman/meshbbs/internal/rng"
 )
@@ -165,7 +166,8 @@ func TestUnattributedSenderIsAskedToIdentifyItself(t *testing.T) {
 
 	// Swallow announcements while the links come up, so neither side learns
 	// the other the easy way.
-	m.setDrop(func(from uint32, payload []byte) bool {
+	m.setDrop(func(from uint32, pkt *meshpb.MeshPacket) bool {
+		payload := pkt.GetDecoded().GetPayload()
 		return len(payload) > 0 && payload[0] == FrameAnnounce
 	})
 
@@ -199,6 +201,86 @@ func TestUnattributedSenderIsAskedToIdentifyItself(t *testing.T) {
 	}
 }
 
+// Discovery must not depend on the addressing it exists to establish.
+//
+// The bench failure this is taken from: two nodes on one channel, RF fine,
+// broadcasts flowing both ways, and every direct message between them arriving
+// undecryptable because the radios held stale public keys for each other. Both
+// halves of the who-is exchange were direct messages, so the one mechanism that
+// could have repaired the binding was the one mechanism that could not run. The
+// federation sat silent for hours with every counter reading zero.
+//
+// Losing all unicast is a harsh fault, and deliberately so: it is the exact
+// shape of the real one, and the property worth holding is that discovery
+// completes anyway.
+func TestDiscoverySurvivesTotalUnicastLoss(t *testing.T) {
+	m := newFakeMesh(t)
+	ka, kb := nodeKey(t, 1), nodeKey(t, 2)
+
+	// Swallow announcements while the links come up, so neither learns the
+	// other the easy way — then leave every direct message dropped for good.
+	m.setDrop(func(from uint32, pkt *meshpb.MeshPacket) bool {
+		payload := pkt.GetDecoded().GetPayload()
+		return len(payload) > 0 && payload[0] == FrameAnnounce
+	})
+
+	a := startLink(t, m, ka, 0xA1)
+	b := startLink(t, m, kb, 0xB2)
+
+	m.setDrop(func(from uint32, pkt *meshpb.MeshPacket) bool {
+		return pkt.GetTo() != broadcastAddr
+	})
+
+	if _, ok := b.peers.radioFor(ka.ID()); ok {
+		t.Fatal("b learned a despite the announcement being dropped")
+	}
+
+	// a broadcasts something b cannot attribute. b asks, a answers, both by
+	// broadcast, and the binding is made over a mesh with no working unicast.
+	if err := a.Send(context.Background(), link.Broadcast, []byte{FrameSymbol, 0x42}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitFor(t, 3*time.Second, "b to learn a with every unicast lost", func() bool {
+		_, ok := b.peers.radioFor(ka.ID())
+		return ok
+	})
+}
+
+// A who-is names one radio, and only that radio may answer it. Without this the
+// broadcast question would draw an answer from every node that heard it, which
+// is §7.3's reply storm reached by a different route.
+func TestWhoIsForAnotherRadioIsIgnored(t *testing.T) {
+	m := newFakeMesh(t)
+	ka, kb, kc := nodeKey(t, 1), nodeKey(t, 2), nodeKey(t, 3)
+
+	m.setDrop(func(from uint32, pkt *meshpb.MeshPacket) bool {
+		payload := pkt.GetDecoded().GetPayload()
+		return len(payload) > 0 && payload[0] == FrameAnnounce
+	})
+	a := startLink(t, m, ka, 0xA1)
+	b := startLink(t, m, kb, 0xB2)
+	c := startLink(t, m, kc, 0xC3)
+	m.setDrop(nil)
+
+	// b asks about a. c hears the question too, and must sit on its hands.
+	beforeA, beforeC := a.Stats().AnnouncesSent, c.Stats().AnnouncesSent
+	b.askWhoIs(0xA1)
+
+	waitFor(t, 3*time.Second, "b to learn a", func() bool {
+		_, ok := b.peers.radioFor(ka.ID())
+		return ok
+	})
+	if got := a.Stats().AnnouncesSent; got == beforeA {
+		t.Error("a did not answer the who-is aimed at it")
+	}
+	if got := c.Stats().AnnouncesSent; got != beforeC {
+		t.Errorf("c answered a who-is aimed at a: announces went %d -> %d", beforeC, got)
+	}
+	if _, ok := b.peers.radioFor(kc.ID()); ok {
+		t.Error("b learned c, which never should have spoken")
+	}
+}
+
 // A radio that drops its connection — which real hardware does — must not end
 // the federation. The link reconnects and keeps working.
 func TestLinkReconnectsAfterTheRadioDropsOut(t *testing.T) {
@@ -224,6 +306,167 @@ func TestLinkReconnectsAfterTheRadioDropsOut(t *testing.T) {
 	}
 	if _, ok := recvWithin(t, b, 3*time.Second); !ok {
 		t.Fatal("nothing arrived after the reconnect")
+	}
+}
+
+// The channel index says "this is our mesh" for broadcasts, but a direct
+// message does not arrive on our channel at all: firmware encrypts a DM to the
+// recipient's public key and reports it on the PKI channel index. Rejecting on
+// the index alone therefore discards every DM ever sent to this node.
+//
+// On the bench that was the whole sync half of the protocol: digests arrived as
+// broadcasts and were answered, and every answer was dropped unread. The one
+// visible symptom was a counter this test's subject increments.
+func TestDirectMessagesAreAcceptedOffChannel(t *testing.T) {
+	m := newFakeMesh(t)
+	ka, kb := nodeKey(t, 1), nodeKey(t, 2)
+	a := startLink(t, m, ka, 0xA1)
+	b := startLink(t, m, kb, 0xB2)
+	settle(t, a, b)
+
+	pkt := func(ch uint32, to uint32, pki bool) *meshpb.MeshPacket {
+		return &meshpb.MeshPacket{
+			From: 0xA1, To: to, Channel: ch, PkiEncrypted: pki,
+			PayloadVariant: &meshpb.MeshPacket_Decoded{Decoded: &meshpb.Data{
+				Portnum: meshpb.PortNum_PRIVATE_APP,
+				Payload: []byte{FrameControl, 'x'},
+			}},
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		pkt  *meshpb.MeshPacket
+		want bool
+	}{
+		{"on our channel", pkt(1, broadcastAddr, false), true},
+		{"off channel, not a DM", pkt(0, broadcastAddr, false), false},
+		{"off channel, PKI DM to us", pkt(0, 0xB2, true), true},
+		// The pairing matters: PKI alone must not be a way past the filter, or
+		// anything off-channel could get in by setting one flag.
+		{"off channel, PKI DM to someone else", pkt(0, 0xC3, true), false},
+		{"off channel, addressed to us but not PKI", pkt(0, 0xB2, false), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := b.Stats().WrongChannel
+			b.deliver(tc.pkt)
+			_, got := recvWithin(t, b, 200*time.Millisecond)
+			if got != tc.want {
+				t.Errorf("delivered=%v, want %v", got, tc.want)
+			}
+			if dropped := b.Stats().WrongChannel > before; dropped == tc.want {
+				t.Errorf("wrong_channel counter moved=%v with delivered=%v", dropped, got)
+			}
+		})
+	}
+}
+
+// A connection can fail in one direction only, and nothing that writes will
+// notice. Conn.Heartbeat is a write: it proves the host can reach the radio and
+// says nothing about whether the radio can still reach the host.
+//
+// Taken from the bench, where a node stopped receiving — its own radio's
+// telemetry included — and went on transmitting digests for twenty-four minutes
+// while its peer answered into a void. The supervisor never acted because it
+// only reconnects on a read ERROR, and a read that never returns is not one.
+func TestOneWayConnectionForcesAReconnect(t *testing.T) {
+	m := newFakeMesh(t)
+	a := startLink(t, m, nodeKey(t, 1), 0xA1, func(c *Config) {
+		c.Heartbeat = 20 * time.Millisecond
+		c.RxTimeout = 60 * time.Millisecond
+		c.ConnectTimeout = 100 * time.Millisecond
+	})
+	waitFor(t, 2*time.Second, "a to connect", a.Connected)
+	dialsBefore := m.dialCount(0xA1)
+
+	// The radio goes one-way: it accepts everything, delivers nothing.
+	m.setDeaf(0xA1, true)
+
+	waitFor(t, 3*time.Second, "the watchdog to notice the silence", func() bool {
+		return a.Stats().RxStalls > 0
+	})
+	// Wait on the redial rather than asserting it: the watchdog only closes the
+	// connection, and the supervisor still has a backoff to serve before it
+	// dials again. Asserting straight after the counter moves is a race.
+	waitFor(t, 3*time.Second, "the supervisor to redial", func() bool {
+		return m.dialCount(0xA1) > dialsBefore
+	})
+
+	// And it recovers on its own once the radio is answering again — detecting
+	// the stall is only half the job if the link cannot come back from it.
+	m.setDeaf(0xA1, false)
+	waitFor(t, 5*time.Second, "a to reconnect", a.Connected)
+}
+
+// The stall check has to wake more often than the heartbeat, or RxTimeout is
+// rounded up to the next beat and a setting that reads as five minutes takes
+// ten to act. Configured is not the same as actionable.
+func TestWatchdogWakesFasterThanTheHeartbeat(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		heartbeat time.Duration
+		rxTimeout time.Duration
+		want      time.Duration
+	}{
+		{"tick follows the timeout when it is the tighter one", 5 * time.Minute, 5 * time.Minute, 100 * time.Second},
+		{"never slower than needed to catch the timeout", 5 * time.Minute, time.Minute, 20 * time.Second},
+		{"heartbeat caps it when the timeout is loose", time.Minute, time.Hour, time.Minute},
+		{"disabled watchdog just uses the heartbeat", time.Minute, -1, time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &Link{cfg: Config{Heartbeat: tc.heartbeat, RxTimeout: tc.rxTimeout}}
+			if got := l.watchdogTick(); got != tc.want {
+				t.Errorf("watchdogTick() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Turning the watchdog off has to be sayable. Zero is what an unset Config
+// field looks like, so the link reads it as "give me the default" — which means
+// a sysop writing rx_timeout_secs = 0 would otherwise get the default back
+// rather than the disabling they asked for.
+func TestTheWatchdogCanBeTurnedOff(t *testing.T) {
+	l, err := New(Config{
+		Key: nodeKey(t, 1), Channel: "bbsnet", Rand: rng.NewSeeded(1),
+		Dial:      func(context.Context) (*meshtastic.Conn, error) { return nil, errors.New("unused") },
+		RxTimeout: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.cfg.RxTimeout > 0 {
+		t.Errorf("a negative RxTimeout became %v, want it left off", l.cfg.RxTimeout)
+	}
+	// Stale by any measure, and still not a stall, because the check is off.
+	l.lastRx.Store(time.Now().Add(-24 * time.Hour).UnixNano())
+	if l.rxStalled() {
+		t.Error("a disabled watchdog reported a stall")
+	}
+}
+
+// A quiet mesh is not a broken one. The watchdog is armed by any message from
+// the radio, including its own local telemetry, so a link with nothing to say
+// must not tear itself down on a schedule.
+func TestAQuietRadioIsNotMistakenForADeadOne(t *testing.T) {
+	m := newFakeMesh(t)
+	a := startLink(t, m, nodeKey(t, 1), 0xA1, func(c *Config) {
+		c.Heartbeat = 10 * time.Millisecond
+		c.RxTimeout = 50 * time.Millisecond
+	})
+	waitFor(t, 2*time.Second, "a to connect", a.Connected)
+
+	// No peers, no traffic — but the radio is still answering, which is what
+	// the watchdog actually measures.
+	b := startLink(t, m, nodeKey(t, 2), 0xB2)
+	for i := 0; i < 10; i++ {
+		if err := b.announce(context.Background()); err != nil {
+			t.Fatalf("announce: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := a.Stats().RxStalls; n != 0 {
+		t.Errorf("watchdog fired %d times on a live but quiet link", n)
 	}
 }
 
@@ -359,8 +602,23 @@ func TestCapsAndMTU(t *testing.T) {
 	m := newFakeMesh(t)
 	a := startLink(t, m, nodeKey(t, 1), 0xA1)
 
-	if a.MTU() != 233 {
-		t.Errorf("MTU = %d, want 233 (§1)", a.MTU())
+	// Deliberately NOT meshtastic.MTU. That constant is Data.payload's
+	// documented maximum, and a frame built to it does not reach the air: what
+	// has to fit is the encoded Data message, inside a LoRa frame with about
+	// 240 bytes left after the mesh header. Eight consecutive full-size symbol
+	// broadcasts were lost on the bench, in both directions, with no error
+	// anywhere, before this reserve existed.
+	//
+	// The assertion is on the headroom rather than on 217, so that tuning the
+	// reserve does not have to come here — but shrinking it to nothing would.
+	if got, ceiling := a.MTU(), meshtastic.MTU; got >= ceiling {
+		t.Errorf("MTU = %d, want strictly below the protocol maximum %d", got, ceiling)
+	}
+	if got, want := meshtastic.MTU-a.MTU(), 8; got < want {
+		t.Errorf("MTU reserve is %d bytes, want at least %d for the Data wrapper", got, want)
+	}
+	if a.MTU() < 200 {
+		t.Errorf("MTU = %d: the reserve has eaten more than it should", a.MTU())
 	}
 	caps := a.Caps()
 	if !caps.Broadcast {

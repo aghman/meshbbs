@@ -119,6 +119,7 @@ type Mesh struct {
 	TCPHost      string `toml:"tcp_host" default:"" doc:"Host of a node on WiFi. Port defaults to 4403 if not given."`
 
 	ChannelName string `toml:"channel_name" default:"bbsnet" doc:"Name of the Meshtastic channel carrying BBS traffic (§7.1). Create it in the Meshtastic app as a secondary channel with the same name and key on every instance."`
+	RxTimeoutS  int    `toml:"rx_timeout_secs" default:"300" doc:"Reconnect if the radio has sent nothing for this many seconds. A USB serial handle can go one-way — writes keep succeeding and transmissions go out while nothing is ever received — and only silence reveals it. Zero disables the check. Below about 60 a busy-but-quiet radio may be reconnected needlessly, and each reconnect re-announces."`
 	HopLimit    int    `toml:"hop_limit" default:"0" doc:"Hop limit for BBS packets, 0-7. Zero uses the radio's own setting. Hop limit multiplies what every packet costs the mesh (§1.1), so set it as low as your topology allows."`
 
 	AirtimeCeilingPct       float64 `toml:"airtime_ceiling_pct" default:"5" doc:"Share of the channel the WHOLE BBS network should use, as a percentage. Divided by expected_instance_count to get this node's allowance. Clamped to 15 in code (§7.6)."`
@@ -268,6 +269,13 @@ func (c *Config) Validate() error {
 		}
 		if c.Mesh.SerialBaud < 1200 {
 			problems = append(problems, fmt.Sprintf("mesh.serial_baud is %d", c.Mesh.SerialBaud))
+		}
+		// A floor rather than a free hand: every reconnect re-announces, so a
+		// value of a few seconds would spend airtime saying hello instead of
+		// federating. Zero is the way to turn the check off.
+		if c.Mesh.RxTimeoutS != 0 && c.Mesh.RxTimeoutS < 30 {
+			problems = append(problems, fmt.Sprintf(
+				"mesh.rx_timeout_secs is %d, want 0 (disabled) or at least 30", c.Mesh.RxTimeoutS))
 		}
 		// The ceiling is clamped rather than rejected in the governor, but a
 		// sysop who typed 60 should hear about it here rather than discover

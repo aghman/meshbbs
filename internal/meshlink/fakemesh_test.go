@@ -27,11 +27,16 @@ type fakeMesh struct {
 	// drop, if set, decides which transmissions vanish before delivery. It is
 	// how a test arranges for a peer to be heard before its announcement is,
 	// which is the case the who-is exchange exists for.
-	drop func(from uint32, payload []byte) bool
+	//
+	// It sees the whole packet rather than just the payload because the
+	// destination is the interesting axis for some faults: real radios lose
+	// direct messages while broadcasts on the same channel keep flowing, and a
+	// filter that could only match on payload bytes could not describe that.
+	drop func(from uint32, pkt *meshpb.MeshPacket) bool
 }
 
 // setDrop installs (or clears) the delivery filter.
-func (m *fakeMesh) setDrop(fn func(from uint32, payload []byte) bool) {
+func (m *fakeMesh) setDrop(fn func(from uint32, pkt *meshpb.MeshPacket) bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.drop = fn
@@ -50,6 +55,9 @@ type fakeRadio struct {
 	mu   sync.Mutex
 	out  chan *meshpb.FromRadio
 	conn net.Conn // radio side of the current connection
+	// deaf drops everything on the way to the client without closing anything;
+	// see setDeaf.
+	deaf bool
 	// dialled counts connections, so a test can assert a reconnect happened.
 	dialled int
 	// injected is delivered in the middle of the config dump, which is when a
@@ -111,8 +119,33 @@ func (m *fakeMesh) addRadio(num uint32, channels []meshtastic.ChannelInfo) Diale
 	}
 }
 
+// setDeaf makes a radio stop delivering anything to its client while still
+// accepting everything the client writes.
+//
+// That asymmetry is the point: it is what a half-dead USB serial handle looks
+// like, and it is invisible to every check that only writes. A test that closed
+// the connection instead would exercise the error path the supervisor already
+// handles, not the silent one.
+func (m *fakeMesh) setDeaf(num uint32, deaf bool) {
+	m.mu.Lock()
+	r := m.radios[num]
+	m.mu.Unlock()
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.deaf = deaf
+	r.mu.Unlock()
+}
+
 func (r *fakeRadio) writeLoop(conn net.Conn, out chan *meshpb.FromRadio) {
 	for msg := range out {
+		r.mu.Lock()
+		deaf := r.deaf
+		r.mu.Unlock()
+		if deaf {
+			continue // swallowed: the client will never hear this
+		}
 		body, err := proto.Marshal(msg)
 		if err != nil {
 			return
@@ -238,7 +271,6 @@ func (r *fakeRadio) enqueue(out chan *meshpb.FromRadio, msg *meshpb.FromRadio) {
 
 // transmit delivers one packet to every radio that should hear it.
 func (m *fakeMesh) transmit(from uint32, pkt *meshpb.MeshPacket) {
-	payload := pkt.GetDecoded().GetPayload()
 	m.mu.Lock()
 	drop := m.drop
 	targets := make([]*fakeRadio, 0, len(m.radios))
@@ -247,7 +279,7 @@ func (m *fakeMesh) transmit(from uint32, pkt *meshpb.MeshPacket) {
 	}
 	m.mu.Unlock()
 
-	if drop != nil && drop(from, payload) {
+	if drop != nil && drop(from, pkt) {
 		return
 	}
 

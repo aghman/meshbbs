@@ -201,6 +201,9 @@ func (e *Engine) Stats() Stats {
 	return s
 }
 
+// NextDue reports when this engine next intends to speak.
+func (e *Engine) NextDue() time.Time { return e.sched.NextDue() }
+
 // Digest builds this node's current digest.
 func (e *Engine) Digest() *Digest {
 	areas := map[record.AreaTag]*vv.Vector{}

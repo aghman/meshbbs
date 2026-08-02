@@ -112,7 +112,7 @@ func FuzzDecodeAnnounce(f *testing.F) {
 	f.Add(EncodeAnnounce(key, 0x1234, time.Unix(1_800_000_000, 0)), uint32(0x1234))
 	f.Add([]byte{FrameAnnounce}, uint32(0))
 	f.Add([]byte{}, uint32(0))
-	f.Add(EncodeWhoIs(), uint32(7))
+	f.Add(EncodeWhoIs(0x1234), uint32(7))
 
 	f.Fuzz(func(t *testing.T, data []byte, from uint32) {
 		a, err := DecodeAnnounce(data, from)

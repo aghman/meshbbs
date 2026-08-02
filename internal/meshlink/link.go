@@ -100,8 +100,52 @@ type Config struct {
 	AnnounceInterval time.Duration
 	// AskInterval rate-limits asking one radio to identify itself. Default 15m.
 	AskInterval time.Duration
+	// AnswerInterval rate-limits answering who-is. Default 1m.
+	//
+	// Shorter than AskInterval because the two do different jobs: AskInterval
+	// stops one unattributable peer from provoking a question per packet,
+	// while this only has to collapse a burst of askers into a single
+	// broadcast. Set it as long as AskInterval and a lost answer would leave
+	// the asker waiting through a second ask cycle for no reason.
+	AnswerInterval time.Duration
 	// Heartbeat keeps the radio's client session alive. Default 5m.
 	Heartbeat time.Duration
+	// ConnectTimeout bounds the config handshake. Default 30s.
+	//
+	// The dump takes a second or two from a healthy radio, so this is only ever
+	// reached by one that is not answering — and reaching it has to be possible,
+	// or a reconnect can hang forever where a failure would have been retried.
+	ConnectTimeout time.Duration
+	// RxTimeout forces a reconnect when the radio has sent us nothing for this
+	// long. Default 5m. Zero on a link that should never do this.
+	//
+	// It is deliberately far shorter than a digest interval. A stall that lasts
+	// longer than one destroys a whole reconciliation round — the peer asks,
+	// the deaf node never answers, and both sides wait out the next cadence —
+	// so detection has to be quick relative to the protocol above, not merely
+	// eventual. A radio reports its own telemetry about once a minute, which is
+	// the cadence this is measured against.
+	//
+	// # Why a heartbeat is not enough
+	//
+	// Conn.Heartbeat is a write and nothing more: it proves the host can still
+	// reach the radio and says nothing about the other direction. A USB serial
+	// handle that has gone one-way therefore looks perfectly healthy — writes
+	// succeed, the session is kept alive, transmissions go out and are received
+	// by peers — while Recv blocks forever and the node is deaf.
+	//
+	// Nothing detects that. The supervisor reconnects when the read loop
+	// returns an ERROR, and a Recv that simply never returns is not an error.
+	// Observed on the bench: a node stopped hearing its own radio's telemetry
+	// and went on transmitting digests for twenty-four minutes, while its peer
+	// answered into a void.
+	//
+	// The timer is armed by ANY message from the radio, not just mesh packets —
+	// local telemetry and queue status arrive regardless of whether the mesh is
+	// busy — so a legitimately silent channel does not trip it. That matters:
+	// the cost of a false positive is one reconnect, and the cost of a false
+	// negative is an instance that is deaf until someone notices by hand.
+	RxTimeout time.Duration
 	// Inbox bounds buffered inbound datagrams. Default 256.
 	Inbox int
 	// ReconnectBackoff is the first delay after a dropped connection; it
@@ -123,14 +167,29 @@ type Config struct {
 }
 
 // Stats are counters for the sysop status screen (§11.6).
+//
+// The three rx-side refusals are separate numbers on purpose. "Federation is
+// quiet" has causes that live at different layers and need different fixes, and
+// a single lumped drop count cannot tell them apart: Undecryptable is the radio
+// failing to decrypt (a key problem, below us), WrongChannel is another mesh's
+// traffic (nothing to fix), and Unattributed is our own peer we cannot yet name
+// (a discovery problem, which the who-is exchange is meant to resolve on its
+// own). A sysop reading a nonzero Undecryptable knows to go look at the radios,
+// not at the sync engine.
 type Stats struct {
 	Sent          uint64
 	Received      uint64
 	Refused       uint64 // sends the governor declined
+	Undecryptable uint64 // packets the radio could not decrypt for us
+	WrongChannel  uint64 // packets on a channel index that is not ours
 	Unattributed  uint64 // packets from a radio with no known node ID
 	Reconnects    uint64
+	RxStalls      uint64 // reconnects forced because the radio went quiet
 	AnnouncesSent uint64
 	PeersKnown    int
+	// SinceRx is how long ago the radio last said anything. A value creeping up
+	// past a minute or two on a live mesh is the shape of a one-way connection.
+	SinceRx time.Duration
 }
 
 // Link is a link.Link over a Meshtastic radio.
@@ -147,9 +206,10 @@ type Link struct {
 	self identity.NodeID
 	clk  clock.Clock
 
-	peers *peerTable
-	asks  *askRate
-	inbox chan link.Datagram
+	peers   *peerTable
+	asks    *askRate
+	answers *askRate
+	inbox   chan link.Datagram
 
 	mu       sync.Mutex
 	conn     *meshtastic.Conn
@@ -167,10 +227,15 @@ type Link struct {
 	// loop answering a who-is, and the keepalive timer.
 	randMu sync.Mutex
 
-	sent, received, refused  atomic.Uint64
-	unattributed, reconnects atomic.Uint64
-	announcesSent            atomic.Uint64
-	connected                atomic.Bool
+	sent, received, refused     atomic.Uint64
+	unattributed, reconnects    atomic.Uint64
+	undecryptable, wrongChannel atomic.Uint64
+	announcesSent               atomic.Uint64
+	rxStalls                    atomic.Uint64
+	connected                   atomic.Bool
+	// lastRx is when the radio last said anything at all, in Unix nanoseconds.
+	// Zero means nothing has arrived on this connection yet.
+	lastRx atomic.Int64
 }
 
 // New builds a link that is not yet connected.
@@ -200,8 +265,19 @@ func New(cfg Config) (*Link, error) {
 	if cfg.AskInterval <= 0 {
 		cfg.AskInterval = 15 * time.Minute
 	}
+	if cfg.AnswerInterval <= 0 {
+		cfg.AnswerInterval = time.Minute
+	}
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = 5 * time.Minute
+	}
+	if cfg.ConnectTimeout <= 0 {
+		cfg.ConnectTimeout = 30 * time.Second
+	}
+	if cfg.RxTimeout < 0 {
+		cfg.RxTimeout = 0
+	} else if cfg.RxTimeout == 0 {
+		cfg.RxTimeout = 5 * time.Minute
 	}
 	if cfg.Inbox <= 0 {
 		cfg.Inbox = 256
@@ -210,12 +286,13 @@ func New(cfg Config) (*Link, error) {
 		cfg.ReconnectBackoff = time.Second
 	}
 	return &Link{
-		cfg:   cfg,
-		self:  cfg.Key.ID(),
-		clk:   cfg.Clock,
-		peers: newPeerTable(),
-		asks:  newAskRate(cfg.AskInterval),
-		inbox: make(chan link.Datagram, cfg.Inbox),
+		cfg:     cfg,
+		self:    cfg.Key.ID(),
+		clk:     cfg.Clock,
+		peers:   newPeerTable(),
+		asks:    newAskRate(cfg.AskInterval),
+		answers: newAskRate(cfg.AnswerInterval),
+		inbox:   make(chan link.Datagram, cfg.Inbox),
 	}, nil
 }
 
@@ -257,6 +334,19 @@ func (l *Link) connect(ctx context.Context) error {
 		return err
 	}
 
+	// Bound the config exchange. Configure waits for a dump that a one-way
+	// connection will never deliver, and it only gives up when its context does
+	// — which, on the link's own lifetime context, is never. Without this the
+	// rx watchdog below would be detection without recovery: it would close the
+	// dead connection, redial, and hang here instead, having moved the stall
+	// rather than cleared it.
+	handshake := ctx
+	if l.cfg.ConnectTimeout > 0 {
+		var cancel context.CancelFunc
+		handshake, cancel = context.WithTimeout(ctx, l.cfg.ConnectTimeout)
+		defer cancel()
+	}
+
 	// Packets arriving mid-handshake are held, not delivered.
 	//
 	// Delivering them here would filter them against the channel index from the
@@ -264,7 +354,7 @@ func (l *Link) connect(ctx context.Context) error {
 	// stop a reconnect losing a fountain symbol would have discarded exactly
 	// the packets it was added to keep.
 	var pending []*meshpb.MeshPacket
-	info, err := meshtastic.Configure(ctx, conn, meshtastic.ConfigRequest{
+	info, err := meshtastic.Configure(handshake, conn, meshtastic.ConfigRequest{
 		ID:       l.nextID() | 1,
 		OnPacket: func(p *meshpb.MeshPacket) { pending = append(pending, p) },
 	})
@@ -307,6 +397,11 @@ func (l *Link) connect(ctx context.Context) error {
 	l.policy = policy
 	l.mu.Unlock()
 	l.connected.Store(true)
+	// Arm the rx watchdog from the attach. The config handshake has just
+	// finished, so we have demonstrably heard this radio; without this the timer
+	// would not start until the first unsolicited message, and a radio that
+	// never sent one would never be checked at all.
+	l.lastRx.Store(l.clk.Now().UnixNano())
 
 	l.event(fmt.Sprintf("radio attached: %s, node 0x%08x, channel %q (index %d), hop limit %d",
 		conn.Name(), info.NodeNum, l.cfg.Channel, idx, hop))
@@ -415,13 +510,15 @@ func (l *Link) keepalive(ctx context.Context, conn *meshtastic.Conn) {
 	// Jitter the announcement so fifty instances that all restarted after a
 	// power cut do not announce in the same second (§7.3's digest storm, in
 	// miniature).
-	next := l.cfg.AnnounceInterval/2 + l.jitter(l.cfg.AnnounceInterval)
+	untilAnnounce := l.cfg.AnnounceInterval/2 + l.jitter(l.cfg.AnnounceInterval)
+	untilHeartbeat := l.cfg.Heartbeat
+	tick := l.watchdogTick()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-l.clk.After(l.cfg.Heartbeat):
+		case <-l.clk.After(tick):
 		}
 
 		// Bound to ONE connection: after a reconnect this goroutine must exit
@@ -429,17 +526,69 @@ func (l *Link) keepalive(ctx context.Context, conn *meshtastic.Conn) {
 		if conn == nil || l.currentConn() != conn {
 			return
 		}
-		if err := conn.Heartbeat(); err != nil {
-			return // the read loop will see the same failure and reconnect
+
+		if untilHeartbeat -= tick; untilHeartbeat <= 0 {
+			untilHeartbeat = l.cfg.Heartbeat
+			if err := conn.Heartbeat(); err != nil {
+				return // the read loop will see the same failure and reconnect
+			}
 		}
 
-		if next -= l.cfg.Heartbeat; next <= 0 {
-			next = l.cfg.AnnounceInterval
+		// A heartbeat that succeeds says nothing about whether we can still
+		// HEAR the radio, so check that separately and tear the connection down
+		// ourselves if not. Closing is what turns a silent stall into the
+		// ordinary error the supervisor already knows how to recover from.
+		if l.rxStalled() {
+			l.rxStalls.Add(1)
+			l.event(fmt.Sprintf("radio has sent nothing for %v; reconnecting",
+				l.cfg.RxTimeout))
+			conn.Close()
+			return
+		}
+
+		if untilAnnounce -= tick; untilAnnounce <= 0 {
+			untilAnnounce = l.cfg.AnnounceInterval
 			if err := l.announce(ctx); err != nil {
 				l.event("periodic announce failed: " + err.Error())
 			}
 		}
 	}
+}
+
+// watchdogTick is how often keepalive wakes.
+//
+// It is not the heartbeat interval, because the two want opposite things. The
+// heartbeat only has to beat the firmware's idle timeout, measured in minutes,
+// and every beat costs a write. The stall check wants to be prompt, and costs
+// nothing. Waking on the slower of the two would round RxTimeout up to the next
+// heartbeat, so a five-minute timeout would take up to ten minutes to notice —
+// which is how a setting can look configured and not be actionable.
+func (l *Link) watchdogTick() time.Duration {
+	tick := l.cfg.Heartbeat
+	if rt := l.cfg.RxTimeout; rt > 0 && rt/3 < tick {
+		tick = rt / 3
+	}
+	if tick <= 0 {
+		tick = time.Second
+	}
+	return tick
+}
+
+// rxStalled reports whether the radio has gone quiet for longer than allowed.
+//
+// A zero lastRx means nothing has arrived on this connection yet, which is the
+// state every connection starts in — treating that as a stall would have the
+// link tear down a radio it has not finished listening to. connect arms the
+// timer instead, so the window is measured from the attach.
+func (l *Link) rxStalled() bool {
+	if l.cfg.RxTimeout <= 0 {
+		return false
+	}
+	last := l.lastRx.Load()
+	if last == 0 {
+		return false
+	}
+	return l.clk.Now().Sub(time.Unix(0, last)) > l.cfg.RxTimeout
 }
 
 // readLoop pumps received packets until the connection fails.
@@ -453,6 +602,10 @@ func (l *Link) readLoop(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// Arm the watchdog on ANY message, before filtering to mesh packets:
+		// what this proves is that the radio is still talking to us, and local
+		// telemetry proves that just as well as federation traffic does.
+		l.lastRx.Store(l.clk.Now().UnixNano())
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -470,13 +623,30 @@ func (l *Link) deliver(p *meshpb.MeshPacket) {
 		if d == nil {
 			kind = fmt.Sprintf("encrypted(%dB)", len(p.GetEncrypted()))
 		}
-		return fmt.Sprintf("rx from=0x%08x ch=%d port=%v %s len=%d",
-			p.GetFrom(), p.GetChannel(), d.GetPortnum(), kind, len(d.GetPayload()))
+		return fmt.Sprintf("rx from=0x%08x to=0x%08x ch=%d pki=%v port=%v %s len=%d",
+			p.GetFrom(), p.GetTo(), p.GetChannel(), p.GetPkiEncrypted(),
+			d.GetPortnum(), kind, len(d.GetPayload()))
 	})
 	if d == nil {
-		// An `encrypted` payload means the radio holds no key for that
-		// channel. Not ours, and not something we can or should decrypt.
-		l.drop("no key for that channel")
+		// An `encrypted` payload is one the RADIO could not decrypt, and it is
+		// worth being precise about why, because the obvious reading is wrong
+		// often enough to cost an evening.
+		//
+		// The obvious reading is "traffic on a channel we hold no key for" —
+		// someone else's mesh, not ours, nothing to do. That is one cause. The
+		// other is a DIRECT MESSAGE encrypted to a key we do not hold: current
+		// Meshtastic firmware encrypts DMs to the destination's public key
+		// rather than the channel key, and refuses to replace a public key it
+		// has already stored for a node. So two radios that have each other's
+		// stale keys — after a reflash, say — go on exchanging broadcasts
+		// perfectly while every DM between them arrives as an opaque blob.
+		//
+		// That failure is invisible from above: the channel is fine, the RF
+		// path is fine, and the only symptom is that half the protocol never
+		// happens. Hence the counter — a silent drop here was exactly the gap
+		// that made one federation stall look like a sync bug for two hours.
+		l.undecryptable.Add(1)
+		l.drop("undecryptable: wrong channel key, or a DM encrypted to a key we do not hold")
 		return
 	}
 	if d.GetPortnum() != meshpb.PortNum_PRIVATE_APP {
@@ -491,7 +661,25 @@ func (l *Link) deliver(p *meshpb.MeshPacket) {
 	}
 	l.mu.Unlock()
 
-	if p.GetChannel() != ours {
+	// The channel index is how we ignore other people's meshes — except that a
+	// direct message legitimately arrives on a different one.
+	//
+	// Current Meshtastic firmware does not encrypt a DM with the channel key at
+	// all. It encrypts to the recipient's public key and reports the packet on
+	// the PKI channel index rather than the one the app is configured for, so a
+	// plain `channel != ours` test rejects every DM ever sent to this node —
+	// which on the bench meant digests arrived, were answered, and the answers
+	// were dropped, with the whole sync half of the protocol silently missing.
+	//
+	// Accepting these does not widen the trust boundary; it narrows it. A
+	// channel key is shared by everyone on the channel, so "arrived on our
+	// channel" proves only membership. A PKI-encrypted packet addressed to us
+	// was encrypted TO OUR KEY, which is a strictly stronger claim, and the
+	// pairing with To is what keeps this from being "accept anything off
+	// channel": both must hold. Everything after this still applies — the
+	// sender is attributed to a node ID or the datagram goes nowhere.
+	if p.GetChannel() != ours && !(p.GetPkiEncrypted() && p.GetTo() == self) {
+		l.wrongChannel.Add(1)
 		l.drop(fmt.Sprintf("channel %d, we are on %d", p.GetChannel(), ours))
 		return
 	}
@@ -515,7 +703,7 @@ func (l *Link) deliver(p *meshpb.MeshPacket) {
 		l.onAnnounce(payload, p.GetFrom())
 		return
 	case FrameWhoIs:
-		l.onWhoIs(p.GetFrom())
+		l.onWhoIs(payload, p.GetFrom(), self)
 		return
 	}
 
@@ -567,13 +755,64 @@ func (l *Link) onAnnounce(payload []byte, from uint32) {
 	l.event(fmt.Sprintf("peer %s is at radio 0x%08x", a.ID.Short(), a.Radio))
 }
 
-func (l *Link) onWhoIs(from uint32) {
-	// Answer by unicast: the asker is the only node that does not know.
-	if err := l.sendFrame(context.Background(), from, l.announcement(), false); err != nil {
+// onWhoIs answers a peer that could not attribute something we sent.
+//
+// # Why the answer is a broadcast
+//
+// It was a unicast once, on the reasoning that the asker is the only node that
+// does not know, so telling everyone wastes airtime. That reasoning was wrong
+// twice over, and the way it was wrong took two hours of a stalled federation
+// to see.
+//
+// It is not cheaper. LoRa has no unicast: a direct message is the same
+// transmission every neighbour already hears, plus a routing ACK coming back,
+// plus — on current firmware — public-key encryption the broadcast does not
+// pay for. The saving was imaginary.
+//
+// And it made discovery depend on the thing discovery exists to enable. An
+// announcement is what makes a node addressable at all; sending it by the
+// addressed path means any fault in that path — a stale public key, a NodeDB
+// that will not take a correction — is unrecoverable BY CONSTRUCTION. Every
+// repair attempt uses the broken mechanism, so the mesh cannot heal, and the
+// symptom is not an error but silence. Observed on the bench: two nodes, RF
+// fine, broadcasts flowing both ways, every DM between them undecryptable, and
+// a who-is exchange that could never once complete.
+//
+// A broadcast answer has neither problem, and incidentally reaches any other
+// node that also missed the announcement.
+func (l *Link) onWhoIs(payload []byte, from, self uint32) {
+	target, err := DecodeWhoIs(payload)
+	if err != nil {
+		l.event(fmt.Sprintf("rejected who-is from 0x%08x: %v", from, err))
+		return
+	}
+	if target != self {
+		// Someone else's question, overheard. Answering it would be the reply
+		// storm the target field exists to prevent.
+		l.drop(fmt.Sprintf("who-is for 0x%08x, we are 0x%08x", target, self))
+		return
+	}
+	// Suppress globally rather than per asker: the answer goes to everyone, so
+	// a second asker moments later has already been told. The single key is
+	// what makes the window global.
+	if !l.answers.allow(broadcastAddr, l.clk.Now()) {
+		return
+	}
+	if err := l.announce(context.Background()); err != nil {
 		l.event(fmt.Sprintf("could not answer who-is from 0x%08x: %v", from, err))
 	}
 }
 
+// askWhoIs asks an unattributable radio to announce itself.
+//
+// Broadcast, for the same reason the answer is (see onWhoIs): both halves of
+// this exchange have to work while direct messaging does not, or discovery
+// cannot repair the one fault that stops everything. A question sent by the
+// mechanism it is trying to bootstrap is not a recovery path.
+//
+// The rate limit stays keyed by TARGET, not by the broadcast: the thing worth
+// limiting is how often we pester one silent radio, and that is unchanged by
+// who else can overhear the asking.
 func (l *Link) askWhoIs(radio uint32) {
 	if !l.Connected() {
 		// Check before taking a token: otherwise a packet held from the config
@@ -584,7 +823,8 @@ func (l *Link) askWhoIs(radio uint32) {
 	if !l.asks.allow(radio, l.clk.Now()) {
 		return
 	}
-	if err := l.sendFrame(context.Background(), radio, EncodeWhoIs(), true); err != nil {
+	// No want_ack: on a broadcast every hearer would answer it (§7.1).
+	if err := l.sendFrame(context.Background(), broadcastAddr, EncodeWhoIs(radio), false); err != nil {
 		l.event(fmt.Sprintf("could not ask 0x%08x to identify itself: %v", radio, err))
 	}
 }
@@ -616,13 +856,40 @@ func (l *Link) announce(ctx context.Context) error {
 
 func (l *Link) Name() string { return "mesh" }
 
-// MTU is the Meshtastic application payload limit, unreduced.
+// mtuReserve is what a payload must leave unused out of meshtastic.MTU.
+//
+// # Why the documented maximum is not the usable one
+//
+// meshtastic.MTU is `Data.payload max_size:233`, and taking it literally builds
+// packets the firmware will not put on the air. The payload is not the thing
+// that has to fit. The ENCODED Data message does, inside what remains of a LoRa
+// frame after the mesh header — around 240 bytes. A 233-byte payload encodes to
+// roughly 239 of those once its portnum, field tag and two-byte length prefix
+// are counted: inside the budget by a single byte, and over it the moment the
+// firmware populates any of Data's other fields, which it does routinely.
+//
+// So the failure is not marginal or probabilistic, it is total. Observed on the
+// bench: EIGHT consecutive 233-byte symbol broadcasts, in both directions,
+// none of which arrived — while 44- and 105-byte frames from the same two
+// radios in the same minutes were delivered without exception. No layer
+// reported anything. The link counted all eight as sent, the outbox advanced
+// its cursor, and the receiving side simply never saw them. Every bundle this
+// project has ever transmitted over a real mesh was lost this way.
+//
+// Sixteen bytes rather than the six or seven that would just barely do: the
+// exact budget depends on which optional fields the firmware fills in, which is
+// not ours to predict, and a symbol carrying 3% less is worth far more than one
+// that does not arrive.
+const mtuReserve = 16
+
+// MTU is what a payload may actually be.
 //
 // The link adds no header of its own: it reads the frame-type byte the layer
 // above already writes rather than prepending a second one, which would cost a
 // byte per fountain symbol — about 15 per bundle at K=15 — for no gain the
-// design's byte budget (§12.7) would forgive.
-func (l *Link) MTU() int { return meshtastic.MTU }
+// design's byte budget (§12.7) would forgive. The reserve below is not that
+// kind of header; it is room the FIRMWARE needs and does not ask for.
+func (l *Link) MTU() int { return meshtastic.MTU - mtuReserve }
 
 // Send transmits one datagram, subject to the governor.
 //
@@ -768,11 +1035,24 @@ func (l *Link) Stats() Stats {
 		Sent:          l.sent.Load(),
 		Received:      l.received.Load(),
 		Refused:       l.refused.Load(),
+		Undecryptable: l.undecryptable.Load(),
+		WrongChannel:  l.wrongChannel.Load(),
 		Unattributed:  l.unattributed.Load(),
 		Reconnects:    l.reconnects.Load(),
+		RxStalls:      l.rxStalls.Load(),
 		AnnouncesSent: l.announcesSent.Load(),
 		PeersKnown:    len(l.peers.bindings()),
+		SinceRx:       l.sinceRx(),
 	}
+}
+
+// sinceRx reports how long ago the radio last spoke, or 0 if it never has.
+func (l *Link) sinceRx() time.Duration {
+	last := l.lastRx.Load()
+	if last == 0 {
+		return 0
+	}
+	return l.clk.Now().Sub(time.Unix(0, last))
 }
 
 // Close stops the link and closes the Recv channel.
