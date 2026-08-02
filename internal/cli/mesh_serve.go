@@ -286,6 +286,7 @@ func (f *federation) logStatus() {
 		"bundles_decoded", in.Decoded,
 		"records_added", in.RecordsAdded,
 		"rx_rejected", in.Rejected,
+		"rx_corrupt", in.Corrupt,
 		"rx_undecryptable", lnk.Undecryptable,
 		"rx_wrong_channel", lnk.WrongChannel,
 		"since_rx", lnk.SinceRx.Round(time.Second),

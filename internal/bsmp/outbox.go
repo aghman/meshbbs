@@ -191,8 +191,7 @@ func (o *Outbox) SendRecords(area record.AreaTag, recs []*record.Record) error {
 
 	// Content-derived, so an interrupted transmission is resumable. See the
 	// package comment for what a random ID cost when the simulator measured it.
-	sum := blake3.Sum256(packed)
-	bundleID := binary.BigEndian.Uint32(sum[:4])
+	bundleID := bundleIDFor(packed)
 
 	symSize := o.cfg.Link.MTU() - frameOverhead - fountain.HeaderSize
 	if symSize <= 0 {
@@ -305,4 +304,18 @@ func (o *Outbox) count(f func(*Stats)) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	f(&o.stats)
+}
+
+// bundleIDFor derives a bundle's ID from its packed bytes.
+//
+// One function rather than two call sites because the inbox uses this as an
+// integrity check: it recomputes the ID over what the fountain decoder handed
+// back and compares it with the ID the sender put in every symbol header. That
+// only works while both ends agree on the derivation, and a divergence would
+// not fail loudly — it would silently reject every bundle as corrupt. Sharing
+// the function is what makes the agreement structural rather than a convention
+// two files happen to follow.
+func bundleIDFor(packed []byte) uint32 {
+	sum := blake3.Sum256(packed)
+	return binary.BigEndian.Uint32(sum[:4])
 }

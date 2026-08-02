@@ -9,6 +9,7 @@ import (
 
 	"github.com/aghman/meshbbs/internal/bundle"
 	"github.com/aghman/meshbbs/internal/clock"
+	"github.com/aghman/meshbbs/internal/fountain"
 	"github.com/aghman/meshbbs/internal/governor"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/link"
@@ -584,5 +585,107 @@ func TestEveryEmittedFrameFitsTheMTU(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A bundle that reassembles damaged must not become a permanent hole.
+//
+// `done` is marked before the payload is unpacked, and it is what makes a
+// sender's later repair symbols cheap to ignore. If it survives a failed
+// checksum, the very symbols that could repair the bundle are the ones
+// suppressed, and a transmission that was merely damaged becomes unrecoverable
+// — strictly worse than having no checksum, since without one the corruption
+// at least reached a layer that could complain about it.
+func TestADamagedBundleCanStillBeRepaired(t *testing.T) {
+	out, in, fl, eng, key := newPair(t, nil)
+	area := record.AreaTag{'d', 'm', 'g', 'd'}
+	recs := testRecords(t, key, area, 6)
+
+	if err := out.SendRecords(area, recs); err != nil {
+		t.Fatal(err)
+	}
+	sent := fl.delivered()
+	if len(sent) < 2 {
+		t.Fatalf("need several symbols to corrupt one, got %d", len(sent))
+	}
+
+	// Damage one symbol's payload. The fountain layer has no way to notice:
+	// the header still describes a well-formed symbol of the right size, so it
+	// solves the block and hands back confidently wrong bytes.
+	damaged := make([]link.Datagram, len(sent))
+	copy(damaged, sent)
+	bad := append([]byte(nil), damaged[0].Data...)
+	bad[len(bad)-1] ^= 0xFF
+	damaged[0] = link.Datagram{From: damaged[0].From, Data: bad}
+
+	for _, d := range damaged {
+		if err := in.Deliver(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := in.Stats().Corrupt; got == 0 {
+		t.Fatal("a damaged bundle was not counted as corrupt")
+	}
+	if len(eng.applied) != 0 {
+		t.Fatalf("%d records were applied from a damaged bundle", len(eng.applied))
+	}
+
+	// Now the sender repeats it, as it will when the peer keeps asking. This is
+	// the delivery that must NOT be swallowed by the duplicate guard.
+	for _, d := range sent {
+		if err := in.Deliver(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(eng.applied) != len(recs) {
+		t.Fatalf("after a clean retransmission %d of %d records arrived — "+
+			"the damaged attempt poisoned the bundle", len(eng.applied), len(recs))
+	}
+}
+
+// The integrity check works only while the sender's bundle ID and the
+// receiver's recomputation are the same function of the same bytes.
+//
+// A divergence would not fail loudly. Every bundle would decode, fail its ID
+// comparison, be counted corrupt and discarded, and federation would go quiet
+// with the counters blaming the link — which is a worse version of the bug the
+// check was added to find. Pinning the relationship here means a change to the
+// derivation breaks a test rather than the mesh.
+func TestBundleIDIsTheIntegrityCheck(t *testing.T) {
+	out, in, fl, eng, key := newPair(t, nil)
+	area := record.AreaTag{'i', 'd', 'c', 'k'}
+	recs := testRecords(t, key, area, 4)
+
+	if err := out.SendRecords(area, recs); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range fl.delivered() {
+		if err := in.Deliver(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Undamaged traffic must sail through: if the two ends had drifted apart,
+	// this is where it would show, as a clean bundle called corrupt.
+	if got := in.Stats().Corrupt; got != 0 {
+		t.Errorf("%d undamaged bundles were called corrupt — "+
+			"the sender's ID and the receiver's recomputation disagree", got)
+	}
+	if len(eng.applied) != len(recs) {
+		t.Fatalf("applied %d of %d records", len(eng.applied), len(recs))
+	}
+
+	// And the ID a symbol carries really is the hash the receiver recomputes,
+	// rather than two derivations that merely happen to agree today.
+	sym, err := fountain.DecodeSymbol(fl.sent[0].Data[frameOverhead:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ := testDicts(t)
+	packed, err := bundle.Pack(&bundle.Bundle{Area: area, Records: recs}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bundleIDFor(packed); got != sym.BundleID {
+		t.Errorf("bundleIDFor = %#08x, symbol header carries %#08x", got, sym.BundleID)
 	}
 }

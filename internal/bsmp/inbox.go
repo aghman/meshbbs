@@ -95,8 +95,17 @@ type InboxStats struct {
 	Decoded      int
 	RecordsAdded int
 	Rejected     int
-	Duplicates   int
-	Evicted      int
+	// Corrupt counts bundles that decoded and then failed their checksum.
+	//
+	// Split from Rejected because the two mean opposite things about where to
+	// look. Rejected is a peer sending something this build will not accept —
+	// a format it does not speak, a limit it will not exceed — and no amount of
+	// staring at the radio will change it. Corrupt is the bytes not surviving
+	// the trip, which is a link or a decoder problem and nothing to do with
+	// what the sender meant. Lumped together they diagnose neither.
+	Corrupt    int
+	Duplicates int
+	Evicted    int
 }
 
 // NewInbox builds an inbox.
@@ -201,6 +210,35 @@ func (in *Inbox) symbol(dg link.Datagram) error {
 	}
 	packed, err := od.dec.Payload()
 	delete(in.decoders, key)
+	if err == nil && bundleIDFor(packed) != sym.BundleID {
+		// The decode reported success and was wrong.
+		//
+		// Solving a block is not the same as being right about it: a symbol
+		// damaged in a way the LoRa CRC missed still describes a well-formed
+		// symbol of the expected size, so the decoder combines it and hands
+		// back a payload of exactly the right length made of the wrong bytes,
+		// with nothing to return but success. Observed on the bench as zstd
+		// complaining about reserved bits — a symptom named several layers
+		// below the fault, and indistinguishable from a peer sending nonsense.
+		//
+		// The check costs nothing on the air. A bundle ID already IS a BLAKE3
+		// prefix over the packed bundle (see Outbox.sendBundle), and it rode in
+		// on the header of every symbol that built this payload, so the sender
+		// has been telling us what the answer should hash to all along. Adding
+		// a checksum to the bundle format instead would have been four more
+		// bytes per bundle — enough, when it pushes a bundle across a symbol
+		// boundary, to cost an entire extra symbol and its repair symbols, and
+		// measurably enough to breach §1.1's channel budget in the simulator.
+		//
+		// Thirty-two bits is a corruption check, not a security boundary.
+		// Records carry their own signatures (§6.2.1); tampering is caught
+		// there regardless of what the framing says.
+		in.stats.Corrupt++
+		in.mu.Unlock()
+		in.event(fmt.Sprintf("bundle from %s reassembled damaged; discarding so it can be sent again",
+			dg.From.Short()))
+		return nil
+	}
 	if err != nil {
 		in.stats.Rejected++
 		in.mu.Unlock()
