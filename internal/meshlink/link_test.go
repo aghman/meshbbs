@@ -602,8 +602,23 @@ func TestCapsAndMTU(t *testing.T) {
 	m := newFakeMesh(t)
 	a := startLink(t, m, nodeKey(t, 1), 0xA1)
 
-	if a.MTU() != 233 {
-		t.Errorf("MTU = %d, want 233 (§1)", a.MTU())
+	// Deliberately NOT meshtastic.MTU. That constant is Data.payload's
+	// documented maximum, and a frame built to it does not reach the air: what
+	// has to fit is the encoded Data message, inside a LoRa frame with about
+	// 240 bytes left after the mesh header. Eight consecutive full-size symbol
+	// broadcasts were lost on the bench, in both directions, with no error
+	// anywhere, before this reserve existed.
+	//
+	// The assertion is on the headroom rather than on 217, so that tuning the
+	// reserve does not have to come here — but shrinking it to nothing would.
+	if got, ceiling := a.MTU(), meshtastic.MTU; got >= ceiling {
+		t.Errorf("MTU = %d, want strictly below the protocol maximum %d", got, ceiling)
+	}
+	if got, want := meshtastic.MTU-a.MTU(), 8; got < want {
+		t.Errorf("MTU reserve is %d bytes, want at least %d for the Data wrapper", got, want)
+	}
+	if a.MTU() < 200 {
+		t.Errorf("MTU = %d: the reserve has eaten more than it should", a.MTU())
 	}
 	caps := a.Caps()
 	if !caps.Broadcast {

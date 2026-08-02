@@ -3,6 +3,7 @@ package bsmp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -548,5 +549,40 @@ func TestHamModeBlocksDMBundles(t *testing.T) {
 	}
 	if len(fl.sent) == before {
 		t.Error("mail is still blocked after leaving ham mode")
+	}
+}
+
+// Every frame the outbox emits must fit the MTU it was given, with nothing
+// spilling over from the arithmetic that derives symbol size from it.
+//
+// This is the shape of the bug that stopped every bundle this project ever put
+// on a real mesh. symSize is MTU minus the frame's own overhead, so a symbol
+// frame lands EXACTLY on the MTU by construction — correct arithmetic, and
+// correct is not the same as sendable. The link's MTU now reserves room the
+// Meshtastic firmware needs for the Data wrapper and never asks for, and the
+// property worth pinning here is the one that held all along: whatever the
+// link says it can carry, the outbox must not exceed it.
+//
+// Sweeping sizes rather than testing one: an off-by-one in the derivation only
+// shows up at particular MTUs, and the failure it caused was invisible — the
+// link counted the frame sent and the receiver simply never saw it.
+func TestEveryEmittedFrameFitsTheMTU(t *testing.T) {
+	for _, mtu := range []int{64, 100, 128, 200, 217, 233} {
+		t.Run(fmt.Sprintf("mtu=%d", mtu), func(t *testing.T) {
+			out, _, fl, _, key := newPair(t, func(f *fakeLink) { f.mtu = mtu })
+			area := record.AreaTag{'t', 'e', 's', 't'}
+
+			if err := out.SendRecords(area, testRecords(t, key, area, 6)); err != nil {
+				t.Fatal(err)
+			}
+			if len(fl.sent) == 0 {
+				t.Fatal("nothing was sent")
+			}
+			for i, dg := range fl.sent {
+				if len(dg.Data) > mtu {
+					t.Errorf("frame %d is %d bytes, over the %d-byte MTU", i, len(dg.Data), mtu)
+				}
+			}
+		})
 	}
 }

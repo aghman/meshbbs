@@ -856,13 +856,40 @@ func (l *Link) announce(ctx context.Context) error {
 
 func (l *Link) Name() string { return "mesh" }
 
-// MTU is the Meshtastic application payload limit, unreduced.
+// mtuReserve is what a payload must leave unused out of meshtastic.MTU.
+//
+// # Why the documented maximum is not the usable one
+//
+// meshtastic.MTU is `Data.payload max_size:233`, and taking it literally builds
+// packets the firmware will not put on the air. The payload is not the thing
+// that has to fit. The ENCODED Data message does, inside what remains of a LoRa
+// frame after the mesh header — around 240 bytes. A 233-byte payload encodes to
+// roughly 239 of those once its portnum, field tag and two-byte length prefix
+// are counted: inside the budget by a single byte, and over it the moment the
+// firmware populates any of Data's other fields, which it does routinely.
+//
+// So the failure is not marginal or probabilistic, it is total. Observed on the
+// bench: EIGHT consecutive 233-byte symbol broadcasts, in both directions,
+// none of which arrived — while 44- and 105-byte frames from the same two
+// radios in the same minutes were delivered without exception. No layer
+// reported anything. The link counted all eight as sent, the outbox advanced
+// its cursor, and the receiving side simply never saw them. Every bundle this
+// project has ever transmitted over a real mesh was lost this way.
+//
+// Sixteen bytes rather than the six or seven that would just barely do: the
+// exact budget depends on which optional fields the firmware fills in, which is
+// not ours to predict, and a symbol carrying 3% less is worth far more than one
+// that does not arrive.
+const mtuReserve = 16
+
+// MTU is what a payload may actually be.
 //
 // The link adds no header of its own: it reads the frame-type byte the layer
 // above already writes rather than prepending a second one, which would cost a
 // byte per fountain symbol — about 15 per bundle at K=15 — for no gain the
-// design's byte budget (§12.7) would forgive.
-func (l *Link) MTU() int { return meshtastic.MTU }
+// design's byte budget (§12.7) would forgive. The reserve below is not that
+// kind of header; it is room the FIRMWARE needs and does not ask for.
+func (l *Link) MTU() int { return meshtastic.MTU - mtuReserve }
 
 // Send transmits one datagram, subject to the governor.
 //
