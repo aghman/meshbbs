@@ -59,7 +59,11 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 	// The radio has to be read before the governor can be built: airtime
 	// depends on the modem preset, and the duty cycle on the region. Neither is
 	// something a sysop should have to copy into our config by hand.
-	dial := dialerFor(cfg)
+	// The radio's own debug output, which it writes to the same wire as the
+	// protocol. Discarding it was a real cost: when a node refuses a connection
+	// or drops one, the reason is usually in this log and nowhere else, and
+	// without it the only evidence is a bare "connection reset by peer".
+	dial := dialerFor(cfg, func(s string) { log.Debug("radio", "log", s) })
 	probe, err := dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the radio: %w", err)
@@ -285,12 +289,17 @@ func (f *federation) logStatus() {
 		"symbols_sent", out.SymbolsSent,
 		"bundles_decoded", in.Decoded,
 		"records_added", in.RecordsAdded,
+		"rx_symbols", in.Symbols,
+		"rx_duplicates", in.Duplicates,
+		"rx_evicted", in.Evicted,
 		"rx_rejected", in.Rejected,
 		"rx_corrupt", in.Corrupt,
 		"rx_undecryptable", lnk.Undecryptable,
 		"rx_wrong_channel", lnk.WrongChannel,
 		"since_rx", lnk.SinceRx.Round(time.Second),
 		"rx_stalls", lnk.RxStalls,
+		"serial_skipped", lnk.SerialSkipped,
+		"serial_frames", lnk.SerialFrames,
 		"unattributed", lnk.Unattributed,
 		"tx_refused_budget", gov.RefusedBudget,
 		"tx_refused_busy", gov.RefusedBusy,
@@ -320,21 +329,23 @@ func rxTimeout(secs int) time.Duration {
 }
 
 // dialerFor builds the radio dialer described by config.
-func dialerFor(cfg config.Mesh) meshlink.Dialer {
+func dialerFor(cfg config.Mesh, deviceLog func(string)) meshlink.Dialer {
 	return func(ctx context.Context) (*meshtastic.Conn, error) {
 		switch cfg.Mode {
 		case "tcp":
-			return meshtastic.DialTCP(ctx, meshtastic.TCPConfig{Host: cfg.TCPHost})
+			return meshtastic.DialTCP(ctx, meshtastic.TCPConfig{
+				Host: cfg.TCPHost, OnDeviceLog: deviceLog,
+			})
 		case "serial":
 			return meshtastic.DialSerial(meshtastic.SerialConfig{
-				Port: cfg.SerialDevice, Baud: cfg.SerialBaud,
+				Port: cfg.SerialDevice, Baud: cfg.SerialBaud, OnDeviceLog: deviceLog,
 			})
 		default:
 			// auto: a cable if there is one, otherwise the network. Serial
 			// first because §7.1 recommends it — it does not depend on the
 			// node's WiFi staying up.
 			conn, err := meshtastic.DialSerial(meshtastic.SerialConfig{
-				Port: cfg.SerialDevice, Baud: cfg.SerialBaud,
+				Port: cfg.SerialDevice, Baud: cfg.SerialBaud, OnDeviceLog: deviceLog,
 			})
 			if err == nil {
 				return conn, nil
@@ -342,7 +353,9 @@ func dialerFor(cfg config.Mesh) meshlink.Dialer {
 			if cfg.TCPHost == "" {
 				return nil, fmt.Errorf("no serial radio found and no mesh.tcp_host configured: %w", err)
 			}
-			return meshtastic.DialTCP(ctx, meshtastic.TCPConfig{Host: cfg.TCPHost})
+			return meshtastic.DialTCP(ctx, meshtastic.TCPConfig{
+				Host: cfg.TCPHost, OnDeviceLog: deviceLog,
+			})
 		}
 	}
 }

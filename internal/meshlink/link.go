@@ -35,6 +35,15 @@ var (
 	// ErrReservedFrame means a caller tried to send a frame type the link
 	// itself owns.
 	ErrReservedFrame = errors.New("meshlink: frame type is reserved for the link")
+
+	// errNotRetryable marks a connect failure that waiting cannot fix.
+	//
+	// The first connection retries, because a radio can be briefly unable to
+	// accept one and that is not a misconfigured instance. But a channel the
+	// node does not have, or an encrypted channel under an amateur licence, is
+	// the same answer however many times it is asked — and §7.1 wants those in
+	// front of the sysop at startup, not forty-five seconds later.
+	errNotRetryable = errors.New("meshlink: not retryable")
 )
 
 // Broadcast is the peer ID meaning "every listener on this mesh". It is
@@ -110,6 +119,14 @@ type Config struct {
 	AnswerInterval time.Duration
 	// Heartbeat keeps the radio's client session alive. Default 5m.
 	Heartbeat time.Duration
+	// ConnectRetryWindow is how long Start keeps trying the first connection
+	// before giving up. Default 45s; zero means one attempt.
+	//
+	// Long enough to outlast a Meshtastic node that has not yet released the
+	// previous TCP client — about fifteen seconds on the bench — and short
+	// enough that a genuinely absent radio still fails startup rather than
+	// hanging a sysop who is waiting to find out.
+	ConnectRetryWindow time.Duration
 	// ConnectTimeout bounds the config handshake. Default 30s.
 	//
 	// The dump takes a second or two from a healthy radio, so this is only ever
@@ -190,6 +207,32 @@ type Stats struct {
 	// SinceRx is how long ago the radio last said anything. A value creeping up
 	// past a minute or two on a live mesh is the shape of a one-way connection.
 	SinceRx time.Duration
+	// SerialSkipped is bytes the frame reader consumed outside any frame, and
+	// SerialFrames is frames it read whole.
+	//
+	// # What Skipped does NOT mean
+	//
+	// It is tempting to read a large Skipped as corruption on the wire, and it
+	// is not. Meshtastic firmware writes its plaintext debug log to the same
+	// serial line as the binary protocol, so every log line the radio emits is
+	// counted here on its way to the device-log sink. Tens of kilobytes against
+	// a few dozen frames is the normal ratio for a chatty node, and it says
+	// nothing at all about whether the bytes are arriving intact.
+	//
+	// Genuine desync is counted here too, and that is the problem: the two are
+	// indistinguishable in this number. It is useful for "is this port carrying
+	// anything at all" and for spotting a device that is not a Meshtastic node,
+	// which is what internal/cli/mesh.go already uses it for. It is not
+	// evidence about corruption, and reading it as such wasted an hour.
+	//
+	// What WOULD be evidence: the local link has no integrity check of its own
+	// — the framing is `0x94 0xC3 <length> <payload>`, a firmware constant —
+	// so damage inside a payload passes protobuf and reaches the application
+	// looking valid. Detecting that needs a check at a layer that knows what
+	// the bytes should be, which is what the bundle ID comparison in
+	// internal/bsmp does.
+	SerialSkipped uint64
+	SerialFrames  uint64
 }
 
 // Link is a link.Link over a Meshtastic radio.
@@ -274,6 +317,11 @@ func New(cfg Config) (*Link, error) {
 	if cfg.ConnectTimeout <= 0 {
 		cfg.ConnectTimeout = 30 * time.Second
 	}
+	if cfg.ConnectRetryWindow < 0 {
+		cfg.ConnectRetryWindow = 0
+	} else if cfg.ConnectRetryWindow == 0 {
+		cfg.ConnectRetryWindow = 45 * time.Second
+	}
 	if cfg.RxTimeout < 0 {
 		cfg.RxTimeout = 0
 	} else if cfg.RxTimeout == 0 {
@@ -314,7 +362,7 @@ func (l *Link) Start(ctx context.Context) error {
 	l.cancel = cancel
 	l.mu.Unlock()
 
-	if err := l.connect(ctx); err != nil {
+	if err := l.connectWithRetry(ctx); err != nil {
 		cancel()
 		return err
 	}
@@ -325,6 +373,53 @@ func (l *Link) Start(ctx context.Context) error {
 		l.supervise(ctx)
 	}()
 	return nil
+}
+
+// connectWithRetry makes the first connection, tolerating a radio that is
+// briefly unable to take one.
+//
+// # Why the first connect cannot simply fail
+//
+// A caller reads the radio's configuration before building the governor — the
+// modem preset decides what airtime costs — and then this link dials the same
+// radio again. Over a cable that second open is local and instant. Over TCP it
+// is a new client session, and Meshtastic firmware does not free the previous
+// one immediately: measured on the bench, a reconnect within a second of
+// closing is reset by the node, and the same connection succeeds fifteen
+// seconds later.
+//
+// Failing there is not a report of a misconfigured instance, it is a report of
+// having been too quick, and it made `mode = "tcp"` unusable from startup —
+// every run died on the second connection with "connection reset by peer" while
+// a single probe worked every time.
+//
+// The window is bounded so a genuine fault still stops startup, which is the
+// property §7.1 wanted: a wrong port or an absent channel should be an error the
+// sysop sees now, not a silent federation outage. It just should not be reported
+// for a radio that needed a moment.
+func (l *Link) connectWithRetry(ctx context.Context) error {
+	deadline := l.clk.Now().Add(l.cfg.ConnectRetryWindow)
+	backoff := l.cfg.ReconnectBackoff
+	for attempt := 1; ; attempt++ {
+		err := l.connect(ctx)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errNotRetryable) || ctx.Err() != nil ||
+			!l.clk.Now().Add(backoff).Before(deadline) {
+			return err
+		}
+		l.event(fmt.Sprintf("radio did not accept the connection (attempt %d: %v); retrying in %v",
+			attempt, err, backoff))
+		select {
+		case <-ctx.Done():
+			return err
+		case <-l.clk.After(backoff):
+		}
+		if backoff *= 2; backoff > time.Minute {
+			backoff = time.Minute
+		}
+	}
 }
 
 // connect dials, runs the config exchange, resolves the channel and announces.
@@ -366,7 +461,7 @@ func (l *Link) connect(ctx context.Context) error {
 	idx, err := channelIndex(info, l.cfg.Channel)
 	if err != nil {
 		conn.Close()
-		return err
+		return fmt.Errorf("%w: %w", errNotRetryable, err)
 	}
 
 	// §8.3: a ham-mode node may not run an encrypted channel. Checked here
@@ -376,7 +471,7 @@ func (l *Link) connect(ctx context.Context) error {
 	policy := hammode.FromRadio(info, l.cfg.Part97Override)
 	if err := policy.CheckChannel(info.Channels, l.cfg.Channel); err != nil {
 		conn.Close()
-		return err
+		return fmt.Errorf("%w: %w", errNotRetryable, err)
 	}
 	if b := policy.Banner(); b != "" {
 		l.event(b)
@@ -1031,6 +1126,16 @@ func (l *Link) Peers() []Binding { return l.peers.bindings() }
 
 // Stats reports counters for the status screen.
 func (l *Link) Stats() Stats {
+	// Read through the CURRENT connection: these counters live in the frame
+	// reader, so they reset when the radio is redialled. That is the honest
+	// reading — they describe this attachment, and a reconnect genuinely is a
+	// new stream — but it means a stall that reconnects also zeroes the
+	// evidence of why, which is worth knowing before reading a small number as
+	// good news.
+	var skipped, frames uint64
+	if c := l.currentConn(); c != nil {
+		skipped, frames = c.Skipped(), c.Frames()
+	}
 	return Stats{
 		Sent:          l.sent.Load(),
 		Received:      l.received.Load(),
@@ -1040,6 +1145,8 @@ func (l *Link) Stats() Stats {
 		Unattributed:  l.unattributed.Load(),
 		Reconnects:    l.reconnects.Load(),
 		RxStalls:      l.rxStalls.Load(),
+		SerialSkipped: skipped,
+		SerialFrames:  frames,
 		AnnouncesSent: l.announcesSent.Load(),
 		PeersKnown:    len(l.peers.bindings()),
 		SinceRx:       l.sinceRx(),
