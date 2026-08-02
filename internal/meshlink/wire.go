@@ -65,7 +65,7 @@ const (
 const (
 	announceBodyLen = 1 + ed25519.PublicKeySize + 4 + 4
 	announceLen     = announceBodyLen + ed25519.SignatureSize // 105
-	whoIsLen        = 1
+	whoIsLen        = 1 + 4
 )
 
 // Errors from parsing an announcement. They are distinguishable because a
@@ -76,6 +76,7 @@ var (
 	ErrBadSignature      = errors.New("meshlink: announcement signature does not verify")
 	ErrRadioMismatch     = errors.New("meshlink: announcement claims a different radio than it came from")
 	ErrStaleAnnounce     = errors.New("meshlink: announcement is older than one already seen")
+	ErrMalformedWhoIs    = errors.New("meshlink: malformed who-is")
 )
 
 // Announcement is a peer's claim to a radio address, already verified.
@@ -138,11 +139,35 @@ func DecodeAnnounce(payload []byte, from uint32) (Announcement, error) {
 	}, nil
 }
 
-// EncodeWhoIs builds the one-byte request that asks a radio to announce itself.
+// EncodeWhoIs builds the request that asks one radio to announce itself.
+//
+//	byte 0     frame type
+//	bytes 1-4  target radio node number, big endian
 //
 // It exists because the alternative is announcing often enough that a new peer
 // is learned promptly, and that is expensive: at 105 bytes, R=4 and fifty
 // instances, a six-hourly broadcast announcement would spend about 1% of the
 // whole channel — a fifth of the entire federation budget (§1.1) on saying
 // hello. Asking costs one packet, exactly when there is something to learn.
-func EncodeWhoIs() []byte { return []byte{FrameWhoIs} }
+//
+// # Why the target is named
+//
+// The frame was one byte once, because it was sent as a direct message and the
+// destination address already said who was being asked. It is broadcast now
+// (see Link.askWhoIs), which takes that addressing away and would otherwise
+// have every node that heard the question answer it — §7.3's reply storm,
+// arrived at from a new direction. Four bytes of target buy the broadcast its
+// exactly-one answer.
+func EncodeWhoIs(target uint32) []byte {
+	buf := make([]byte, 0, whoIsLen)
+	buf = append(buf, FrameWhoIs)
+	return binary.BigEndian.AppendUint32(buf, target)
+}
+
+// DecodeWhoIs returns the radio number a who-is is asking about.
+func DecodeWhoIs(payload []byte) (uint32, error) {
+	if len(payload) != whoIsLen || payload[0] != FrameWhoIs {
+		return 0, fmt.Errorf("%w: %d bytes", ErrMalformedWhoIs, len(payload))
+	}
+	return binary.BigEndian.Uint32(payload[1:]), nil
+}

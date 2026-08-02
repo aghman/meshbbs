@@ -254,6 +254,13 @@ func (f *federation) run(ctx context.Context) {
 // not arriving, in the order the traffic flows: are we speaking (digests,
 // symbols), is anyone answering (heard, requests), is anything landing
 // (bundles, records), and if not, who refused (budget, quota, unattributed).
+//
+// The three rx refusals are split because they point at different layers, and
+// a run that stalled for hours is the reason they are here at all: every
+// counter on that line read zero or healthy while the radios quietly discarded
+// half the protocol. rx_undecryptable in particular is not a federation
+// problem — it means the radio could not decrypt what arrived, so the place to
+// look is the radios' keys, not anything above them.
 func (f *federation) logStatus() {
 	eng := f.engine.Stats()
 	out := f.outbox.Stats()
@@ -264,6 +271,9 @@ func (f *federation) logStatus() {
 
 	f.log.Info("federation status",
 		"peers", f.engine.PeerCount(),
+		"areas", len(f.gstore.Areas()),
+		"digest_areas", len(f.engine.Digest().Areas),
+		"next_digest_in", f.engine.NextDue().Sub(f.clk.Now()).Round(time.Second),
 		"bound", lnk.PeersKnown,
 		"digests_sent", eng.DigestsSent,
 		"digests_heard", eng.DigestsHeard,
@@ -275,6 +285,10 @@ func (f *federation) logStatus() {
 		"bundles_decoded", in.Decoded,
 		"records_added", in.RecordsAdded,
 		"rx_rejected", in.Rejected,
+		"rx_undecryptable", lnk.Undecryptable,
+		"rx_wrong_channel", lnk.WrongChannel,
+		"since_rx", lnk.SinceRx.Round(time.Second),
+		"rx_stalls", lnk.RxStalls,
 		"unattributed", lnk.Unattributed,
 		"tx_refused_budget", gov.RefusedBudget,
 		"tx_refused_busy", gov.RefusedBusy,
