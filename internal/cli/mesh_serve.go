@@ -113,6 +113,7 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 		Clock:          e.clock,
 		Rand:           rng.NewSeeded(binary.BigEndian.Uint64(linkSeed[:])),
 		HopLimit:       uint32(cfg.HopLimit),
+		RxTimeout:      rxTimeout(cfg.RxTimeoutS),
 		Part97Override: e.cfg.AcceptsPart97Responsibility(),
 		OnEvent:        func(s string) { log.Info("mesh", "event", s) },
 		OnTrace:        func(s string) { log.Debug("mesh", "trace", s) },
@@ -304,6 +305,18 @@ func (f *federation) Close() error { return f.link.Close() }
 // Summary is what `serve` prints at startup, in the terms §7.6 requires: a
 // sysop cannot act on "0.1% of channel time", but can act on "11 packets a day".
 func (f *federation) Summary() string { return f.gov.Explain() }
+
+// rxTimeout converts the configured seconds into a link setting.
+//
+// Zero means the sysop turned the watchdog off, and must reach the link as a
+// negative rather than a zero: zero is what an unset Config field looks like,
+// and the link fills those in with its default. Disabling has to be sayable.
+func rxTimeout(secs int) time.Duration {
+	if secs == 0 {
+		return -1
+	}
+	return time.Duration(secs) * time.Second
+}
 
 // dialerFor builds the radio dialer described by config.
 func dialerFor(cfg config.Mesh) meshlink.Dialer {

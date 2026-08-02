@@ -117,7 +117,14 @@ type Config struct {
 	// or a reconnect can hang forever where a failure would have been retried.
 	ConnectTimeout time.Duration
 	// RxTimeout forces a reconnect when the radio has sent us nothing for this
-	// long. Default 3x Heartbeat. Zero on a link that should never do this.
+	// long. Default 5m. Zero on a link that should never do this.
+	//
+	// It is deliberately far shorter than a digest interval. A stall that lasts
+	// longer than one destroys a whole reconciliation round — the peer asks,
+	// the deaf node never answers, and both sides wait out the next cadence —
+	// so detection has to be quick relative to the protocol above, not merely
+	// eventual. A radio reports its own telemetry about once a minute, which is
+	// the cadence this is measured against.
 	//
 	// # Why a heartbeat is not enough
 	//
@@ -270,7 +277,7 @@ func New(cfg Config) (*Link, error) {
 	if cfg.RxTimeout < 0 {
 		cfg.RxTimeout = 0
 	} else if cfg.RxTimeout == 0 {
-		cfg.RxTimeout = 3 * cfg.Heartbeat
+		cfg.RxTimeout = 5 * time.Minute
 	}
 	if cfg.Inbox <= 0 {
 		cfg.Inbox = 256
@@ -503,13 +510,15 @@ func (l *Link) keepalive(ctx context.Context, conn *meshtastic.Conn) {
 	// Jitter the announcement so fifty instances that all restarted after a
 	// power cut do not announce in the same second (§7.3's digest storm, in
 	// miniature).
-	next := l.cfg.AnnounceInterval/2 + l.jitter(l.cfg.AnnounceInterval)
+	untilAnnounce := l.cfg.AnnounceInterval/2 + l.jitter(l.cfg.AnnounceInterval)
+	untilHeartbeat := l.cfg.Heartbeat
+	tick := l.watchdogTick()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-l.clk.After(l.cfg.Heartbeat):
+		case <-l.clk.After(tick):
 		}
 
 		// Bound to ONE connection: after a reconnect this goroutine must exit
@@ -517,8 +526,12 @@ func (l *Link) keepalive(ctx context.Context, conn *meshtastic.Conn) {
 		if conn == nil || l.currentConn() != conn {
 			return
 		}
-		if err := conn.Heartbeat(); err != nil {
-			return // the read loop will see the same failure and reconnect
+
+		if untilHeartbeat -= tick; untilHeartbeat <= 0 {
+			untilHeartbeat = l.cfg.Heartbeat
+			if err := conn.Heartbeat(); err != nil {
+				return // the read loop will see the same failure and reconnect
+			}
 		}
 
 		// A heartbeat that succeeds says nothing about whether we can still
@@ -533,13 +546,32 @@ func (l *Link) keepalive(ctx context.Context, conn *meshtastic.Conn) {
 			return
 		}
 
-		if next -= l.cfg.Heartbeat; next <= 0 {
-			next = l.cfg.AnnounceInterval
+		if untilAnnounce -= tick; untilAnnounce <= 0 {
+			untilAnnounce = l.cfg.AnnounceInterval
 			if err := l.announce(ctx); err != nil {
 				l.event("periodic announce failed: " + err.Error())
 			}
 		}
 	}
+}
+
+// watchdogTick is how often keepalive wakes.
+//
+// It is not the heartbeat interval, because the two want opposite things. The
+// heartbeat only has to beat the firmware's idle timeout, measured in minutes,
+// and every beat costs a write. The stall check wants to be prompt, and costs
+// nothing. Waking on the slower of the two would round RxTimeout up to the next
+// heartbeat, so a five-minute timeout would take up to ten minutes to notice —
+// which is how a setting can look configured and not be actionable.
+func (l *Link) watchdogTick() time.Duration {
+	tick := l.cfg.Heartbeat
+	if rt := l.cfg.RxTimeout; rt > 0 && rt/3 < tick {
+		tick = rt / 3
+	}
+	if tick <= 0 {
+		tick = time.Second
+	}
+	return tick
 }
 
 // rxStalled reports whether the radio has gone quiet for longer than allowed.

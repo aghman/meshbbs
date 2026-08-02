@@ -11,6 +11,7 @@ import (
 	"github.com/aghman/meshbbs/internal/hammode"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/link"
+	"github.com/aghman/meshbbs/internal/meshtastic"
 	"github.com/aghman/meshbbs/internal/meshtastic/meshpb"
 	"github.com/aghman/meshbbs/internal/rng"
 )
@@ -395,6 +396,53 @@ func TestOneWayConnectionForcesAReconnect(t *testing.T) {
 	// the stall is only half the job if the link cannot come back from it.
 	m.setDeaf(0xA1, false)
 	waitFor(t, 5*time.Second, "a to reconnect", a.Connected)
+}
+
+// The stall check has to wake more often than the heartbeat, or RxTimeout is
+// rounded up to the next beat and a setting that reads as five minutes takes
+// ten to act. Configured is not the same as actionable.
+func TestWatchdogWakesFasterThanTheHeartbeat(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		heartbeat time.Duration
+		rxTimeout time.Duration
+		want      time.Duration
+	}{
+		{"tick follows the timeout when it is the tighter one", 5 * time.Minute, 5 * time.Minute, 100 * time.Second},
+		{"never slower than needed to catch the timeout", 5 * time.Minute, time.Minute, 20 * time.Second},
+		{"heartbeat caps it when the timeout is loose", time.Minute, time.Hour, time.Minute},
+		{"disabled watchdog just uses the heartbeat", time.Minute, -1, time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &Link{cfg: Config{Heartbeat: tc.heartbeat, RxTimeout: tc.rxTimeout}}
+			if got := l.watchdogTick(); got != tc.want {
+				t.Errorf("watchdogTick() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Turning the watchdog off has to be sayable. Zero is what an unset Config
+// field looks like, so the link reads it as "give me the default" — which means
+// a sysop writing rx_timeout_secs = 0 would otherwise get the default back
+// rather than the disabling they asked for.
+func TestTheWatchdogCanBeTurnedOff(t *testing.T) {
+	l, err := New(Config{
+		Key: nodeKey(t, 1), Channel: "bbsnet", Rand: rng.NewSeeded(1),
+		Dial:      func(context.Context) (*meshtastic.Conn, error) { return nil, errors.New("unused") },
+		RxTimeout: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.cfg.RxTimeout > 0 {
+		t.Errorf("a negative RxTimeout became %v, want it left off", l.cfg.RxTimeout)
+	}
+	// Stale by any measure, and still not a stall, because the check is off.
+	l.lastRx.Store(time.Now().Add(-24 * time.Hour).UnixNano())
+	if l.rxStalled() {
+		t.Error("a disabled watchdog reported a stall")
+	}
 }
 
 // A quiet mesh is not a broken one. The watchdog is armed by any message from
