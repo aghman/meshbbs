@@ -835,3 +835,79 @@ func TestFirstConnectionDoesNotRetryAMisconfiguration(t *testing.T) {
 		t.Errorf("error does not name the missing channel: %v", err)
 	}
 }
+
+// A connection that attaches and then carries nothing must not be mistaken for
+// a healthy one, or the watchdog turns into a loop that sustains the fault.
+//
+// From the bench, over TCP. A Meshtastic node that has not released the client
+// slots of a previous connection still completes the config handshake, and then
+// delivers nothing on that session. The supervisor reset its backoff on every
+// successful attach, so the cycle was: attach, wait out the rx timeout, close,
+// redial a second later, attach again — indefinitely, at a fixed interval, with
+// every redial consuming another slot on a radio that frees them slowly. The
+// watchdog was holding the node in the state it was trying to escape; the same
+// radio recovered on its own when simply left alone for two minutes.
+func TestADeadSessionEscalatesTheBackoff(t *testing.T) {
+	m := newFakeMesh(t)
+	dial := m.addRadio(0xA1, defaultChannels())
+
+	l, err := New(Config{
+		Key: nodeKey(t, 1), Channel: "bbsnet", Governor: Unmetered{},
+		Rand: rng.NewSeeded(1),
+		// Short enough to cycle quickly, long enough that the escalation is
+		// visible in the gaps between dials rather than lost in scheduling.
+		ReconnectBackoff: 20 * time.Millisecond,
+		// Cap the escalation so recovery is observable in a test. In production
+		// the ceiling is a minute; the property under test is that the gap grows
+		// and then still lets the link back, not the size of the ceiling.
+		MaxReconnectBackoff: 200 * time.Millisecond,
+		Heartbeat:           5 * time.Millisecond,
+		RxTimeout:           15 * time.Millisecond,
+		Dial:                dial,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	if err := l.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Handshakes still complete; sessions carry nothing. Exactly the observed
+	// failure, and the reason attaching cannot be taken as evidence of health.
+	m.setDeafAfterConfig(0xA1, true)
+
+	waitFor(t, 5*time.Second, "the watchdog to cycle several times", func() bool {
+		return l.Stats().RxStalls >= 3
+	})
+
+	// The reconnects must be spreading out. Without escalation every attach
+	// resets the backoff and the gap stays at its floor forever.
+	dialsAtFirst := m.dialCount(0xA1)
+	time.Sleep(400 * time.Millisecond)
+	late := m.dialCount(0xA1) - dialsAtFirst
+
+	stalls := l.Stats().RxStalls
+	time.Sleep(400 * time.Millisecond)
+	later := m.dialCount(0xA1) - dialsAtFirst - late
+
+	if later > late {
+		t.Errorf("redials sped up (%d then %d): the backoff is not escalating", late, later)
+	}
+	if stalls == 0 {
+		t.Fatal("the watchdog never fired")
+	}
+
+	// And it still recovers once the radio answers again, which is the point of
+	// backing off rather than giving up rather than hammering.
+	//
+	// Recovery is asserted on traffic actually arriving, not merely on being
+	// attached, because attached is exactly the state that was lying: a peer
+	// has to announce for anything to reach the read loop at all.
+	peer := startLink(t, m, nodeKey(t, 2), 0xB2)
+	m.setDeafAfterConfig(0xA1, false)
+	waitFor(t, 15*time.Second, "the link to carry traffic again", func() bool {
+		_ = peer.announce(context.Background())
+		return l.Connected() && l.sessionRx.Load()
+	})
+}

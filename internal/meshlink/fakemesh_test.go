@@ -58,6 +58,10 @@ type fakeRadio struct {
 	// deaf drops everything on the way to the client without closing anything;
 	// see setDeaf.
 	deaf bool
+	// deafAfterConfig serves the config handshake and goes deaf immediately
+	// after, which is what a Meshtastic node does over TCP when it is still
+	// holding a previous client's slots.
+	deafAfterConfig bool
 	// dialled counts connections, so a test can assert a reconnect happened.
 	dialled int
 	// injected is delivered in the middle of the config dump, which is when a
@@ -109,6 +113,13 @@ func (m *fakeMesh) addRadio(num uint32, channels []meshtastic.ChannelInfo) Diale
 
 		r.mu.Lock()
 		r.conn, r.out, r.dialled = server, out, r.dialled+1
+		// A new connection can always be established and always completes its
+		// handshake. That is the point of deafAfterConfig: the radio is not
+		// unreachable, it is worse than unreachable — it answers, and then
+		// carries nothing, so the client believes it has a link.
+		if r.deafAfterConfig {
+			r.deaf = false
+		}
 		r.mu.Unlock()
 
 		// Writes go through a queue so that one Link that has stopped reading
@@ -117,6 +128,21 @@ func (m *fakeMesh) addRadio(num uint32, channels []meshtastic.ChannelInfo) Diale
 		go r.readLoop(server, out)
 		return meshtastic.NewConn(client, meshtastic.Options{Name: "fake"}), nil
 	}
+}
+
+// setDeafAfterConfig makes every future connection complete its handshake and
+// then carry nothing, which is the shape of the failure that made the rx
+// watchdog loop: attaching is not evidence of a working link.
+func (m *fakeMesh) setDeafAfterConfig(num uint32, v bool) {
+	m.mu.Lock()
+	r := m.radios[num]
+	m.mu.Unlock()
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.deafAfterConfig, r.deaf = v, false
+	r.mu.Unlock()
 }
 
 // setDeaf makes a radio stop delivering anything to its client while still
@@ -156,6 +182,18 @@ func (r *fakeRadio) writeLoop(conn net.Conn, out chan *meshpb.FromRadio) {
 		}
 		if _, err := conn.Write(frame); err != nil {
 			return
+		}
+		// Go deaf only once the handshake has actually reached the client.
+		// Flipping it when the config was merely QUEUED races the drain here
+		// and swallows the dump, which models an unreachable radio rather than
+		// the one this exists for: a radio that answers the handshake and then
+		// says nothing more.
+		if msg.GetConfigCompleteId() != 0 {
+			r.mu.Lock()
+			if r.deafAfterConfig {
+				r.deaf = true
+			}
+			r.mu.Unlock()
 		}
 	}
 }

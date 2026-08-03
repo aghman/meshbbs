@@ -166,8 +166,18 @@ type Config struct {
 	// Inbox bounds buffered inbound datagrams. Default 256.
 	Inbox int
 	// ReconnectBackoff is the first delay after a dropped connection; it
-	// doubles up to a minute. Default 1s.
+	// doubles up to MaxReconnectBackoff. Default 1s.
 	ReconnectBackoff time.Duration
+	// MaxReconnectBackoff caps that doubling. Default 1m.
+	//
+	// It bounds how long a link can be down after the radio is healthy again,
+	// and how much quiet a radio gets when it is not. Those pull in opposite
+	// directions: the bench fault this escalation exists for — a node holding a
+	// previous client's slots — cleared after about two minutes of being left
+	// alone, so a ceiling far below that would keep poking a radio that wants
+	// silence, while one far above it would leave a working radio unattached
+	// for no reason.
+	MaxReconnectBackoff time.Duration
 
 	// OnEvent receives one-line operational notes for the log: connects,
 	// disconnects, peers learned. Optional.
@@ -276,6 +286,11 @@ type Link struct {
 	announcesSent               atomic.Uint64
 	rxStalls                    atomic.Uint64
 	connected                   atomic.Bool
+	// sessionRx reports whether the CURRENT connection has carried anything
+	// through the read loop, as distinct from merely having been established.
+	// The config handshake does not count: it is the one exchange a radio in a
+	// bad state still completes.
+	sessionRx atomic.Bool
 	// lastRx is when the radio last said anything at all, in Unix nanoseconds.
 	// Zero means nothing has arrived on this connection yet.
 	lastRx atomic.Int64
@@ -332,6 +347,12 @@ func New(cfg Config) (*Link, error) {
 	}
 	if cfg.ReconnectBackoff <= 0 {
 		cfg.ReconnectBackoff = time.Second
+	}
+	if cfg.MaxReconnectBackoff <= 0 {
+		cfg.MaxReconnectBackoff = time.Minute
+	}
+	if cfg.MaxReconnectBackoff < cfg.ReconnectBackoff {
+		cfg.MaxReconnectBackoff = cfg.ReconnectBackoff
 	}
 	return &Link{
 		cfg:     cfg,
@@ -497,6 +518,11 @@ func (l *Link) connect(ctx context.Context) error {
 	// would not start until the first unsolicited message, and a radio that
 	// never sent one would never be checked at all.
 	l.lastRx.Store(l.clk.Now().UnixNano())
+	// A new session has carried nothing yet. Deliberately NOT set by the
+	// handshake above: a radio holding stale client slots still completes that
+	// exchange and then goes silent, so counting it would call a dead session
+	// healthy — which is the whole failure this flag exists to catch.
+	l.sessionRx.Store(false)
 
 	l.event(fmt.Sprintf("radio attached: %s, node 0x%08x, channel %q (index %d), hop limit %d",
 		conn.Name(), info.NodeNum, l.cfg.Channel, idx, hop))
@@ -551,7 +577,7 @@ func channelIndex(info *meshtastic.RadioInfo, name string) (uint32, error) {
 // supervise runs the read loop and reconnects when it ends.
 func (l *Link) supervise(ctx context.Context) {
 	backoff := l.cfg.ReconnectBackoff
-	const maxBackoff = time.Minute
+	maxBackoff := l.cfg.MaxReconnectBackoff
 
 	for {
 		conn := l.currentConn()
@@ -566,6 +592,8 @@ func (l *Link) supervise(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Capture before reconnecting, because connect() arms the next session.
+		delivered := l.sessionRx.Load()
 		l.event("radio connection lost: " + errText(err))
 
 		l.mu.Lock()
@@ -587,7 +615,30 @@ func (l *Link) supervise(ctx context.Context) {
 			}
 			if err := l.connect(ctx); err == nil {
 				l.reconnects.Add(1)
-				backoff = l.cfg.ReconnectBackoff
+				// Only a session that actually CARRIED something earns a reset.
+				//
+				// Connecting successfully is not evidence of a working link. A
+				// Meshtastic node over TCP will complete the config handshake
+				// and then deliver nothing at all on that session — which is
+				// what a radio does when it has not released the client slots
+				// of a previous connection. Treating that as a fresh healthy
+				// start meant the backoff reset every cycle, so the rx watchdog
+				// closed the dead session, redialled a second later, attached,
+				// and waited out another timeout. Forever.
+				//
+				// Worse, the loop sustained the fault: every redial consumed
+				// another slot on a radio that frees them slowly, so the
+				// watchdog was holding the node in exactly the state it was
+				// trying to escape. Observed on the bench, where the same radio
+				// recovered immediately once left alone for two minutes.
+				//
+				// So a connection that attaches and delivers nothing escalates
+				// like a failure, because that is what it is.
+				if delivered {
+					backoff = l.cfg.ReconnectBackoff
+				} else if backoff *= 2; backoff > maxBackoff {
+					backoff = maxBackoff
+				}
 				break
 			} else {
 				l.event("reconnect failed: " + err.Error())
@@ -701,6 +752,7 @@ func (l *Link) readLoop(ctx context.Context) error {
 		// what this proves is that the radio is still talking to us, and local
 		// telemetry proves that just as well as federation traffic does.
 		l.lastRx.Store(l.clk.Now().UnixNano())
+		l.sessionRx.Store(true)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
