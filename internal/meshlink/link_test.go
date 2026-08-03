@@ -769,3 +769,69 @@ func TestHamModeRefusesAnEncryptedChannel(t *testing.T) {
 		t.Errorf("no Part 97 banner was logged at startup:\n%s", joined)
 	}
 }
+
+// A radio that is briefly unable to accept a connection is not a misconfigured
+// instance, and startup must not report it as one.
+//
+// Taken from the bench, where `mode = "tcp"` could never start at all. A caller
+// reads the radio's configuration to build the airtime governor, closes that
+// connection, and this link immediately opens another. Over a cable the second
+// open is local and instant; over TCP it is a new client session, and Meshtastic
+// firmware had not released the previous one — measured, a reconnect within a
+// second was reset and the same connection succeeded fifteen seconds later.
+func TestFirstConnectionRetriesARadioThatIsNotReady(t *testing.T) {
+	m := newFakeMesh(t)
+	dial := m.addRadio(0xA1, defaultChannels())
+
+	var attempts int
+	l, err := New(Config{
+		Key: nodeKey(t, 1), Channel: "bbsnet", Governor: Unmetered{},
+		Rand: rng.NewSeeded(1), ReconnectBackoff: 5 * time.Millisecond,
+		Dial: func(ctx context.Context) (*meshtastic.Conn, error) {
+			if attempts++; attempts < 3 {
+				return nil, errors.New("connection reset by peer")
+			}
+			return dial(ctx)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+
+	if err := l.Start(context.Background()); err != nil {
+		t.Fatalf("start gave up on a radio that was only busy: %v", err)
+	}
+	if attempts != 3 {
+		t.Errorf("dialled %d times, want 3", attempts)
+	}
+}
+
+// But waiting cannot conjure a channel the node does not have, and §7.1 wants
+// that answer at startup rather than after the retry window. A sysop who typed
+// the channel name wrong should not wait to be told.
+func TestFirstConnectionDoesNotRetryAMisconfiguration(t *testing.T) {
+	m := newFakeMesh(t)
+	l, err := New(Config{
+		Key: nodeKey(t, 1), Channel: "nosuchchannel", Governor: Unmetered{},
+		Rand: rng.NewSeeded(1), ReconnectBackoff: 5 * time.Millisecond,
+		ConnectRetryWindow: time.Hour, // would hang for an hour if retried
+		Dial:               m.addRadio(0xA1, defaultChannels()),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+
+	start := time.Now()
+	err = l.Start(context.Background())
+	if err == nil {
+		t.Fatal("start accepted a channel the radio does not have")
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("took %v to report a misconfiguration; it was retried", took)
+	}
+	if !strings.Contains(err.Error(), "nosuchchannel") {
+		t.Errorf("error does not name the missing channel: %v", err)
+	}
+}
