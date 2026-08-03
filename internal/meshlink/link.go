@@ -971,11 +971,28 @@ func (l *Link) Name() string { return "mesh" }
 // its cursor, and the receiving side simply never saw them. Every bundle this
 // project has ever transmitted over a real mesh was lost this way.
 //
-// Sixteen bytes rather than the six or seven that would just barely do: the
-// exact budget depends on which optional fields the firmware fills in, which is
-// not ours to predict, and a symbol carrying 3% less is worth far more than one
-// that does not arrive.
-const mtuReserve = 16
+// # Why eight and not sixteen
+//
+// Sixteen was the first value, chosen when the only two data points were "233
+// never arrives" and "we need some margin". It worked, and it cost more than it
+// looked like it did: at a reserve of sixteen the symbol payload is 204 bytes,
+// and a bundle carrying a SINGLE record packs to about 212. So every bundle,
+// however small, needed two symbols — and a two-symbol block is not twice as
+// fragile as a one-symbol block, it is worse than that, because both halves
+// must arrive rather than either one.
+//
+// Eight puts the symbol payload at 212 and one-record bundles back into a
+// single symbol, where any one copy that lands decodes them. That is the whole
+// reason for the number: it is not a byte-shaving exercise, it is the boundary
+// between "needs two of three" and "needs one of three" for the commonest
+// bundle on a mesh.
+//
+// It still leaves roughly six bytes of margin against the estimate above, and
+// it is verified rather than reasoned: symbols at this size were transmitted and
+// decoded over real radios before the value was committed. Anything larger
+// should be measured the same way, because the failure mode is not a warning or
+// a truncation — it is total, silent, and looks exactly like a quiet mesh.
+const mtuReserve = 8
 
 // MTU is what a payload may actually be.
 //
