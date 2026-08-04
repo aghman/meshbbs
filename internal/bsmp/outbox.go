@@ -117,7 +117,10 @@ type Outbox struct {
 	// cursor remembers how far each bundle got, so an interrupted
 	// transmission resumes instead of restarting.
 	cursor map[uint32]int
-	stats  Stats
+	// lossRate is the CURRENT estimate, seeded from Config.LossRate and moved
+	// by SetLossRate as the engine observes what is landing (§7.2 item 4).
+	lossRate float64
+	stats    Stats
 }
 
 // Stats are counters for the sysop status screen.
@@ -148,7 +151,7 @@ func NewOutbox(cfg Config) (*Outbox, error) {
 	if cfg.Classify == nil {
 		cfg.Classify = func(record.AreaTag) governor.Class { return governor.ClassForum }
 	}
-	return &Outbox{cfg: cfg, cursor: map[uint32]int{}}, nil
+	return &Outbox{cfg: cfg, cursor: map[uint32]int{}, lossRate: cfg.LossRate}, nil
 }
 
 // SendMessage delivers a small control message (§7.3).
@@ -213,11 +216,15 @@ func (o *Outbox) SendRecords(area record.AreaTag, recs []*record.Record) error {
 		return nil
 	}
 
-	total := enc.K() + fountain.RepairCount(enc.K(), o.cfg.LossRate)
+	o.mu.Lock()
+	loss := o.lossRate
+	o.mu.Unlock()
+
+	total := enc.K() + fountain.RepairCount(enc.K(), loss)
 	if start >= total {
 		// A full transmission already went out and peers are still asking, so
 		// send FURTHER repair symbols rather than repeating ones they have.
-		total = start + fountain.RepairCount(enc.K(), o.cfg.LossRate)
+		total = start + fountain.RepairCount(enc.K(), loss)
 	}
 	if total > maxSymbolsPerBundle {
 		total = maxSymbolsPerBundle
@@ -319,3 +326,40 @@ func bundleIDFor(packed []byte) uint32 {
 	sum := blake3.Sum256(packed)
 	return binary.BigEndian.Uint32(sum[:4])
 }
+
+// SetLossRate updates the repair sizing from what the engine has observed.
+//
+// §7.2 item 4 makes this a governor decision rather than a protocol constant,
+// and the reason is airtime: at K=15 on LongFast, assuming 50% loss on a link
+// that is actually clean sends 50 symbols where 16 would do — six minutes of
+// channel time instead of two, for every peer on the frequency, forever. A
+// pessimistic constant is not a safe default here, it is a standing charge on
+// the commons.
+//
+// Clamped rather than validated, because the caller is a controller reacting to
+// noisy evidence and a transient overshoot should be absorbed, not returned as
+// an error nobody can act on.
+func (o *Outbox) SetLossRate(rate float64) {
+	if rate < 0 {
+		rate = 0
+	}
+	if rate > maxLossRate {
+		rate = maxLossRate
+	}
+	o.mu.Lock()
+	o.lossRate = rate
+	o.mu.Unlock()
+}
+
+// LossRate reports the estimate currently sizing repair symbols.
+func (o *Outbox) LossRate() float64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.lossRate
+}
+
+// maxLossRate caps the estimate. §7.2's own cost table stops at 50%, and past
+// that the repair count climbs steeply for a link that is arguably not usable
+// as a link at all — better to stop paying and let want-repair carry the
+// stragglers than to triple every transmission chasing them.
+const maxLossRate = 0.5
