@@ -54,6 +54,26 @@ type Outbox interface {
 	Budget() link.Budget
 }
 
+// LossAdapter is an optional Outbox capability: an outbox whose repair sizing
+// can be told what the link is actually losing.
+//
+// Optional in the same way ClassSender is, and for the same reason: the
+// simulator and the IP link have no use for it, and requiring it would make
+// every test transport carry a method it will never call.
+type LossAdapter interface {
+	SetLossRate(float64)
+	// LossRate reports what it is using now, so the engine can start from the
+	// same number rather than from zero.
+	//
+	// Seeding matters more than it looks. The outbox begins at its configured
+	// starting point (§7.2: "α starts at the observed mesh loss rate"), and an
+	// engine that began at zero would answer the FIRST missed bundle by pushing
+	// a rate below that seed — a lost bundle making the sender send fewer
+	// repair symbols, which is precisely backwards. Found by probing the
+	// simulator rather than by reading the code.
+	LossRate() float64
+}
+
 // Config tunes the engine's airtime behaviour.
 type Config struct {
 	Schedule ScheduleConfig
@@ -111,6 +131,17 @@ type peerState struct {
 	lastDigest map[record.AreaTag]AreaState
 	// vectors holds full vectors they have sent us, pending reconciliation.
 	vectors map[record.AreaTag]*vv.Vector
+	// awaiting is what this peer's record count for an area should reach
+	// because of a bundle we broadcast while they were behind. Their next
+	// digest settles it either way, which is the feedback §7.2 item 4 asks for:
+	// "peers' high-water marks reveal whether bundles are landing".
+	awaiting map[record.AreaTag]awaitedPush
+}
+
+// awaitedPush is one unanswered question: did that bundle arrive?
+type awaitedPush struct {
+	want uint16
+	at   time.Time
 }
 
 // pendingAsk is a reconciliation step waiting out its suppression window.
@@ -142,6 +173,14 @@ type Engine struct {
 	peers   map[identity.NodeID]*peerState
 	pending []pendingAsk
 
+	// lossEstimate is α (§7.2 item 4): what the link appears to be losing,
+	// inferred from whether peers' high-water marks move after we broadcast.
+	// It sizes repair symbols, which is why it is the engine's business rather
+	// than the transport's — the cost of getting it wrong is airtime spent on
+	// everyone else's channel. Seeded from the outbox so the two never
+	// disagree; see LossAdapter.
+	lossEstimate float64
+
 	// Counters for the sysop status screen and for asserting the airtime
 	// invariant under simulation (§12.3).
 	stats Stats
@@ -149,8 +188,17 @@ type Engine struct {
 
 // Stats reports what the engine has done.
 type Stats struct {
-	DigestsSent       int
-	DigestsHeard      int
+	DigestsSent  int
+	DigestsHeard int
+	// BundlesObserved counts pushes whose fate a peer's next digest settled,
+	// and BundlesMissed how many of those had not arrived.
+	//
+	// Both, because one is not readable without the other. A zero miss count
+	// means "nothing was lost" only if something was observed; on its own it is
+	// equally consistent with a feedback loop that never ran, and those want
+	// opposite responses from whoever is reading the line.
+	BundlesObserved   int
+	BundlesMissed     int
 	DigestsSuppressed int
 	VectorReqsSent    int
 	VectorReqsDropped int // suppressed because the answer arrived first
@@ -171,6 +219,10 @@ func New(self identity.NodeID, store Store, out Outbox, clk clock.Clock, rnd rng
 		rnd:   rnd,
 		cfg:   cfg,
 		peers: map[identity.NodeID]*peerState{},
+	}
+	// Start where the transport already is, not at zero. See LossAdapter.
+	if a, ok := out.(LossAdapter); ok {
+		e.lossEstimate = a.LossRate()
 	}
 	e.sched = NewScheduler(cfg.Schedule, clk, rnd, e.PeerCount)
 	return e
@@ -312,6 +364,7 @@ func (e *Engine) Receive(from identity.NodeID, payload []byte) error {
 			id:         from,
 			lastDigest: map[record.AreaTag]AreaState{},
 			vectors:    map[record.AreaTag]*vv.Vector{},
+			awaiting:   map[record.AreaTag]awaitedPush{},
 		}
 		e.peers[from] = p
 	}
@@ -341,6 +394,7 @@ func (e *Engine) onDigest(p *peerState, payload []byte) error {
 	shared := 0
 	matching := 0
 	for _, a := range d.Areas {
+		e.settleAwaited(p, a)
 		p.lastDigest[a.Tag] = a
 
 		mine := e.store.Vector(a.Tag)
@@ -501,6 +555,7 @@ func (e *Engine) onRangeReq(p *peerState, payload []byte) error {
 		return err
 	}
 	e.stats.RecordsPushed += len(out)
+	e.noteAwaited(req.Area, len(out))
 	// A bundle carries a piggybacked digest, so this counts as having announced
 	// our state (§7.3 mitigation 3).
 	e.NotePiggybacked(e.Digest().Size())
@@ -532,6 +587,7 @@ func (e *Engine) Publish(area record.AreaTag, recs []*record.Record) error {
 		return err
 	}
 	e.stats.RecordsPushed += len(recs)
+	e.noteAwaited(area, len(recs))
 	// A bundle carries a piggybacked digest, so we have announced our state.
 	e.NotePiggybacked(e.Digest().Size())
 	return nil
@@ -546,3 +602,101 @@ func (e *Engine) ApplyRecords(area record.AreaTag, recs []*record.Record) (int, 
 	e.stats.RecordsApplied += n
 	return n, err
 }
+
+// maxSaturatedCount is where AreaState.Count stops counting. A peer already
+// there cannot show us that it gained anything.
+const maxSaturatedCount = 0xFFFF
+
+// noteAwaited records that a peer ought to gain from a bundle we just sent.
+//
+// Only for peers we can actually measure: one whose count we have never heard,
+// or whose count has saturated, tells us nothing when it arrives again, and
+// guessing from silence is how an estimator learns the wrong thing.
+func (e *Engine) noteAwaited(area record.AreaTag, added int) {
+	if added <= 0 {
+		return
+	}
+	now := e.clk.Now()
+	for _, p := range e.peers {
+		last, ok := p.lastDigest[area]
+		if !ok || last.Count >= maxSaturatedCount {
+			continue
+		}
+		want := int(last.Count) + added
+		if want > maxSaturatedCount {
+			want = maxSaturatedCount
+		}
+		p.awaiting[area] = awaitedPush{want: uint16(want), at: now}
+	}
+}
+
+// settleAwaited answers the question a previous broadcast asked of one peer.
+//
+// The signal §7.2 item 4 names: a peer's high-water mark for an area either
+// reached what our bundle should have given it, or it did not. Both outcomes
+// are evidence, and the second is the one that matters — it is the only way a
+// broadcast sender learns that anything was lost, since there are no NACKs in
+// the steady state.
+//
+// # What this measurement is NOT
+//
+// It cannot distinguish our bundle landing from the same records arriving via a
+// third peer, so on a busy mesh it is biased towards optimism. That is the
+// right direction to be wrong in: §7.2's cost table shows an over-estimate of α
+// tripling the airtime bill for every node on the frequency, while an
+// under-estimate costs one straggler a want-repair. Being cheap and slightly
+// too hopeful beats being expensive and certain.
+func (e *Engine) settleAwaited(p *peerState, a AreaState) {
+	w, ok := p.awaiting[a.Tag]
+	if !ok {
+		return
+	}
+	// Their digest is the answer, whatever it says.
+	delete(p.awaiting, a.Tag)
+	e.noteDelivery(a.Count >= w.want)
+}
+
+// Loss-estimate controller constants.
+//
+// A controller rather than an inference, because what the digest cycle gives us
+// is censored: a bundle that landed proves at least K symbols arrived, and one
+// that did not proves fewer, but neither reveals HOW many were lost. Fitting a
+// rate to that is more model than the evidence supports, so this reacts to the
+// outcome instead — climb when bundles are missing, decay when they are not.
+//
+// Asymmetric on purpose. Climbing fast and decaying slowly is the wrong shape
+// here: it settles at a pessimistic estimate that every peer on the channel
+// pays for. §7.2 is explicit that assuming 50% loss on a clean link triples the
+// bill, so the decay is deliberately not much slower than the climb.
+const (
+	lossClimbFactor = 1.5
+	lossClimbFloor  = 0.05 // so an estimate at zero can still leave it
+	lossDecayFactor = 0.92
+	lossCeiling     = 0.5 // §7.2's own cost table stops here
+)
+
+// noteDelivery folds one landed-or-not observation into the estimate.
+func (e *Engine) noteDelivery(landed bool) {
+	before := e.lossEstimate
+	e.stats.BundlesObserved++
+	if landed {
+		e.lossEstimate *= lossDecayFactor
+		if e.lossEstimate < 0.001 {
+			e.lossEstimate = 0
+		}
+	} else {
+		e.lossEstimate = e.lossEstimate*lossClimbFactor + lossClimbFloor
+		if e.lossEstimate > lossCeiling {
+			e.lossEstimate = lossCeiling
+		}
+		e.stats.BundlesMissed++
+	}
+	if e.lossEstimate != before {
+		if a, ok := e.out.(LossAdapter); ok {
+			a.SetLossRate(e.lossEstimate)
+		}
+	}
+}
+
+// LossEstimate reports the loss rate currently sizing repair symbols.
+func (e *Engine) LossEstimate() float64 { return e.lossEstimate }

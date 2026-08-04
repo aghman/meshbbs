@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,6 +108,28 @@ func settle(t *testing.T, links ...*Link) {
 	})
 }
 
+// dropConnectAnnouncements swallows exactly one announcement per link, whenever
+// it actually reaches the mesh.
+//
+// Counting them rather than clearing a filter afterwards is what makes it
+// deterministic. startLink returns once Start has, but a connect-time
+// announcement is still in flight at that moment: the client has written it to
+// the pipe, and the fake radio's read loop delivers it to the mesh from another
+// goroutine. Clearing the filter on the next line therefore races that hop, and
+// a leaked startup announcement teaches a peer something the test believed it
+// could not know. It cost a CI failure on Linux while macOS and Windows won the
+// same race for weeks.
+func dropConnectAnnouncements(m *fakeMesh, links int) {
+	var seen atomic.Int32
+	m.setDrop(func(_ uint32, pkt *meshpb.MeshPacket) bool {
+		payload := pkt.GetDecoded().GetPayload()
+		if len(payload) == 0 || payload[0] != FrameAnnounce {
+			return false
+		}
+		return seen.Add(1) <= int32(links)
+	})
+}
+
 // The baseline: two instances learn each other's radio addresses from signed
 // announcements, then exchange a datagram addressed by node ID. Nothing is
 // configured on either side but the channel name.
@@ -164,12 +187,9 @@ func TestUnattributedSenderIsAskedToIdentifyItself(t *testing.T) {
 	m := newFakeMesh(t)
 	ka, kb := nodeKey(t, 1), nodeKey(t, 2)
 
-	// Swallow announcements while the links come up, so neither side learns
-	// the other the easy way.
-	m.setDrop(func(from uint32, pkt *meshpb.MeshPacket) bool {
-		payload := pkt.GetDecoded().GetPayload()
-		return len(payload) > 0 && payload[0] == FrameAnnounce
-	})
+	// Swallow the connect-time announcements, so neither side learns the other
+	// the easy way. Answers to a who-is still get through.
+	dropConnectAnnouncements(m, 2)
 
 	a := startLink(t, m, ka, 0xA1)
 	b := startLink(t, m, kb, 0xB2)
@@ -177,7 +197,6 @@ func TestUnattributedSenderIsAskedToIdentifyItself(t *testing.T) {
 	if _, ok := b.peers.radioFor(ka.ID()); ok {
 		t.Fatal("b learned a despite the announcement being dropped")
 	}
-	m.setDrop(nil)
 
 	if err := a.Send(context.Background(), link.Broadcast, []byte{FrameSymbol, 0x42}); err != nil {
 		t.Fatalf("send: %v", err)
@@ -217,12 +236,9 @@ func TestDiscoverySurvivesTotalUnicastLoss(t *testing.T) {
 	m := newFakeMesh(t)
 	ka, kb := nodeKey(t, 1), nodeKey(t, 2)
 
-	// Swallow announcements while the links come up, so neither learns the
-	// other the easy way — then leave every direct message dropped for good.
-	m.setDrop(func(from uint32, pkt *meshpb.MeshPacket) bool {
-		payload := pkt.GetDecoded().GetPayload()
-		return len(payload) > 0 && payload[0] == FrameAnnounce
-	})
+	// Swallow the connect-time announcements, so neither learns the other the
+	// easy way — then leave every direct message dropped for good.
+	dropConnectAnnouncements(m, 2)
 
 	a := startLink(t, m, ka, 0xA1)
 	b := startLink(t, m, kb, 0xB2)
@@ -253,14 +269,10 @@ func TestWhoIsForAnotherRadioIsIgnored(t *testing.T) {
 	m := newFakeMesh(t)
 	ka, kb, kc := nodeKey(t, 1), nodeKey(t, 2), nodeKey(t, 3)
 
-	m.setDrop(func(from uint32, pkt *meshpb.MeshPacket) bool {
-		payload := pkt.GetDecoded().GetPayload()
-		return len(payload) > 0 && payload[0] == FrameAnnounce
-	})
+	dropConnectAnnouncements(m, 3)
 	a := startLink(t, m, ka, 0xA1)
 	b := startLink(t, m, kb, 0xB2)
 	c := startLink(t, m, kc, 0xC3)
-	m.setDrop(nil)
 
 	// b asks about a. c hears the question too, and must sit on its hands.
 	beforeA, beforeC := a.Stats().AnnouncesSent, c.Stats().AnnouncesSent
