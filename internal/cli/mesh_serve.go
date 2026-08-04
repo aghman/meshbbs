@@ -290,6 +290,7 @@ func (f *federation) logStatus() {
 		"bundles_decoded", in.Decoded,
 		"records_added", in.RecordsAdded,
 		"loss_estimate", fmt.Sprintf("%.0f%%", f.engine.LossEstimate()*100),
+		"bundles_observed", eng.BundlesObserved,
 		"bundles_missed", eng.BundlesMissed,
 		"rx_symbols", in.Symbols,
 		"rx_duplicates", in.Duplicates,

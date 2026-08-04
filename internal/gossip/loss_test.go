@@ -73,6 +73,11 @@ func TestLossEstimateClimbsWhenBundlesDoNotLand(t *testing.T) {
 	if e.Stats().BundlesMissed != 5 {
 		t.Errorf("BundlesMissed = %d, want 5", e.Stats().BundlesMissed)
 	}
+	// Misses are only readable against observations: zero misses means "nothing
+	// was lost" if and only if something was actually measured.
+	if e.Stats().BundlesObserved != 5 {
+		t.Errorf("BundlesObserved = %d, want 5", e.Stats().BundlesObserved)
+	}
 }
 
 // And it must come back down, which matters more than it sounds: §7.2's cost
@@ -163,6 +168,10 @@ func TestUnmeasurablePeersAreNotGuessedAt(t *testing.T) {
 	}
 	if out.set != 0 {
 		t.Errorf("the estimate moved on no evidence (%d updates)", out.set)
+	}
+	if e.Stats().BundlesObserved != 0 {
+		t.Errorf("counted %d observations from peers that provide none",
+			e.Stats().BundlesObserved)
 	}
 }
 

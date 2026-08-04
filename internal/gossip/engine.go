@@ -190,9 +190,14 @@ type Engine struct {
 type Stats struct {
 	DigestsSent  int
 	DigestsHeard int
-	// BundlesMissed counts broadcasts a peer's next digest showed it had not
-	// received. It is the raw evidence behind LossEstimate, kept separate so a
-	// sysop can tell a climbing estimate from a stuck one.
+	// BundlesObserved counts pushes whose fate a peer's next digest settled,
+	// and BundlesMissed how many of those had not arrived.
+	//
+	// Both, because one is not readable without the other. A zero miss count
+	// means "nothing was lost" only if something was observed; on its own it is
+	// equally consistent with a feedback loop that never ran, and those want
+	// opposite responses from whoever is reading the line.
+	BundlesObserved   int
 	BundlesMissed     int
 	DigestsSuppressed int
 	VectorReqsSent    int
@@ -673,6 +678,7 @@ const (
 // noteDelivery folds one landed-or-not observation into the estimate.
 func (e *Engine) noteDelivery(landed bool) {
 	before := e.lossEstimate
+	e.stats.BundlesObserved++
 	if landed {
 		e.lossEstimate *= lossDecayFactor
 		if e.lossEstimate < 0.001 {
