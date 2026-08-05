@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Using it — meshbbs</title>
+<meta name="description" content="How to use a meshbbs instance: registering and logging in over SSH, forums, encrypted private mail, file areas over SFTP, and door games.">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <header class="pagehead">
+    <div class="eyebrow"><b>02</b> Using it</div>
+    <h1>You already have the client</h1>
+    <p class="lede col">
+      SSH is the front door, and it brings its own conveniences: public-key login means no
+      password to remember, and <strong>SFTP comes free</strong> as the file-area transport. No
+      ZMODEM, no XMODEM, no serial-protocol emulation — a large simplification over legacy BBS
+      software.
+    </p>
+  </header>
+
+  <div class="toc">
+    <span>On this page</span>
+    <a href="#connect">Getting an account</a>
+    <a href="#forums">Forums</a>
+    <a href="#mail">Private mail</a>
+    <a href="#files">File areas</a>
+    <a href="#doors">Door games</a>
+    <a href="#web">Web access</a>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="connect">
+    <div class="eyebrow">Getting in</div>
+    <div class="col prose">
+      <h2>Three ways an account starts</h2>
+      <p>
+        This is the one place SSH is genuinely worse than telnet for a BBS. A classic board lets
+        you connect and type <code>NEW</code> at the login prompt; SSH decides accept-or-reject
+        before any session exists, so there is no prompt to type it at. Registration is handled at
+        the auth layer instead.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-bar" role="tablist" aria-label="Ways to connect">
+        <button role="tab" aria-selected="true"  data-tab="new">ssh new@</button>
+        <button role="tab" aria-selected="false" data-tab="unknown">Unknown nick</button>
+        <button role="tab" aria-selected="false" data-tab="login">Returning</button>
+        <button role="tab" aria-selected="false" data-tab="guest">Guest</button>
+      </div>
+      <div class="term-body">
+<pre data-panel="new"><span class="d">The documented path. `new` is a reserved nick the server</span>
+<span class="d">accepts with any key, or none at all.</span>
+
+<span class="p">$</span> <span class="c">ssh new@bbs.example.com</span>
+
+<span class="d">  ┌──────────────────────────────────────────────┐</span>
+<span class="d">  │</span>  <span class="b">NEW USER REGISTRATION</span>                       <span class="d">│</span>
+<span class="d">  ├──────────────────────────────────────────────┤</span>
+<span class="d">  │</span>  Nick        <span class="c">austin_</span>                        <span class="d">│</span>
+<span class="d">  │</span>  Public key  <span class="g">✓ enrolled from this session</span>    <span class="d">│</span>
+<span class="d">  │</span>  Passphrase  <span class="d">••••••••  (wraps your DM key)</span>   <span class="d">│</span>
+<span class="d">  └──────────────────────────────────────────────┘</span>
+
+<span class="d">  SSH already handed the server your public key, so</span>
+<span class="d">  enrollment is free and your next login is passwordless.</span>
+<span class="d">  Connecting without a key? You set a password instead.</span></pre>
+
+<pre data-panel="unknown" hidden><span class="d">The path people find by accident, and it's nicer than an</span>
+<span class="d">opaque "Permission denied".</span>
+
+<span class="p">$</span> <span class="c">ssh austin@bbs.example.com</span>
+
+<span class="d">  No account here yet under that nick.</span>
+
+    <span class="b">[R]</span> Register as <span class="c">austin</span>
+    <span class="b">[Q]</span> Quit
+
+<span class="d">  ────────────────────────────────────────────────</span>
+<span class="d">  If the nick DOES exist and your key isn't enrolled,</span>
+<span class="d">  you get a different screen — never the signup flow.</span>
+<span class="d">  Offering "register?" to someone whose key merely</span>
+<span class="d">  changed is how you get duplicate accounts.</span></pre>
+
+<pre data-panel="login" hidden><span class="p">$</span> <span class="c">ssh austin@bbs.example.com</span>
+
+<span class="d">  ╔══════════════════════════════════════════════╗</span>
+<span class="d">  ║</span>   <span class="c">fog city bbs</span>  <span class="d">K7QM4X2P…</span>        <span class="g">3 nodes up</span>   <span class="d">║</span>
+<span class="d">  ╚══════════════════════════════════════════════╝</span>
+
+    <span class="b">[F]</span> Forums          <span class="d">12 new in 4 areas</span>
+    <span class="b">[M]</span> Mail            <span class="c">2 unread</span>
+    <span class="b">[D]</span> Doors           <span class="d">3 available</span>
+    <span class="b">[A]</span> File areas      <span class="d">1,204 files network-wide</span>
+    <span class="b">[C]</span> Node chat       <span class="d">nobody around</span>
+    <span class="b">[S]</span> Settings        <span class="d">theme, encoding, keys</span>
+
+  <span class="p">Command:</span> <span class="c">_</span></pre>
+
+<pre data-panel="guest" hidden><span class="p">$</span> <span class="c">ssh guest@bbs.example.com</span>
+
+<span class="d">  Read-only session. No persistent identity.</span>
+<span class="d">  Browse the forums, see what's here, decide later.</span>
+
+    <span class="b">[F]</span> Forums          <span class="d">read-only</span>
+    <span class="b">[A]</span> File areas      <span class="d">read-only</span>
+    <span class="d">[M] Mail            requires an account</span>
+
+  <span class="p">Command:</span> <span class="c">_</span>
+
+<span class="d">  Guest access is a sysop setting and may be off.</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Nicks are local</div>
+        <div class="v"><code>austin@K7QM4X2PB9TFR</code> and <code>austin@M2X9F0QLD4H7A</code> are
+          different people. Registration therefore needs no network coordination at all — no name
+          reservation, no distributed lock, no waiting on a mesh round-trip. A brand-new instance
+          with no radio and no peers can create accounts immediately.</div>
+      </div>
+      <div class="row">
+        <div class="k">Nick rules</div>
+        <div class="v">2–16 characters from <code>[A-Za-z0-9_-]</code>, starting with a letter.
+          Unique within the instance, case-insensitively. Display names are separate and may be
+          richer.</div>
+      </div>
+      <div class="row">
+        <div class="k">Reserved</div>
+        <div class="v"><code>new</code>, <code>guest</code>, <code>sysop</code>, <code>admin</code>,
+          <code>root</code>, <code>bbs</code>, <code>all</code>, <code>postmaster</code>,
+          <code>daemon</code></div>
+      </div>
+      <div class="row">
+        <div class="k">Registration modes</div>
+        <div class="v">Open, approval, invite or closed. The default is open <em>with federated
+          posting withheld</em> — the door is open, the shared airtime is gated. A sysop grants
+          <code>post_federated</code> when they're ready to spend budget on you.</div>
+      </div>
+      <div class="row">
+        <div class="k">Multiple keys</div>
+        <div class="v">Enroll one per client. Your laptop and your phone can both be you.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="forums">
+    <div class="eyebrow">Message bases</div>
+    <div class="col prose">
+      <h2>Forums, and which ones leave the building</h2>
+      <p>
+        Areas — echo areas, conferences, whatever your era called them — are the unit of
+        replication. Each has a name, a description, a moderation policy, and a list of peer nodes
+        it federates with.
+      </p>
+      <p>
+        <strong>New areas default to local-only.</strong> A sysop has to opt in to burning airtime,
+        and at this budget that default is doing real work. A local area never touches the radio
+        no matter how busy it gets.
+      </p>
+      <p>
+        Threading is by parent pointer and the interface rebuilds the tree. Out-of-order arrival is
+        completely normal on a mesh, so a reply whose parent hasn't landed yet renders as
+        <em>parent not yet received</em> and re-parents itself when it turns up — that's expected
+        behaviour, not an error.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="cards">
+      <div class="card">
+        <h3>No merge conflicts</h3>
+        <p>Records are immutable. An edit is a new record pointing at what it supersedes; a delete
+           is a signed tombstone. Two instances can never disagree about what a post says.</p>
+      </div>
+      <div class="card">
+        <h3>Posts are node-signed</h3>
+        <p>"The instance holding key <code>K7QM4X2P…</code> vouches that user austin posted this."
+           That matches the FidoNet trust model — you trust the sysop, and the sysop is
+           accountable.</p>
+      </div>
+      <div class="card">
+        <h3>Per-area airtime shares</h3>
+        <p>One chatty area could otherwise starve every other one. Each federated area gets a slice
+           of the node's allocation, so busy and quiet areas coexist.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="mail">
+    <div class="eyebrow">Private messages</div>
+    <div class="col prose">
+      <h2>Mail the sysop can't read</h2>
+      <p>
+        Private messages are end-to-end encrypted and user-signed. Intermediate BBSes and everyone
+        else on the mesh channel store and forward opaque bytes — subject lines included.
+      </p>
+      <p>
+        Address them <code>nick@NODEID</code>, or <code>nick@alias</code> if your sysop has named
+        the peer. If the destination isn't reachable, mail is held and retried with backoff for
+        seven days before bouncing.
+      </p>
+      <p>
+        Where key custody is concerned there's a genuine tension, and it's worth being straight
+        about: the product is a terminal session, so if the server never holds your key, the server
+        can't render your mail. Three tiers ship in order.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="tablewrap">
+      <table class="text">
+        <thead>
+          <tr><th>Tier</th><th>Who can read your mail at rest</th><th>What it costs you</th><th style="text-align:right">Status</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Server-held</td>
+            <td>The sysop, technically</td>
+            <td>Nothing</td>
+            <td style="text-align:right;font-family:var(--mono);font-size:12px;color:var(--fg-faint)">shipped</td>
+          </tr>
+          <tr class="mark">
+            <td>Passphrase-wrapped</td>
+            <td>Nobody. The server sees your key only in RAM, during a session</td>
+            <td>One passphrase prompt per session</td>
+            <td style="text-align:right;font-family:var(--mono);font-size:12px">default</td>
+          </tr>
+          <tr>
+            <td>Client-held</td>
+            <td>Only you</td>
+            <td>A local helper binary</td>
+            <td style="text-align:right;font-family:var(--mono);font-size:12px;color:var(--fg-faint)">phase 5</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">Stated plainly, because it should be</span>
+      <p>
+        Under the default tier your private key is stored wrapped by a passphrase only you know, so
+        at rest the sysop has ciphertext. But <strong>during a session the plaintext key is in
+        server memory</strong> — unavoidable if the server is the thing drawing the message on your
+        screen. Tier 3 removes even that, at the cost of running a helper locally.
+      </p>
+      <p>
+        Separately: <strong>who you message is not private.</strong> Other sysops can see that you
+        messaged someone and when. That's a deliberate trade — it's what lets an intermediate node
+        bounce undeliverable mail immediately instead of holding it blind.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="files">
+    <div class="eyebrow">File areas</div>
+    <div class="col prose">
+      <h2>You see the whole network's files</h2>
+      <p>
+        File areas work over SFTP or through an in-terminal browser. The blob store is
+        content-addressed, so the same file uploaded to three areas is stored once.
+      </p>
+      <p>
+        Over mesh, <strong>only the catalog replicates</strong>. File records carry name, size,
+        hash, description, tags and which node holds it — 120 to 200 bytes compressed. So you
+        browse the entire network's file list from any instance, and fetching is a separate
+        question with exactly two answers.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">sftp -P 2222 austin@bbs.example.com</span>
+
+<span class="p">sftp&gt;</span> <span class="c">cd /areas/utils</span>
+<span class="p">sftp&gt;</span> <span class="c">put mesh-survey.tar.gz</span>
+<span class="d">Uploading mesh-survey.tar.gz  100%  84KB  84.0KB/s</span>
+
+<span class="d">─────────────────────────────────────────────────────────</span>
+<span class="d">In the file browser, a file held elsewhere is honest</span>
+<span class="d">about it rather than spinning forever:</span>
+
+  <span class="b">ansiart-pack-92.zip</span>   <span class="d">1.2 MB</span>
+  <span class="d">held by</span> <span class="c">pnw</span> <span class="d">(K7QM4X2P…) — no IP route from here</span>
+  <span class="g">queued for next exchange; you'll be notified</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <p>
+        The two fetch paths are a direct IP connection to a holding BBS, or the sneakernet queue —
+        your request is recorded and satisfied at the next bundle exchange, which might be someone
+        walking a USB stick between two sites. There is no third path, and no size threshold below
+        which the mesh will carry bytes.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="doors">
+    <div class="eyebrow">Doors</div>
+    <div class="col prose">
+      <h2>Door games, and the reason to care</h2>
+      <p>
+        A door is any executable in any language. It talks over stdin and stdout with the BBS
+        bridging your terminal, and gets session context — handle, node number, time remaining,
+        terminal size, ANSI capability — through environment variables and a JSON descriptor.
+        Identical on Linux, macOS and Windows.
+      </p>
+      <p>
+        The payoff is <strong>inter-BBS leagues</strong>. Classic BBS culture had LORD wars and
+        TradeWars leagues that exchanged score files over FidoNet; the same federation bus works
+        here, so you can have an inter-BBS door league running over LoRa mesh with no internet
+        involved. That's very nearly free once the sync protocol exists.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <h3>What a door is allowed to do</h3>
+      <p style="font-size:16px;color:var(--fg-dim)">
+        Doors are third-party binaries running on the sysop's machine on your behalf. Three
+        capability levels are always available; the fourth is granted per door and off by default.
+      </p>
+    </div>
+
+    <div class="tablewrap">
+      <table class="text">
+        <thead><tr><th>Level</th><th>What it can do</th><th style="text-align:right">Granted</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>session</code></td>
+            <td>Read context only — handle, node number, time remaining, terminal size. No writes</td>
+            <td style="text-align:right;font-family:var(--mono);font-size:12px">always</td>
+          </tr>
+          <tr>
+            <td><code>state</code></td>
+            <td>A private key/value space scoped to this door and this user, with a quota. No reach
+                across doors or users</td>
+            <td style="text-align:right;font-family:var(--mono);font-size:12px">always</td>
+          </tr>
+          <tr>
+            <td><code>announce</code></td>
+            <td>Post to a designated area <em>as the door itself</em>, never as you — rendered
+                <code>TRADEWARS (door@K7QM4X2P…)</code> so it's attributable and rate-limitable</td>
+            <td style="text-align:right;font-family:var(--mono);font-size:12px">always</td>
+          </tr>
+          <tr class="mark">
+            <td><code>act_as_user</code></td>
+            <td>Post or send mail as you. What makes a league feel native — and also a door
+                impersonating a person</td>
+            <td style="text-align:right;font-family:var(--mono);font-size:12px">sysop grant</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="tnote">
+        Capabilities intersect and never escalate: a door acting as a user who lacks
+        <code>post_federated</code> cannot federate on their behalf. Every level-4 action is
+        audit-logged, and you are told the first time a given door posts as you — a notice, not a
+        log entry you'll never read.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="web">
+    <div class="eyebrow">Web access</div>
+    <div class="col prose">
+      <h2>Not yet</h2>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="planned">
+      <span class="tag">Planned — Phase 5</span>
+      <p>
+        A browser terminal — xterm.js over a WebSocket, running against the same session API as
+        SSH — is on the roadmap. It's good for casual visitors and for showing a board off to
+        someone who won't open a terminal. It is <strong>not built</strong>, and this page won't
+        pretend otherwise.
+      </p>
+      <p>
+        A read-only web view of the forums might follow it. A full web forum interface is an
+        explicit non-goal: SSH is the product.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <h3>Meanwhile, if your client is picky</h3>
+      <p>
+        Telnet exists for the ANSI terminal clients BBS people actually use — SyncTERM, NetRunner,
+        MagiTerm — which are telnet-only. It's <strong>off by default</strong>, and when a sysop
+        enables it both the login banner and the startup log state that credentials cross the wire
+        in plaintext. Guest-only telnet is a supported middle setting and the recommended one:
+        browsing over plaintext costs nothing, typing a password over it does.
+      </p>
+    </div>
+  </section>
+
+  <a class="next" href="protocol.html">
+    <span class="nk">Next</span>
+    <span class="nt">Sync &amp; protocol — how instances agree →</span>
+  </a>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/config.md">Configuration reference</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>
