@@ -99,8 +99,15 @@ type Web struct {
 	// The unauthenticated endpoints are the ones a stranger can reach, and each
 	// attempt costs a database lookup and a hash. These are ceilings on that
 	// work, not the thing making a 64-bit code unguessable.
-	EnrolAttemptsPerHour int `toml:"enrol_attempts_per_hour" default:"10" doc:"Passkey-enrolment code attempts allowed per client per hour. A person typing a code off their SSH session needs two or three; a script guessing codes needs far more. Note that X-Forwarded-For is not trusted, so behind a reverse proxy this becomes one shared allowance."`
-	AuthAttemptsPerHour  int `toml:"auth_attempts_per_hour" default:"60" doc:"Sign-in attempts allowed per client per hour. Looser than enrolment: a passkey prompt that the user dismisses costs an attempt, and that is a normal thing to do more than once."`
+	EnrolAttemptsPerHour int `toml:"enrol_attempts_per_hour" default:"10" doc:"Passkey-enrolment code attempts allowed per client per hour. A person typing a code off their SSH session needs two or three; a script guessing codes needs far more."`
+
+	AuthAttemptsPerHour int `toml:"auth_attempts_per_hour" default:"60" doc:"Sign-in attempts allowed per client per hour. Looser than enrolment: a passkey prompt that the user dismisses costs an attempt, and that is a normal thing to do more than once."`
+
+	// Without this, X-Forwarded-For is ignored entirely — a client sets that
+	// header, so honouring it unconditionally means an attacker sends a fresh
+	// value per request and the limiter counts each separately, which is worse
+	// than no limiter because it looks like protection.
+	TrustedProxies []string `toml:"trusted_proxies" default:"" doc:"IPs or CIDRs of reverse proxies allowed to report the real client via X-Forwarded-For. EMPTY BY DEFAULT, which means the header is ignored and every request is attributed to whatever address it arrived from — correct when nothing sits in front, and it collapses per-client rate limits into one shared allowance when something does. Set this only for proxies you run: any address listed here can claim to be any client."`
 }
 
 // Telnet configures the legacy plaintext front end ([D12]).
@@ -444,7 +451,53 @@ func (c *Config) validateWeb() []string {
 		problems = append(problems, "web.auth_attempts_per_hour must be at least 1: "+
 			"zero would lock everyone out of signing in")
 	}
+
+	// A malformed entry here fails OPEN — the address matches nothing, the
+	// header is ignored, and rate limiting quietly attributes every request to
+	// the proxy. Better to refuse to start than to run in a state the sysop
+	// believes is per-client and is not.
+	for _, p := range c.Web.TrustedProxies {
+		if _, err := parseProxyRange(p); err != nil {
+			problems = append(problems, fmt.Sprintf(
+				"web.trusted_proxies entry %q is not an IP or CIDR: %v", p, err))
+		}
+	}
 	return problems
+}
+
+// parseProxyRange accepts either a bare IP or a CIDR block.
+//
+// Exported behaviour lives in webd; this is here so a bad entry is caught at
+// startup by the same validation that catches every other config mistake
+// (§11.3), rather than at the first request.
+func parseProxyRange(s string) (*net.IPNet, error) {
+	if strings.Contains(s, "/") {
+		_, n, err := net.ParseCIDR(s)
+		return n, err
+	}
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return nil, fmt.Errorf("not an IP address")
+	}
+	// A bare address is a /32 or /128.
+	bits := 8 * net.IPv6len
+	if ip.To4() != nil {
+		ip, bits = ip.To4(), 8*net.IPv4len
+	}
+	return &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, nil
+}
+
+// TrustedProxyRanges returns the parsed proxy allow list. Validate has already
+// rejected anything malformed, so errors here are ignored rather than surfaced
+// twice.
+func (c *Config) TrustedProxyRanges() []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(c.Web.TrustedProxies))
+	for _, p := range c.Web.TrustedProxies {
+		if n, err := parseProxyRange(p); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 func isLoopbackHost(host string) bool {

@@ -120,3 +120,33 @@ func TestWebUnlockedTimeoutIsShorter(t *testing.T) {
 			c.Web.UnlockedIdleTimeoutMins, c.Web.IdleTimeoutMins)
 	}
 }
+
+// TestWebRejectsMalformedProxies — a bad entry here fails OPEN: it matches
+// nothing, the header is ignored, and rate limiting silently attributes every
+// request to the proxy. A sysop who believes their limits are per-client
+// deserves to be told at startup, not to find out never.
+func TestWebRejectsMalformedProxies(t *testing.T) {
+	for _, bad := range []string{"not-an-ip", "10.0.0.0/64", "10.0.0.0/", "example.com"} {
+		c := enabledWeb()
+		c.Web.TrustedProxies = []string{bad}
+		err := c.Validate()
+		if err == nil {
+			t.Errorf("trusted_proxies %q was accepted", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "trusted_proxies") {
+			t.Errorf("error for %q does not name the key: %v", bad, err)
+		}
+	}
+}
+
+func TestWebAcceptsProxyRanges(t *testing.T) {
+	c := enabledWeb()
+	c.Web.TrustedProxies = []string{"10.0.0.0/8", "192.0.2.1", "::1", "fd00::/8"}
+	if err := c.Validate(); err != nil {
+		t.Errorf("valid proxy ranges rejected: %v", err)
+	}
+	if n := len(c.TrustedProxyRanges()); n != 4 {
+		t.Errorf("parsed %d ranges, want 4", n)
+	}
+}
