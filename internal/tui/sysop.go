@@ -191,34 +191,23 @@ func (m Model) loadSysopData() tea.Cmd {
 	}
 }
 
-func (m Model) renderSysop() string {
+func (m Model) buildSysop() Screen {
 	s := m.sysop_
-	var b strings.Builder
 
-	// Tab bar.
-	for i, name := range sysopTabs {
-		if i == s.tab {
-			b.WriteString(m.styles.Selected.Render(" " + name + " "))
-		} else {
-			b.WriteString(m.styles.Muted.Render(" " + name + " "))
-		}
-	}
-	b.WriteString("\n\n")
-
+	blocks := []Block{TabsBlock{Names: sysopTabs, Selected: s.tab}}
 	switch s.tab {
 	case 0:
-		b.WriteString(m.renderSysopUsers())
+		blocks = append(blocks, m.sysopUsersBlocks()...)
 	case 1:
-		b.WriteString(m.renderSysopAreas())
+		blocks = append(blocks, m.sysopAreasBlocks()...)
 	case 2:
-		b.WriteString(m.renderSysopAliases())
+		blocks = append(blocks, m.sysopAliasesBlocks()...)
 	default:
-		b.WriteString(m.renderSysopStatus())
+		blocks = append(blocks, m.sysopStatusBlocks()...)
 	}
 
 	if s.confirm != "" {
 		verb, target, _ := strings.Cut(s.confirm, ":")
-		b.WriteString("\n\n")
 		var q string
 		switch verb {
 		case "grant":
@@ -230,132 +219,118 @@ func (m Model) renderSysop() string {
 		case "unfederate":
 			q = fmt.Sprintf("Make %s local only? Existing posts stay where they already reached.", target)
 		}
-		b.WriteString(m.styles.Error.Width(m.frameWidth()).Render(q + "  [y/N]"))
+		blocks = append(blocks, ConfirmBlock{Question: q, Key: "y"})
 	}
 
-	help := "tab switch · up/down move · q back"
+	help := hints("tab", "switch", "up/down", "move", "q", "back")
 	switch s.tab {
 	case 0:
-		help = "tab switch · up/down move · g toggle federated posting · q back"
+		help = hints("tab", "switch", "up/down", "move", "g", "toggle federated posting", "q", "back")
 	case 1:
-		help = "tab switch · up/down move · f toggle federation · q back"
+		help = hints("tab", "switch", "up/down", "move", "f", "toggle federation", "q", "back")
 	}
-	return m.frame("Sysop", b.String(), help)
+
+	return Screen{Kind: "sysop", Title: "Sysop", Blocks: blocks, Status: m.statusLine(), Help: help}
 }
 
-func (m Model) renderSysopUsers() string {
+func (m Model) sysopUsersBlocks() []Block {
 	s := m.sysop_
-	var b strings.Builder
 	if len(s.users) == 0 {
-		return m.styles.Muted.Render("No accounts.")
+		return []Block{TableBlock{Selected: -1, Empty: "No accounts."}}
 	}
-	b.WriteString(m.styles.Muted.Render(
-		fmt.Sprintf("  %-14s %-8s %-6s %-9s %s", "NICK", "STATE", "SYSOP", "FEDERATED", "MAIL KEY")))
-	b.WriteString("\n")
-	for i, u := range s.users {
-		line := fmt.Sprintf("%-14s %-8s %-6s %-9s %s",
-			truncate(u.Nick, 14), u.State, yesNo(u.IsSysop),
+
+	rows := make([]Row, 0, len(s.users))
+	for _, u := range s.users {
+		rows = append(rows, Row{Cells: []string{
+			u.Nick, u.State, yesNo(u.IsSysop),
 			yesNo(contains(s.caps[u.Nick], store.CapPostFederated)),
-			yesNo(u.DirectoryListed))
-		if i == s.userIdx {
-			b.WriteString(m.styles.Selected.Render("> " + line))
-		} else {
-			b.WriteString(m.styles.Body.Render("  " + line))
-		}
-		b.WriteString("\n")
+			yesNo(u.DirectoryListed),
+		}})
 	}
-	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Width(m.frameWidth()).Render(
-		"Federated posting is withheld from new accounts on purpose: anyone may " +
-			"register and use this BBS, but spending the network's shared airtime is " +
-			"a grant you make deliberately."))
-	return b.String()
+
+	return []Block{
+		TableBlock{
+			Header:   []string{"NICK", "STATE", "SYSOP", "FEDERATED", "MAIL KEY"},
+			Columns:  []Column{{Width: 14}, {Width: 8}, {Width: 6}, {Width: 9}, {}},
+			Rows:     rows,
+			Selected: s.userIdx,
+		},
+		Prose(LevelMuted, "Federated posting is withheld from new accounts on purpose: anyone may "+
+			"register and use this BBS, but spending the network's shared airtime is "+
+			"a grant you make deliberately."),
+	}
 }
 
-func (m Model) renderSysopAreas() string {
+func (m Model) sysopAreasBlocks() []Block {
 	s := m.sysop_
-	var b strings.Builder
-	if len(s.areas) == 0 {
-		return m.styles.Muted.Render("No areas.")
+	rows := make([]Row, 0, len(s.areas))
+	for _, a := range s.areas {
+		rows = append(rows, Row{Cells: []string{a.Name, sanitizeLine(a.Description), a.Scope()}})
 	}
-	for i, a := range s.areas {
-		line := fmt.Sprintf("%-16s %-20s %s",
-			truncate(a.Name, 16), truncate(sanitizeLine(a.Description), 20), a.Scope())
-		if i == s.areaIdx {
-			b.WriteString(m.styles.Selected.Render("> " + line))
-		} else {
-			b.WriteString(m.styles.Body.Render("  " + line))
-		}
-		b.WriteString("\n")
-	}
-	return b.String()
+	return []Block{TableBlock{
+		Columns:  []Column{{Width: 16}, {Width: 20}, {}},
+		Rows:     rows,
+		Selected: s.areaIdx,
+		Empty:    "No areas.",
+	}}
 }
 
-func (m Model) renderSysopAliases() string {
+func (m Model) sysopAliasesBlocks() []Block {
 	s := m.sysop_
-	var b strings.Builder
-	b.WriteString(m.styles.Muted.Width(m.frameWidth()).Render(
-		"Aliases are this BBS's private names for other nodes. They are resolved " +
-			"when a message is composed and never travel on the wire, so another " +
-			"BBS may use the same name for something else."))
-	b.WriteString("\n\n")
-	if len(s.aliases) == 0 {
-		b.WriteString(m.styles.Muted.Render("No aliases. Add one with: meshbbs peer alias <name> <node-id>"))
-		return b.String()
+	rows := make([]Row, 0, len(s.aliases))
+	for _, a := range s.aliases {
+		rows = append(rows, Row{Cells: []string{a.Alias, a.NodeID.String()}})
 	}
-	for i, a := range s.aliases {
-		line := fmt.Sprintf("%-16s %s", truncate(a.Alias, 16), a.NodeID.String())
-		if i == s.aliasIdx {
-			b.WriteString(m.styles.Selected.Render("> " + line))
-		} else {
-			b.WriteString(m.styles.Body.Render("  " + line))
-		}
-		b.WriteString("\n")
+	return []Block{
+		Prose(LevelMuted, "Aliases are this BBS's private names for other nodes. They are resolved "+
+			"when a message is composed and never travel on the wire, so another "+
+			"BBS may use the same name for something else."),
+		TableBlock{
+			Columns:  []Column{{Width: 16}, {}},
+			Rows:     rows,
+			Selected: s.aliasIdx,
+			Empty:    "No aliases. Add one with: meshbbs peer alias <name> <node-id>",
+		},
 	}
-	return b.String()
 }
 
-func (m Model) renderSysopStatus() string {
-	var b strings.Builder
+func (m Model) sysopStatusBlocks() []Block {
 	id := m.cfg.Service.NodeID()
 
-	b.WriteString(m.styles.Heading.Render("Node"))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Body.Render("  " + id.String()))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Render("  " + id.Words()))
-	b.WriteString("\n\n")
-
-	b.WriteString(m.styles.Heading.Render("Sessions"))
-	b.WriteString("\n")
-	if len(m.peers) == 0 {
-		b.WriteString(m.styles.Muted.Render("  nobody connected"))
-		b.WriteString("\n")
-	}
+	peers := make([]Row, 0, len(m.peers))
 	for _, p := range m.peers {
 		who := sanitizeLine(p.Nick)
 		if p.Guest {
 			who += " (guest)"
 		}
-		b.WriteString(m.styles.Body.Render(fmt.Sprintf("  node %-3d %-18s %s",
-			p.Node, truncate(who, 18), sanitizeLine(p.Where))))
-		b.WriteString("\n")
+		peers = append(peers, Row{Cells: []string{
+			fmt.Sprintf("node %d", p.Node), who, sanitizeLine(p.Where),
+		}})
 	}
 
-	b.WriteString("\n")
-	b.WriteString(m.styles.Heading.Render("Counts"))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Body.Render(fmt.Sprintf("  %d accounts · %d areas · %d aliases",
-		len(m.sysop_.users), len(m.sysop_.areas), len(m.sysop_.aliases))))
-	b.WriteString("\n\n")
-
-	// Federation is Phase 2; saying so beats a blank panel or a fake gauge.
-	b.WriteString(m.styles.Muted.Width(m.frameWidth()).Render(
-		"Mesh federation is not built yet (Phase 3). When it is, this panel gains " +
-			"the airtime budget, the observed flood multiplier, and peer high-water marks."))
-	b.WriteString("\n\n")
-	b.WriteString(m.styles.Muted.Render("  local time " + m.clockNow().In(m.location()).Format(time.RFC1123)))
-	return b.String()
+	return []Block{
+		TextBlock{Lines: []Line{
+			{{Text: "Node", Level: LevelHeading}},
+			{{Text: "  " + id.String(), Level: LevelBody}},
+			{{Text: "  " + id.Words(), Level: LevelMuted}},
+		}},
+		TableBlock{
+			Title:    "Sessions",
+			Columns:  []Column{{Width: 8}, {Width: 18}, {}},
+			Rows:     peers,
+			Selected: -1,
+			Empty:    "  nobody connected",
+		},
+		TextBlock{Lines: []Line{
+			{{Text: "Counts", Level: LevelHeading}},
+			{{Text: fmt.Sprintf("  %d accounts · %d areas · %d aliases",
+				len(m.sysop_.users), len(m.sysop_.areas), len(m.sysop_.aliases)), Level: LevelBody}},
+		}},
+		// Federation is Phase 2; saying so beats a blank panel or a fake gauge.
+		Prose(LevelMuted, "Mesh federation is not built yet (Phase 3). When it is, this panel gains "+
+			"the airtime budget, the observed flood multiplier, and peer high-water marks."),
+		Say(LevelMuted, "  local time "+m.clockNow().In(m.location()).Format(time.RFC1123)),
+	}
 }
 
 func yesNo(b bool) string {
