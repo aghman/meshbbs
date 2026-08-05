@@ -113,7 +113,7 @@ func TestSignupCreatesAccountAndEnrolsOfferedKey(t *testing.T) {
 
 	// §6.7 requires the unrecoverable-passphrase warning at signup, in plain
 	// language, before the account exists.
-	s.contains("cannot be undone", "permanently unreadable")
+	s.containsProse("cannot be undone", "permanently unreadable")
 	s.typeRunes("y")
 
 	s.contains("Welcome to the BBS, newbie")
@@ -249,7 +249,7 @@ func TestLeavingClearsThePassphrase(t *testing.T) {
 	if s.model.unlocked {
 		t.Fatal("the session is still marked unlocked after leaving")
 	}
-	if !f.presence.left {
+	if !f.presence.didLeave() {
 		t.Error("presence was not notified of the departure")
 	}
 }

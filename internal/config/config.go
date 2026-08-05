@@ -19,7 +19,8 @@ package config
 
 import (
 	"fmt"
-	"github.com/aghman/meshbbs/internal/governor"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,6 +28,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/aghman/meshbbs/internal/governor"
 )
 
 // Environment gates development-only behaviour (§6.7).
@@ -46,6 +49,7 @@ type Config struct {
 	Node    Node    `toml:"node" doc:"Instance identity and operating environment."`
 	SSH     SSH     `toml:"ssh" doc:"The SSH front end (§5.1)."`
 	Telnet  Telnet  `toml:"telnet" doc:"The legacy plaintext front end, off by default ([D12])."`
+	Web     Web     `toml:"web" doc:"The browser front end, off by default (webui.md [D16])."`
 	Users   Users   `toml:"users" doc:"Registration and account policy (§6.7)."`
 	Theme   Theme   `toml:"theme" doc:"Appearance (§5.4)."`
 	Mesh    Mesh    `toml:"mesh" doc:"The Meshtastic link and the airtime governor (§7.1, §7.6)."`
@@ -59,6 +63,44 @@ type SSH struct {
 	Bind        string `toml:"bind" default:"0.0.0.0" doc:"Address to listen on."`
 	Port        int    `toml:"port" default:"2222" doc:"Port to listen on. 2222 avoids needing root; 22 is conventional for a dedicated host."`
 	MaxSessions int    `toml:"max_sessions" default:"32" doc:"Maximum concurrent sessions."`
+}
+
+// Web configures the browser front end (webui.md).
+//
+// Off by default like telnet, but for the opposite reason: telnet is dangerous
+// when on, whereas this simply needs a hostname and a certificate that only the
+// sysop can supply.
+type Web struct {
+	Enabled bool   `toml:"enabled" default:"false" doc:"Serve the browser front end. Off by default: it needs a public origin and a TLS certificate, which have no sensible defaults."`
+	Bind    string `toml:"bind" default:"0.0.0.0" doc:"Address to listen on."`
+	Port    int    `toml:"port" default:"8443" doc:"Port to listen on. 443 is conventional but needs root."`
+
+	// Origin has no default ON PURPOSE. A passkey is bound to an origin, so a
+	// wrong value here does not degrade — it fails totally, with a browser
+	// error that says nothing about the cause. Better to refuse to start.
+	Origin string `toml:"origin" default:"" doc:"Public origin browsers reach this BBS at, e.g. https://bbs.example.com. REQUIRED when enabled and has no default: passkeys are bound to it, and a mismatch fails every sign-in with an error that does not say why (webui.md §7.1)."`
+
+	TLSCert string `toml:"tls_cert" default:"" doc:"Path to the TLS certificate chain. Required when enabled unless bound to loopback, which browsers treat as a secure context."`
+	TLSKey  string `toml:"tls_key" default:"" doc:"Path to the TLS private key."`
+
+	MaxSessions        int `toml:"max_sessions" default:"64" doc:"Maximum concurrent browser sessions. A public listener with no cap is a file-descriptor exhaustion away from taking SSH down with it."`
+	MaxSessionsPerUser int `toml:"max_sessions_per_user" default:"8" doc:"Maximum concurrent browser sessions for one account."`
+
+	IdleTimeoutMins int `toml:"idle_timeout_mins" default:"30" doc:"Disconnect a browser session idle this long."`
+	// A closing tab is a less reliable goodbye than an SSH connection ending —
+	// a killed tab, a locked phone and a sleeping laptop may send nothing at
+	// all — so for a session holding a mail passphrase in memory the timer is
+	// doing real security work rather than tidying up (webui.md §9).
+	UnlockedIdleTimeoutMins int `toml:"unlocked_idle_timeout_mins" default:"10" doc:"Disconnect a session that has unlocked mail after this much idleness. Shorter than idle_timeout_mins on purpose: such a session holds the passphrase in memory, and a closing browser tab is a far less reliable goodbye than an SSH disconnect (webui.md §9)."`
+	SessionTTLHours         int `toml:"session_ttl_hours" default:"12" doc:"Absolute lifetime of a browser session, however active it is."`
+
+	EnrolmentCodeTTLMins int `toml:"enrolment_code_ttl_mins" default:"10" doc:"How long a passkey-enrolment code stays valid ([D18]). It is read off a terminal and typed into a browser on the same desk, so minutes are generous."`
+
+	// The unauthenticated endpoints are the ones a stranger can reach, and each
+	// attempt costs a database lookup and a hash. These are ceilings on that
+	// work, not the thing making a 64-bit code unguessable.
+	EnrolAttemptsPerHour int `toml:"enrol_attempts_per_hour" default:"10" doc:"Passkey-enrolment code attempts allowed per client per hour. A person typing a code off their SSH session needs two or three; a script guessing codes needs far more. Note that X-Forwarded-For is not trusted, so behind a reverse proxy this becomes one shared allowance."`
+	AuthAttemptsPerHour  int `toml:"auth_attempts_per_hour" default:"60" doc:"Sign-in attempts allowed per client per hour. Looser than enrolment: a passkey prompt that the user dismisses costs an attempt, and that is a normal thing to do more than once."`
 }
 
 // Telnet configures the legacy plaintext front end ([D12]).
@@ -229,6 +271,8 @@ func (c *Config) Validate() error {
 			"theme.default_encoding is %q, want auto, utf8, or cp437", c.Theme.Encoding))
 	}
 
+	problems = append(problems, c.validateWeb()...)
+
 	if c.SSH.Port < 1 || c.SSH.Port > 65535 {
 		problems = append(problems, fmt.Sprintf("ssh.port is %d, want 1-65535", c.SSH.Port))
 	}
@@ -332,6 +376,88 @@ const MaxAirtimeCeilingPct = 15.0
 const HamModeOverridePhrase = "i_accept_part97_responsibility"
 
 // AcceptsPart97Responsibility reports whether the override is properly set.
+// validateWeb checks the browser front end's settings (webui.md §7.1, §10).
+//
+// Every problem here is one that fails at RUN time in a way that does not say
+// what is wrong: a passkey against a mismatched origin produces a bare browser
+// error, and WebAuthn outside a secure context simply does not exist as an API.
+// Catching them at startup is the difference between a config typo and an
+// afternoon.
+func (c *Config) validateWeb() []string {
+	if !c.Web.Enabled {
+		return nil
+	}
+	var problems []string
+
+	if c.Web.Port < 1 || c.Web.Port > 65535 {
+		problems = append(problems, fmt.Sprintf("web.port is %d, want 1-65535", c.Web.Port))
+	}
+	if c.Web.MaxSessions < 1 {
+		problems = append(problems, "web.max_sessions must be at least 1")
+	}
+
+	switch {
+	case c.Web.Origin == "":
+		problems = append(problems, "web.origin is required when web.enabled is true: passkeys are "+
+			"bound to an origin, so there is no safe default (e.g. https://bbs.example.com)")
+	default:
+		u, err := url.Parse(c.Web.Origin)
+		switch {
+		case err != nil:
+			problems = append(problems, fmt.Sprintf("web.origin %q is not a URL: %v", c.Web.Origin, err))
+		case u.Scheme != "https" && !isLoopbackHost(u.Hostname()):
+			// Browsers make localhost a secure context so a sysop can try the
+			// thing out without a certificate. Everywhere else, http means
+			// WebAuthn is simply absent.
+			problems = append(problems, fmt.Sprintf(
+				"web.origin %q must be https: browsers refuse WebAuthn outside a secure context, "+
+					"so passkeys would not work at all (localhost is the only exception)", c.Web.Origin))
+		case u.Path != "" && u.Path != "/":
+			problems = append(problems, fmt.Sprintf(
+				"web.origin %q must be a bare origin with no path", c.Web.Origin))
+		}
+	}
+
+	// A certificate is required unless the listener is loopback-only, where a
+	// browser grants a secure context without one.
+	if !isLoopbackHost(c.Web.Bind) {
+		if c.Web.TLSCert == "" || c.Web.TLSKey == "" {
+			problems = append(problems, "web.tls_cert and web.tls_key are required when serving "+
+				"on a non-loopback address: the web front end is TLS-only")
+		}
+	}
+	if (c.Web.TLSCert == "") != (c.Web.TLSKey == "") {
+		problems = append(problems, "web.tls_cert and web.tls_key must be set together")
+	}
+
+	if c.Web.EnrolmentCodeTTLMins < 1 {
+		problems = append(problems, "web.enrolment_code_ttl_mins must be at least 1")
+	}
+	if c.Web.SessionTTLHours < 1 {
+		problems = append(problems, "web.session_ttl_hours must be at least 1")
+	}
+	if c.Web.EnrolAttemptsPerHour < 1 {
+		problems = append(problems, "web.enrol_attempts_per_hour must be at least 1: "+
+			"zero would lock everyone out of passkey enrolment, not harden it")
+	}
+	if c.Web.AuthAttemptsPerHour < 1 {
+		problems = append(problems, "web.auth_attempts_per_hour must be at least 1: "+
+			"zero would lock everyone out of signing in")
+	}
+	return problems
+}
+
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "localhost", "127.0.0.1", "::1", "[::1]":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
 func (c *Config) AcceptsPart97Responsibility() bool {
 	return strings.TrimSpace(c.Mesh.HamModeOverride) == HamModeOverridePhrase
 }

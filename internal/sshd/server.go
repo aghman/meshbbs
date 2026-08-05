@@ -35,9 +35,15 @@ type Options struct {
 	OpenSignup   bool
 	Themes       *theme.Set
 	DefaultTheme string
-	Clock        clock.Clock
-	Location     *time.Location
-	Logger       *slog.Logger
+	// WebEnabled and WebURL surface the passkey-enrolment path ([D18]). An SSH
+	// session is where a browser credential is bootstrapped from, so the SSH
+	// front end has to know whether there is a browser front end to bootstrap
+	// onto.
+	WebEnabled bool
+	WebURL     string
+	Clock      clock.Clock
+	Location   *time.Location
+	Logger     *slog.Logger
 }
 
 // Server is the SSH front end.

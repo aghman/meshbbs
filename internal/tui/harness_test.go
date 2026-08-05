@@ -5,9 +5,9 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,28 +174,6 @@ func runWithTimeout(cmd tea.Cmd) (tea.Msg, bool) {
 	}
 }
 
-// asCommandSlice reports whether msg is a slice of tea.Cmd, whatever its
-// concrete named type.
-func asCommandSlice(msg tea.Msg) ([]tea.Cmd, bool) {
-	v := reflect.ValueOf(msg)
-	if v.Kind() != reflect.Slice {
-		return nil, false
-	}
-	cmdType := reflect.TypeOf(tea.Cmd(nil))
-	if !v.Type().Elem().AssignableTo(cmdType) {
-		return nil, false
-	}
-	out := make([]tea.Cmd, 0, v.Len())
-	for i := 0; i < v.Len(); i++ {
-		c, ok := v.Index(i).Interface().(tea.Cmd)
-		if !ok {
-			return nil, false
-		}
-		out = append(out, c)
-	}
-	return out, true
-}
-
 // key sends a single keypress, resetting the cascade budget: each user action
 // gets a fresh allowance.
 func (s *session) key(k tea.KeyMsg) *session {
@@ -252,6 +230,23 @@ func (s *session) contains(want ...string) *session {
 	for _, w := range want {
 		if !strings.Contains(v, w) {
 			s.t.Fatalf("screen does not contain %q:\n%s", w, v)
+		}
+	}
+	return s
+}
+
+// containsProse asserts the screen says something, ignoring where it wrapped.
+//
+// Prose is wrapped by the RENDERER now (webui.md §4), so a phrase can land
+// across two lines and a literal substring check fails for a reason that has
+// nothing to do with what the screen says. Layout is the golden frames' job;
+// this is for content.
+func (s *session) containsProse(want ...string) *session {
+	s.t.Helper()
+	flat := strings.Join(strings.Fields(s.view()), " ")
+	for _, w := range want {
+		if !strings.Contains(flat, strings.Join(strings.Fields(w), " ")) {
+			s.t.Fatalf("screen does not say %q:\n%s", w, s.view())
 		}
 	}
 	return s
@@ -403,7 +398,13 @@ func (f *fixture) login(t *testing.T, nick string) *session {
 }
 
 // fakePresence records presence calls without a server.
+//
+// It locks for the same reason the real Presence does: the Driver runs commands
+// in goroutines, as Bubble Tea does, so join() lands on a different goroutine
+// from the test reading the result. The synchronous harness never exposed that,
+// which is exactly the kind of gap `go test -race` exists to find.
 type fakePresence struct {
+	mu     sync.Mutex
 	peers  []Peer
 	joined bool
 	left   bool
@@ -411,10 +412,41 @@ type fakePresence struct {
 }
 
 func (p *fakePresence) Join(id, nick, remote string, guest bool) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.joined = true
 	p.peers = append(p.peers, Peer{Node: len(p.peers) + 1, Nick: nick, Guest: guest, Where: "menu"})
 	return len(p.peers)
 }
-func (p *fakePresence) Leave(id string)              { p.left = true }
-func (p *fakePresence) SetLocation(id, where string) { p.where = where }
-func (p *fakePresence) List() []Peer                 { return p.peers }
+
+func (p *fakePresence) Leave(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.left = true
+}
+
+func (p *fakePresence) SetLocation(id, where string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.where = where
+}
+
+func (p *fakePresence) List() []Peer {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]Peer(nil), p.peers...)
+}
+
+// didJoin and didLeave read the flags under the lock, for tests observing work
+// the driver did on another goroutine.
+func (p *fakePresence) didJoin() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.joined
+}
+
+func (p *fakePresence) didLeave() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.left
+}

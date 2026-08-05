@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -178,45 +177,37 @@ func (m Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) renderChat() string {
-	var b strings.Builder
+func (m Model) buildChat() Screen {
+	var blocks []Block
+	if m.guest {
+		blocks = append(blocks, Say(LevelMuted, "You are a guest — you can read but not speak."))
+	}
+
+	// Every retained line goes out. Windowing it to the rows available is the
+	// renderer's job (webui.md §4) — this used to slice to m.height-10 here,
+	// which meant a browser, which has no rows, inherited a terminal's idea of
+	// how much scrollback exists.
+	entries := make([]ChatEntry, 0, len(m.chatLines))
+	for _, l := range m.chatLines {
+		entries = append(entries, ChatEntry{
+			Time:   l.At.In(m.location()).Format("15:04"),
+			Nick:   sanitizeLine(l.Nick),
+			Text:   sanitizeLine(l.Text),
+			System: l.System,
+		})
+	}
+	blocks = append(blocks, ChatLogBlock{Lines: entries, Empty: "Nobody has said anything yet."})
 
 	if m.guest {
-		b.WriteString(m.styles.Muted.Render("You are a guest — you can read but not speak."))
-		b.WriteString("\n\n")
-	}
-
-	// Show the tail that fits, leaving room for the input line and chrome.
-	visible := m.height - 10
-	if visible < 3 {
-		visible = 3
-	}
-	lines := m.chatLines
-	if len(lines) > visible {
-		lines = lines[len(lines)-visible:]
-	}
-
-	if len(lines) == 0 {
-		b.WriteString(m.styles.Muted.Render("Nobody has said anything yet."))
-		b.WriteString("\n")
-	}
-	for _, l := range lines {
-		ts := l.At.In(m.location()).Format("15:04")
-		if l.System {
-			b.WriteString(m.styles.Muted.Render(fmt.Sprintf("  %s  * %s", ts, sanitizeLine(l.Text))))
-		} else {
-			b.WriteString(m.styles.Body.Render(fmt.Sprintf("  %s  %s: %s",
-				ts, sanitizeLine(l.Nick), sanitizeLine(l.Text))))
-		}
-		b.WriteString("\n")
-	}
-
-	b.WriteString("\n")
-	if m.guest {
-		b.WriteString(m.styles.Muted.Render("(register to join in)"))
+		blocks = append(blocks, Say(LevelMuted, "(register to join in)"))
 	} else {
-		b.WriteString(m.styles.Accent.Render(m.chatInput.Render()))
+		blocks = append(blocks, FormBlock{Fields: []Field{
+			{Name: "say", Label: m.chatInput.prompt, Value: m.chatInput.String(), Active: true},
+		}})
 	}
 
-	return m.frame("Node Chat", b.String(), "type and press enter · esc leave")
+	return Screen{
+		Kind: "chat", Title: "Node Chat", Blocks: blocks, Status: m.statusLine(),
+		Help: hints("type and press enter", "", "esc", "leave"),
+	}
 }

@@ -65,6 +65,7 @@ const (
 	screenSysop
 	screenChat
 	screenNodeInfo
+	screenWebEnrol
 	screenGoodbye
 )
 
@@ -80,6 +81,12 @@ type Config struct {
 	Height    int
 	SessionID string
 	Remote    string
+	// WebEnabled reveals the passkey-enrolment path. The menu item is hidden
+	// when the sysop has not turned the web UI on, because a code that leads
+	// nowhere is worse than no offer at all.
+	WebEnabled bool
+	// WebURL is where the code gets typed, shown alongside it.
+	WebURL    string
 	Intent    Intent
 	Nick      string
 	User      store.User
@@ -141,6 +148,10 @@ type Model struct {
 	sysop_      sysopState
 	chatInput   textInput
 	chatLines   []ChatLine
+	// webCode is a live passkey-enrolment code ([D18]). It is shown once and
+	// held only to keep it on screen; the store keeps nothing but its hash.
+	webCode        string
+	webCodeExpires int64
 
 	quitting bool
 }
@@ -280,6 +291,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case webCodeMsg:
+		m.webCode, m.webCodeExpires = msg.code, msg.expires
+		m.screen = screenWebEnrol
+		return m, nil
+
 	case unlockedMsg:
 		// The passphrase lives only in this session's memory, only while
 		// unlocked, and is cleared on exit (§8.2 tier 2).
@@ -302,45 +318,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// Screen describes what this session is looking at, independent of how it will
+// be drawn (webui.md §2).
+//
+// This is the ONLY way a screen becomes visible. View() goes through it, and so
+// does the web front end — which is what stops a screen from existing over SSH
+// and being quietly missing from the browser.
+func (m Model) Screen() Screen {
+	switch m.screen {
+	case screenSignup:
+		return m.buildSignup()
+	case screenKeyUnknown:
+		return m.buildKeyUnknown()
+	case screenMenu:
+		return m.buildMenu()
+	case screenAreaList:
+		return m.buildAreaList()
+	case screenAreaRead:
+		return m.buildAreaRead()
+	case screenPostCompose:
+		return m.buildCompose()
+	case screenMailList:
+		return m.buildMailList()
+	case screenMailRead:
+		return m.buildMailRead()
+	case screenMailCompose:
+		return m.buildMailCompose()
+	case screenUnlock:
+		return m.buildUnlock()
+	case screenKeySetup:
+		return m.buildKeySetup()
+	case screenWho:
+		return m.buildWho()
+	case screenSysop:
+		return m.buildSysop()
+	case screenChat:
+		return m.buildChat()
+	case screenNodeInfo:
+		return m.buildNodeInfo()
+	case screenWebEnrol:
+		return m.buildWebEnrol()
+	default:
+		return m.buildMenu()
+	}
+}
+
 // View implements tea.Model.
 func (m Model) View() string {
 	if m.quitting {
-		return m.renderGoodbye()
+		// The goodbye is not a screen: there is no frame, no help line and
+		// nothing to navigate. Giving it one would mean a Screen kind that
+		// every renderer has to special-case anyway.
+		return m.styles.Title.Render("\nDisconnecting. Thanks for calling.\n\n")
 	}
-	switch m.screen {
-	case screenSignup:
-		return m.renderSignup()
-	case screenKeyUnknown:
-		return m.renderKeyUnknown()
-	case screenMenu:
-		return m.renderMenu()
-	case screenAreaList:
-		return m.renderAreaList()
-	case screenAreaRead:
-		return m.renderAreaRead()
-	case screenPostCompose:
-		return m.renderCompose()
-	case screenMailList:
-		return m.renderMailList()
-	case screenMailRead:
-		return m.renderMailRead()
-	case screenMailCompose:
-		return m.renderMailCompose()
-	case screenUnlock:
-		return m.renderUnlock()
-	case screenKeySetup:
-		return m.renderKeySetup()
-	case screenWho:
-		return m.renderWho()
-	case screenSysop:
-		return m.renderSysop()
-	case screenChat:
-		return m.renderChat()
-	case screenNodeInfo:
-		return m.renderNodeInfo()
-	default:
-		return m.renderMenu()
-	}
+	r := ansiRenderer{styles: m.styles, width: m.frameWidth(), height: m.height}
+	return r.render(m.Screen())
 }
 
 // leave tears the session down cleanly.

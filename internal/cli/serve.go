@@ -12,6 +12,7 @@ import (
 	"github.com/aghman/meshbbs/internal/sshd"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/aghman/meshbbs/internal/theme"
+	"github.com/aghman/meshbbs/internal/webd"
 	"github.com/spf13/cobra"
 )
 
@@ -110,6 +111,8 @@ Serves SSH on the configured port. Users connect with:
 				OpenSignup:   e.cfg.Users.RegistrationMode == "open",
 				Themes:       themes,
 				DefaultTheme: e.cfg.Theme.Default,
+				WebEnabled:   e.cfg.Web.Enabled,
+				WebURL:       e.cfg.Web.Origin,
 				Clock:        e.clock,
 				Location:     loc,
 				Logger:       log,
@@ -183,6 +186,47 @@ Serves SSH on the configured port. Users connect with:
 				go func() {
 					if err := tel.ListenAndServe(ctx); err != nil {
 						log.Error("telnet server stopped", "err", err)
+					}
+				}()
+			}
+
+			// The web front end runs alongside SSH too. Its settings are
+			// validated at startup (§11.3) precisely because every one of them
+			// fails at run time in a way the browser cannot explain.
+			if e.cfg.Web.Enabled {
+				web, err := webd.NewServer(svc, st, webd.Options{
+					Bind:                    e.cfg.Web.Bind,
+					Port:                    e.cfg.Web.Port,
+					Origin:                  e.cfg.Web.Origin,
+					TLSCert:                 e.cfg.Web.TLSCert,
+					TLSKey:                  e.cfg.Web.TLSKey,
+					DisplayName:             e.cfg.Node.DisplayName,
+					MaxSessions:             e.cfg.Web.MaxSessions,
+					MaxSessionsPerUser:      e.cfg.Web.MaxSessionsPerUser,
+					IdleTimeoutMins:         e.cfg.Web.IdleTimeoutMins,
+					UnlockedIdleTimeoutMins: e.cfg.Web.UnlockedIdleTimeoutMins,
+					SessionTTLHours:         e.cfg.Web.SessionTTLHours,
+					EnrolAttemptsPerHour:    e.cfg.Web.EnrolAttemptsPerHour,
+					AuthAttemptsPerHour:     e.cfg.Web.AuthAttemptsPerHour,
+					// Shared with SSH and telnet, not duplicated: a browser user
+					// gets a node number, shows up in who's-online, and joins the
+					// same chat as everyone else.
+					Presence:  srv.Presence().TUI(),
+					Chat:      srv.Chat(),
+					Themes:    themes,
+					ThemeName: e.cfg.Theme.Default,
+					Clock:     e.clock,
+					Location:  loc,
+					Logger:    log,
+				})
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "  web       %s\n", e.cfg.Web.Origin)
+				fmt.Fprintf(out, "            press P at the SSH menu for a passkey enrolment code\n\n")
+				go func() {
+					if err := web.ListenAndServe(ctx); err != nil {
+						log.Error("web server stopped", "err", err)
 					}
 				}()
 			}

@@ -3,46 +3,22 @@ package tui
 import (
 	"fmt"
 	"strings"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
-// frame wraps a screen with a title bar and status line.
-func (m Model) frame(title string, body string, help string) string {
-	var b strings.Builder
+// This file builds Screen descriptions (webui.md §2). It used to build ANSI
+// strings; everything to do with columns, wrapping and terminal height now
+// lives in render_ansi.go, because none of it is true of a browser.
+//
+// The discipline to hold here: emit whole values and let the renderer decide
+// what fits. A truncate() call in this file is a bug — it bakes an 80-column
+// decision into every front end that will ever exist.
 
-	b.WriteString(m.styles.Title.Render(title))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Render(strings.Repeat("-", minInt(m.frameWidth(), 78))))
-	b.WriteString("\n\n")
-	b.WriteString(body)
-	b.WriteString("\n")
-
-	if m.status != "" {
-		b.WriteString("\n")
-		// WRAP the status, never truncate it. These messages carry the remedy
-		// for whatever just failed — "ask the sysop for the post_federated
-		// capability" is the whole point of the [N7] refusal — and clipping
-		// them at the terminal edge throws away the actionable half.
-		style := m.styles.Success
-		prefix := "* "
-		if m.statusErr {
-			style, prefix = m.styles.Error, "! "
-		}
-		b.WriteString(style.Width(m.frameWidth()).Render(prefix + sanitize(m.status)))
-		b.WriteString("\n")
+// minInt is the smaller of two ints.
+func minInt(a, b int) int {
+	if a < b {
+		return a
 	}
-	if help != "" {
-		b.WriteString("\n")
-		b.WriteString(m.styles.StatusBar.Render(help))
-	}
-
-	// Clamp to the terminal width. §5.4 sets 80x24 as the fallback floor, but
-	// people connect from phones and narrow splits, and a line that overflows
-	// wraps into a garbled second line rather than being merely cut off.
-	// MaxWidth is ANSI-aware, so this truncates visible columns without
-	// severing a colour escape.
-	return lipgloss.NewStyle().MaxWidth(m.frameWidth()).Render(b.String())
+	return b
 }
 
 // frameWidth is the usable width, with a sane floor so a client reporting a
@@ -54,154 +30,150 @@ func (m Model) frameWidth() int {
 	return m.width
 }
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+// statusLine is the transient message, if there is one.
+func (m Model) statusLine() Status {
+	return Status{Text: m.status, IsErr: m.statusErr}
 }
 
-func (m Model) renderMenu() string {
-	var b strings.Builder
+// hints is shorthand for a help line built from key/label pairs.
+func hints(pairs ...string) []KeyHint {
+	out := make([]KeyHint, 0, len(pairs)/2)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		out = append(out, KeyHint{Key: pairs[i], Label: pairs[i+1]})
+	}
+	return out
+}
 
+func (m Model) buildMenu() Screen {
 	who := m.nick
 	if m.guest {
 		who += " (guest, read-only)"
 	}
-	b.WriteString(m.styles.Heading.Render("You are " + who))
+	ident := Line{{Text: "You are " + who, Level: LevelHeading}}
 	if m.nodeNum > 0 {
-		b.WriteString(m.styles.Muted.Render(fmt.Sprintf("  on node %d", m.nodeNum)))
+		ident = append(ident, Span{Text: fmt.Sprintf("  on node %d", m.nodeNum), Level: LevelMuted})
 	}
-	b.WriteString("\n\n")
 
-	items := [][2]string{
+	items := []Choice{
 		{"M", "Message areas — read and post"},
 		{"E", "Electronic mail — your private messages"},
 		{"C", "Chat with everyone online"},
 		{"W", "Who else is online"},
 		{"N", "This node's identity"},
 	}
+	if m.cfg.WebEnabled && !m.guest {
+		items = append(items, Choice{"P", "Passkey for the web — sign in from a browser"})
+	}
 	if m.sysop {
-		items = append(items, [2]string{"S", "Sysop panel"})
+		items = append(items, Choice{"S", "Sysop panel"})
 	}
-	items = append(items, [2]string{"Q", "Quit"})
-	for _, it := range items {
-		b.WriteString("  ")
-		b.WriteString(m.styles.Accent.Render("[" + it[0] + "]"))
-		b.WriteString(" ")
-		b.WriteString(m.styles.Body.Render(it[1]))
-		b.WriteString("\n")
-	}
+	items = append(items, Choice{"Q", "Quit"})
 
+	blocks := []Block{
+		TextBlock{Lines: []Line{ident}},
+		ChoicesBlock{Items: items},
+	}
 	if m.guest {
-		b.WriteString("\n")
-		b.WriteString(m.styles.Muted.Render(
-			"You are browsing as a guest. Run `ssh new@" + "this-bbs` to register."))
-		b.WriteString("\n")
+		blocks = append(blocks, Say(LevelMuted,
+			"You are browsing as a guest. Run `ssh new@this-bbs` to register."))
 	}
 
-	return m.frame("MeshBBS", b.String(), "Press a highlighted letter. Ctrl+C to disconnect.")
+	return Screen{
+		Kind: "menu", Title: "MeshBBS", Blocks: blocks, Status: m.statusLine(),
+		Help: []KeyHint{{Label: "Press a highlighted letter. Ctrl+C to disconnect."}},
+	}
 }
 
-func (m Model) renderAreaList() string {
-	var b strings.Builder
-	if len(m.areas) == 0 {
-		b.WriteString(m.styles.Muted.Render("No message areas yet."))
-	}
-	for i, a := range m.areas {
-		line := fmt.Sprintf("%-16s  %-26s  %s",
-			truncate(a.Name, 16), truncate(sanitizeLine(a.Description), 26), a.Scope())
-		if i == m.areaIdx {
-			b.WriteString(m.styles.Selected.Render("> " + line))
-		} else {
-			b.WriteString(m.styles.Body.Render("  " + line))
-		}
-		b.WriteString("\n")
+func (m Model) buildAreaList() Screen {
+	rows := make([]Row, 0, len(m.areas))
+	for _, a := range m.areas {
+		rows = append(rows, Row{Cells: []string{a.Name, sanitizeLine(a.Description), a.Scope()}})
 	}
 
-	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Render(
-		"\"Local to this BBS\" means posts stay here. \"Federated\" means they travel\n" +
-			"the mesh and spend shared airtime, which needs the post_federated capability."))
-
-	return m.frame("Message Areas", b.String(), "up/down move · enter open · q back")
+	return Screen{
+		Kind: "arealist", Title: "Message Areas", Status: m.statusLine(),
+		Blocks: []Block{
+			TableBlock{
+				Columns:  []Column{{Width: 16}, {Width: 26}, {}},
+				Gap:      2,
+				Rows:     rows,
+				Selected: m.areaIdx,
+				Empty:    "No message areas yet.",
+			},
+			// [N7]'s UI burden: say what "federated" costs, where someone is
+			// deciding which area to post in.
+			Prose(LevelMuted, `"Local to this BBS" means posts stay here. "Federated" means they `+
+				"travel the mesh and spend shared airtime, which needs the post_federated capability."),
+		},
+		Help: hints("up/down", "move", "enter", "open", "q", "back"),
+	}
 }
 
-func (m Model) renderAreaRead() string {
-	area := ""
-	scope := ""
+func (m Model) buildAreaRead() Screen {
+	area, scope := "", ""
 	if len(m.areas) > 0 {
 		area = m.areas[m.areaIdx].Name
 		scope = m.areas[m.areaIdx].Scope()
 	}
 
-	var b strings.Builder
 	// [N7]'s UI burden: state the area's reach so a user who posts and sees
 	// nothing federate is never left guessing.
-	b.WriteString(m.styles.Muted.Render("Scope: " + scope))
-	b.WriteString("\n\n")
-
+	blocks := []Block{Say(LevelMuted, "Scope: "+scope)}
 	if len(m.posts) == 0 {
-		b.WriteString(m.styles.Muted.Render("No posts yet. Press P to write the first one."))
+		blocks = append(blocks, Say(LevelMuted, "No posts yet. Press P to write the first one."))
 	} else {
 		p := m.posts[m.postIdx]
-		b.WriteString(m.styles.Heading.Render(sanitizeLine(p.Subject)))
-		b.WriteString("\n")
-		b.WriteString(m.styles.Muted.Render(fmt.Sprintf("from %s · %s · message %d of %d",
-			sanitizeLine(p.Author),
-			m.at(int64(p.TS), "2006-01-02 15:04"),
-			m.postIdx+1, len(m.posts))))
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Body.Render(sanitize(p.Body)))
+		blocks = append(blocks, ArticleBlock{
+			Heading: sanitizeLine(p.Subject),
+			Meta: fmt.Sprintf("from %s · %s · message %d of %d",
+				sanitizeLine(p.Author), m.at(int64(p.TS), "2006-01-02 15:04"),
+				m.postIdx+1, len(m.posts)),
+			Body: sanitize(p.Body),
+		})
 	}
 
-	return m.frame("Area: "+area, b.String(), "up/down previous·next · p post · q back")
+	return Screen{
+		Kind: "arearead", Title: "Area: " + area, Blocks: blocks, Status: m.statusLine(),
+		Help: hints("up/down", "previous·next", "p", "post", "q", "back"),
+	}
 }
 
-func (m Model) renderCompose() string {
+func (m Model) buildCompose() Screen {
 	c := m.compose
-	var b strings.Builder
-
-	b.WriteString(m.styles.Muted.Render("Posting to " + c.area))
-	b.WriteString("\n\n")
-	b.WriteString(m.fieldLine(c.subject.Render(), c.field == 1))
-	b.WriteString("\n\n")
-	b.WriteString(m.fieldLine(c.body.Render(), c.field == 2))
-
-	return m.frame("New Post", b.String(),
-		"tab next field · ctrl+d post · esc cancel")
+	return Screen{
+		Kind: "postcompose", Title: "New Post", Status: m.statusLine(),
+		Blocks: []Block{
+			Say(LevelMuted, "Posting to "+c.area),
+			FormBlock{Fields: []Field{
+				{Name: "subject", Label: c.subject.prompt, Value: c.subject.String(), Active: c.field == 1},
+				{Name: "body", Label: "", Value: c.body.String(), Active: c.field == 2, Multiline: true},
+			}},
+		},
+		Help: hints("tab", "next field", "ctrl+d", "post", "esc", "cancel"),
+	}
 }
 
-func (m Model) renderMailCompose() string {
+func (m Model) buildMailCompose() Screen {
 	c := m.compose
-	var b strings.Builder
-
-	b.WriteString(m.fieldLine(c.to.Render(), c.field == 0))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Render(
-		"  a nick, or nick@node — node may be an alias your sysop set up"))
-	b.WriteString("\n\n")
-	b.WriteString(m.fieldLine(c.subject.Render(), c.field == 1))
-	b.WriteString("\n\n")
-	b.WriteString(m.fieldLine(c.body.Render(), c.field == 2))
-
-	return m.frame("New Message", b.String(),
-		"tab next field · ctrl+d send · esc cancel")
+	return Screen{
+		Kind: "mailcompose", Title: "New Message", Status: m.statusLine(),
+		Blocks: []Block{
+			FormBlock{Fields: []Field{
+				{
+					Name: "to", Label: c.to.prompt, Value: c.to.String(), Active: c.field == 0,
+					Hint: "  a nick, or nick@node — node may be an alias your sysop set up",
+				},
+				{Name: "subject", Label: c.subject.prompt, Value: c.subject.String(), Active: c.field == 1},
+				{Name: "body", Label: "", Value: c.body.String(), Active: c.field == 2, Multiline: true},
+			}},
+		},
+		Help: hints("tab", "next field", "ctrl+d", "send", "esc", "cancel"),
+	}
 }
 
-func (m Model) fieldLine(s string, active bool) string {
-	if active {
-		return m.styles.Accent.Render(s)
-	}
-	return m.styles.Body.Render(s)
-}
-
-func (m Model) renderMailList() string {
-	var b strings.Builder
-	if len(m.mail) == 0 {
-		b.WriteString(m.styles.Muted.Render("No messages."))
-	}
-	for i, d := range m.mail {
+func (m Model) buildMailList() Screen {
+	rows := make([]Row, 0, len(m.mail))
+	for _, d := range m.mail {
 		flag := " "
 		if d.Unread() {
 			flag = "*"
@@ -209,194 +181,263 @@ func (m Model) renderMailList() string {
 		// The subject is encrypted with the body, so it is genuinely unknown
 		// until the message is opened. Saying so is more honest than showing
 		// a blank column.
-		subject := "(encrypted — press enter to read)"
-		line := fmt.Sprintf("%s %-14s %-34s %s",
-			flag, truncate(sanitizeLine(d.Sender), 14),
-			truncate(subject, 34),
-			m.at(d.SentAt, "01-02 15:04"))
-		if i == m.mailIdx {
-			b.WriteString(m.styles.Selected.Render("> " + line))
-		} else {
-			b.WriteString(m.styles.Body.Render("  " + line))
-		}
-		b.WriteString("\n")
+		rows = append(rows, Row{Cells: []string{
+			flag,
+			sanitizeLine(d.Sender),
+			"(encrypted — press enter to read)",
+			m.at(d.SentAt, "01-02 15:04"),
+		}})
 	}
-	return m.frame("Mail", b.String(), "up/down move · enter read · c compose · q back")
+
+	return Screen{
+		Kind: "maillist", Title: "Mail", Status: m.statusLine(),
+		Blocks: []Block{TableBlock{
+			Columns:  []Column{{Width: 1}, {Width: 14}, {Width: 34}, {}},
+			Rows:     rows,
+			Selected: m.mailIdx,
+			Empty:    "No messages.",
+		}},
+		Help: hints("up/down", "move", "enter", "read", "c", "compose", "q", "back"),
+	}
 }
 
-func (m Model) renderMailRead() string {
+func (m Model) buildMailRead() Screen {
 	if len(m.mail) == 0 {
-		return m.frame("Mail", "", "q back")
+		return Screen{Kind: "mailread", Title: "Mail", Status: m.statusLine(),
+			Help: hints("q", "back")}
 	}
 	d := m.mail[m.mailIdx]
-	var b strings.Builder
-	b.WriteString(m.styles.Heading.Render(sanitizeLine(m.mailSubject)))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Render("from " + sanitizeLine(d.Sender) + " · " +
-		m.at(d.SentAt, "2006-01-02 15:04")))
-	b.WriteString("\n\n")
-	b.WriteString(m.styles.Body.Render(sanitize(m.mailBody)))
-	return m.frame("Message", b.String(), "r reply · any other key back")
-}
-
-func (m Model) renderUnlock() string {
-	var b strings.Builder
-	b.WriteString(m.styles.Body.Render(
-		"Your messages are encrypted with a key that only your passphrase opens."))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Render(
-		"The sysop stores that key encrypted and cannot read your mail without it."))
-	b.WriteString("\n\n")
-	b.WriteString(m.styles.Accent.Render(m.unlockPW.Render()))
-	return m.frame("Unlock Mail", b.String(), "enter unlock · esc back")
-}
-
-func (m Model) renderKeySetup() string {
-	var b strings.Builder
-	b.WriteString(m.styles.Body.Render("You do not have a message key yet."))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Render(
-		"Your private messages are encrypted with a key only your passphrase opens.\n" +
-			"The sysop stores it encrypted and cannot read your mail."))
-	b.WriteString("\n\n")
-	if m.setupIdx == 0 {
-		b.WriteString(m.styles.Accent.Render(m.setupPW.Render()))
-	} else {
-		b.WriteString(m.styles.Muted.Render("Passphrase: " + strings.Repeat("*", len(m.setupPW.String()))))
-		b.WriteString("\n")
-		b.WriteString(m.styles.Accent.Render(m.setupPW2.Render()))
+	return Screen{
+		Kind: "mailread", Title: "Message", Status: m.statusLine(),
+		Blocks: []Block{ArticleBlock{
+			Heading: sanitizeLine(m.mailSubject),
+			Meta:    "from " + sanitizeLine(d.Sender) + " · " + m.at(d.SentAt, "2006-01-02 15:04"),
+			Body:    sanitize(m.mailBody),
+		}},
+		Help: hints("r", "reply", "any other key", "back"),
 	}
-	b.WriteString("\n\n")
-	b.WriteString(m.styles.Error.Render(
-		"If you forget this passphrase your messages become permanently unreadable."))
-	return m.frame("Create Your Message Key", b.String(), "enter continue · esc back")
 }
 
-func (m Model) renderWho() string {
-	var b strings.Builder
-	if len(m.peers) == 0 {
-		b.WriteString(m.styles.Muted.Render("Nobody else is online."))
+func (m Model) buildUnlock() Screen {
+	return Screen{
+		Kind: "unlock", Title: "Unlock Mail", Status: m.statusLine(),
+		Blocks: []Block{
+			TextBlock{Lines: []Line{
+				{{Text: "Your messages are encrypted with a key that only your passphrase opens.", Level: LevelBody}},
+				{{Text: "The sysop stores that key encrypted and cannot read your mail without it.", Level: LevelMuted}},
+			}},
+			FormBlock{Fields: []Field{
+				{Name: "passphrase", Label: m.unlockPW.prompt, Value: m.unlockPW.String(),
+					Masked: true, Active: true},
+			}},
+		},
+		Help: hints("enter", "unlock", "esc", "back"),
 	}
+}
+
+func (m Model) buildKeySetup() Screen {
+	fields := []Field{
+		{Name: "passphrase", Label: m.setupPW.prompt, Value: m.setupPW.String(),
+			Masked: true, Active: m.setupIdx == 0, Done: m.setupIdx != 0},
+	}
+	if m.setupIdx != 0 {
+		fields = append(fields, Field{
+			Name: "confirm", Label: m.setupPW2.prompt, Value: m.setupPW2.String(),
+			Masked: true, Active: true,
+		})
+	}
+
+	return Screen{
+		Kind: "keysetup", Title: "Create Your Message Key", Status: m.statusLine(),
+		Blocks: []Block{
+			TextBlock{Lines: []Line{
+				{{Text: "You do not have a message key yet.", Level: LevelBody}},
+				{{Text: "Your private messages are encrypted with a key only your passphrase opens.", Level: LevelMuted}},
+				{{Text: "The sysop stores it encrypted and cannot read your mail.", Level: LevelMuted}},
+			}},
+			FormBlock{Fields: fields},
+			Say(LevelError, "If you forget this passphrase your messages become permanently unreadable."),
+		},
+		Help: hints("enter", "continue", "esc", "back"),
+	}
+}
+
+func (m Model) buildWho() Screen {
+	rows := make([]Row, 0, len(m.peers))
 	for _, p := range m.peers {
 		who := sanitizeLine(p.Nick)
 		if p.Guest {
 			who += " (guest)"
 		}
-		b.WriteString(m.styles.Body.Render(fmt.Sprintf("  Node %-3d %-20s %s",
-			p.Node, truncate(who, 20), sanitizeLine(p.Where))))
-		b.WriteString("\n")
+		rows = append(rows, Row{Cells: []string{
+			fmt.Sprintf("Node %d", p.Node), who, sanitizeLine(p.Where),
+		}})
 	}
-	return m.frame("Who's Online", b.String(), "any key back")
+
+	return Screen{
+		Kind: "who", Title: "Who's Online", Status: m.statusLine(),
+		Blocks: []Block{TableBlock{
+			Columns:  []Column{{Width: 8}, {Width: 20}, {}},
+			Rows:     rows,
+			Selected: -1,
+			Empty:    "Nobody else is online.",
+		}},
+		Help: hints("any key", "back"),
+	}
 }
 
-func (m Model) renderNodeInfo() string {
+func (m Model) buildNodeInfo() Screen {
 	id := m.cfg.Service.NodeID()
-	var b strings.Builder
-
-	b.WriteString(m.styles.Body.Render("This BBS's identity is derived from its own key."))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Muted.Render("There is no registry — the ID is the key."))
-	b.WriteString("\n\n")
-	b.WriteString(m.styles.Heading.Render("  base32  "))
-	b.WriteString(m.styles.Accent.Render(id.String()))
-	b.WriteString("\n")
-	b.WriteString(m.styles.Heading.Render("  words   "))
-	b.WriteString(m.styles.Accent.Render(id.Words()))
-	b.WriteString("\n\n")
-	b.WriteString(m.styles.Muted.Render(
-		"Read the words aloud when confirming this node over the radio;\n" +
-			"type the base32 form when adding it to a config."))
-
-	return m.frame("Node Identity", b.String(), "any key back")
+	return Screen{
+		Kind: "nodeinfo", Title: "Node Identity", Status: m.statusLine(),
+		Blocks: []Block{
+			TextBlock{Lines: []Line{
+				{{Text: "This BBS's identity is derived from its own key.", Level: LevelBody}},
+				{{Text: "There is no registry — the ID is the key.", Level: LevelMuted}},
+			}},
+			TextBlock{Lines: []Line{
+				{{Text: "  base32  ", Level: LevelHeading}, {Text: id.String(), Level: LevelAccent}},
+				{{Text: "  words   ", Level: LevelHeading}, {Text: id.Words(), Level: LevelAccent}},
+			}},
+			Prose(LevelMuted, "Read the words aloud when confirming this node over the radio; "+
+				"type the base32 form when adding it to a config."),
+		},
+		Help: hints("any key", "back"),
+	}
 }
 
-func (m Model) renderSignup() string {
+func (m Model) buildSignup() Screen {
 	s := m.signup
-	var b strings.Builder
+	var blocks []Block
 
 	switch s.step {
 	case stepNick:
-		b.WriteString(m.styles.Body.Render("Pick a nick. It is unique to this BBS only —"))
-		b.WriteString("\n")
-		b.WriteString(m.styles.Muted.Render("someone else may use the same nick on another node."))
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Accent.Render(s.nick.Render()))
+		blocks = append(blocks,
+			TextBlock{Lines: []Line{
+				{{Text: "Pick a nick. It is unique to this BBS only —", Level: LevelBody}},
+				{{Text: "someone else may use the same nick on another node.", Level: LevelMuted}},
+			}},
+			FormBlock{Fields: []Field{
+				{Name: "nick", Label: s.nick.prompt, Value: s.nick.String(), Active: true},
+			}})
 
 	case stepPassword:
+		intro := TextBlock{}
 		if s.hasKey {
-			b.WriteString(m.styles.Success.Render("Your SSH key will be enrolled automatically."))
-			b.WriteString("\n")
-			b.WriteString(m.styles.Muted.Render("A password is optional — press enter to skip it."))
+			intro.Lines = []Line{
+				{{Text: "Your SSH key will be enrolled automatically.", Level: LevelSuccess}},
+				{{Text: "A password is optional — press enter to skip it.", Level: LevelMuted}},
+			}
 		} else {
-			b.WriteString(m.styles.Body.Render("Choose a password (at least 8 characters)."))
+			intro.Lines = []Line{
+				{{Text: "Choose a password (at least 8 characters).", Level: LevelBody}},
+			}
 		}
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Accent.Render(s.pass.Render()))
+		blocks = append(blocks, intro, FormBlock{Fields: []Field{
+			{Name: "password", Label: s.pass.prompt, Value: s.pass.String(), Masked: true, Active: true},
+		}})
 
 	case stepPasswordConfirm:
-		b.WriteString(m.styles.Body.Render("Type it again."))
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Accent.Render(s.pass2.Render()))
+		blocks = append(blocks,
+			Say(LevelBody, "Type it again."),
+			FormBlock{Fields: []Field{
+				{Name: "password2", Label: s.pass2.prompt, Value: s.pass2.String(), Masked: true, Active: true},
+			}})
 
 	case stepPassphraseChoice:
-		b.WriteString(m.styles.Body.Render(
-			"Your private messages are encrypted with a key of your own."))
-		b.WriteString("\n")
-		b.WriteString(m.styles.Muted.Render(
-			"It is protected by a passphrase. Use your password for that too?"))
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Accent.Render("  [Y] yes, use my password    [N] no, set a separate passphrase"))
+		blocks = append(blocks,
+			TextBlock{Lines: []Line{
+				{{Text: "Your private messages are encrypted with a key of your own.", Level: LevelBody}},
+				{{Text: "It is protected by a passphrase. Use your password for that too?", Level: LevelMuted}},
+			}},
+			Say(LevelAccent, "  [Y] yes, use my password    [N] no, set a separate passphrase"))
 
 	case stepPassphrase:
-		b.WriteString(m.styles.Body.Render("Choose a passphrase for your message key."))
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Accent.Render(s.phrase.Render()))
+		blocks = append(blocks,
+			Say(LevelBody, "Choose a passphrase for your message key."),
+			FormBlock{Fields: []Field{
+				{Name: "passphrase", Label: s.phrase.prompt, Value: s.phrase.String(), Masked: true, Active: true},
+			}})
 
 	case stepPassphraseConfirm:
-		b.WriteString(m.styles.Body.Render("Type it again."))
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Accent.Render(s.phrase2.Render()))
+		blocks = append(blocks,
+			Say(LevelBody, "Type it again."),
+			FormBlock{Fields: []Field{
+				{Name: "passphrase2", Label: s.phrase2.prompt, Value: s.phrase2.String(), Masked: true, Active: true},
+			}})
 
 	case stepAcknowledge:
 		// §6.7 requires this at signup, in plain language — not buried in a
 		// man page. Losing the passphrase is genuinely unrecoverable.
-		b.WriteString(m.styles.Error.Render("Before you finish, one thing that cannot be undone:"))
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Body.Render(
-			"If you forget your passphrase, your private messages become\n" +
-				"permanently unreadable. Not by the sysop, not by anyone. There\n" +
-				"is no reset, and inventing one would defeat the point."))
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Muted.Render(
-			"The sysop can reset your password, but doing so destroys your\n" +
-				"existing mail — they will be warned, and so are you."))
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Accent.Render("  [Y] I understand, create my account    [N] cancel"))
+		blocks = append(blocks,
+			Say(LevelError, "Before you finish, one thing that cannot be undone:"),
+			Prose(LevelBody, "If you forget your passphrase, your private messages become "+
+				"permanently unreadable. Not by the sysop, not by anyone. There "+
+				"is no reset, and inventing one would defeat the point."),
+			Prose(LevelMuted, "The sysop can reset your password, but doing so destroys your "+
+				"existing mail — they will be warned, and so are you."),
+			Say(LevelAccent, "  [Y] I understand, create my account    [N] cancel"))
 	}
 
 	if s.err != "" {
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Error.Render("! " + s.err))
+		blocks = append(blocks, Say(LevelError, "! "+s.err))
 	}
 
-	return m.frame("New User Registration", b.String(), "esc to disconnect")
+	return Screen{
+		Kind: "signup", Title: "New User Registration", Blocks: blocks, Status: m.statusLine(),
+		Help: []KeyHint{{Key: "esc", Label: "to disconnect"}},
+	}
 }
 
-func (m Model) renderKeyUnknown() string {
-	var b strings.Builder
-	b.WriteString(m.styles.Error.Render("That account exists, but this key is not enrolled on it."))
-	b.WriteString("\n\n")
-	b.WriteString(m.styles.Body.Render(sanitize(m.cfg.AuthNote)))
-	b.WriteString("\n\n")
-	b.WriteString(m.styles.Muted.Render(
-		"If this is your account, reconnect with a password:\n" +
-			"    ssh -o PreferredAuthentications=password " + sanitizeLine(m.cfg.Nick) + "@this-bbs\n\n" +
-			"You can enrol this key once you are logged in.\n\n" +
-			"If you meant to register a NEW account, pick a different name:\n" +
-			"    ssh new@this-bbs"))
-	return m.frame("Key Not Recognised", b.String(), "any key to disconnect")
+// buildWebEnrol shows a live passkey-enrolment code ([D18]).
+//
+// The screen has one job beyond displaying the code: making its authority
+// legible. A user who is told "here is a code, type it into a website" has been
+// handed something that looks exactly like a password, and will treat it like
+// one — so the screen says what it can and cannot do, in those words.
+func (m Model) buildWebEnrol() Screen {
+	where := m.cfg.WebURL
+	if where == "" {
+		where = "this BBS's web address"
+	}
+
+	return Screen{
+		Kind: "webenrol", Title: "Passkey Enrolment", Status: m.statusLine(),
+		Blocks: []Block{
+			Lines(LevelBody,
+				"Open "+where+" in a browser and enter this code to add a passkey",
+				"to your account. After that the passkey signs you in on its own."),
+			TextBlock{Lines: []Line{
+				{{Text: "  code   ", Level: LevelHeading}, {Text: m.webCode, Level: LevelAccent}},
+				{{Text: "  until  ", Level: LevelHeading},
+					{Text: m.at(m.webCodeExpires, "15:04:05"), Level: LevelAccent}},
+			}},
+			// Saying this plainly is the point. The code looks like a password
+			// and is not one, and a user who believes otherwise will guard it
+			// like a password — or worse, reuse the habit somewhere it matters.
+			Prose(LevelMuted, "This code can only add a passkey. It cannot log anyone in, it works "+
+				"once, and asking for another cancels this one."),
+			Say(LevelMuted, "It expires in ten minutes. Press P again for a fresh one."),
+		},
+		Help: hints("any key", "back"),
+	}
 }
 
-func (m Model) renderGoodbye() string {
-	return m.styles.Title.Render("\nDisconnecting. Thanks for calling.\n\n")
+func (m Model) buildKeyUnknown() Screen {
+	return Screen{
+		Kind: "keyunknown", Title: "Key Not Recognised", Status: m.statusLine(),
+		Blocks: []Block{
+			Say(LevelError, "That account exists, but this key is not enrolled on it."),
+			Say(LevelBody, sanitize(m.cfg.AuthNote)),
+			// These breaks are load-bearing: re-wrapping the ssh invocation
+			// would print a command that does not work.
+			Lines(LevelMuted, strings.Split(
+				"If this is your account, reconnect with a password:\n"+
+					"    ssh -o PreferredAuthentications=password "+sanitizeLine(m.cfg.Nick)+"@this-bbs\n\n"+
+					"You can enrol this key once you are logged in.\n\n"+
+					"If you meant to register a NEW account, pick a different name:\n"+
+					"    ssh new@this-bbs", "\n")...),
+		},
+		Help: hints("any key", "to disconnect"),
+	}
 }

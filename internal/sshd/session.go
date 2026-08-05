@@ -65,27 +65,29 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 	}
 
 	model := tui.New(tui.Config{
-		Service:   s.svc,
-		Store:     s.store,
-		Presence:  presenceAdapter{s.presence},
-		Chat:      s.chat,
-		Clock:     s.opts.Clock,
-		Location:  s.opts.Location,
-		Themes:    s.opts.Themes,
-		ThemeName: s.opts.DefaultTheme,
-		Encoding:  encoding,
-		Width:     width,
-		Height:    height,
-		SessionID: sess.Context().SessionID(),
-		Remote:    sess.RemoteAddr().String(),
-		Intent:    tui.Intent(d.Intent),
-		Nick:      d.Nick,
-		User:      d.User,
-		PublicKey: d.PublicKey,
-		KeyFP:     d.Fingerprint,
-		AuthNote:  d.Reason,
-		Logger:    s.log,
-		Ctx:       context.Background(),
+		Service:    s.svc,
+		Store:      s.store,
+		Presence:   presenceAdapter{s.presence},
+		Chat:       s.chat,
+		Clock:      s.opts.Clock,
+		Location:   s.opts.Location,
+		Themes:     s.opts.Themes,
+		ThemeName:  s.opts.DefaultTheme,
+		Encoding:   encoding,
+		Width:      width,
+		Height:     height,
+		SessionID:  sess.Context().SessionID(),
+		Remote:     sess.RemoteAddr().String(),
+		WebEnabled: s.opts.WebEnabled,
+		WebURL:     s.opts.WebURL,
+		Intent:     tui.Intent(d.Intent),
+		Nick:       d.Nick,
+		User:       d.User,
+		PublicKey:  d.PublicKey,
+		KeyFP:      d.Fingerprint,
+		AuthNote:   d.Reason,
+		Logger:     s.log,
+		Ctx:        context.Background(),
 	})
 
 	_ = winCh
@@ -95,6 +97,14 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 		tea.WithAltScreen(),
 	)
 }
+
+// TUI adapts the tracker to the interface the session layer needs.
+//
+// Exported so the WEB front end joins this same tracker rather than starting a
+// parallel one. That is what puts a browser user in [W] Who's Online next to
+// everyone else, and it is most of what makes the web feel like part of the BBS
+// instead of an adjacent website (webui.md §9).
+func (p *Presence) TUI() tui.PresenceTracker { return presenceAdapter{p} }
 
 // presenceAdapter adapts the server's Presence to the interface the TUI needs,
 // so the tui package does not import sshd (which would be a cycle).

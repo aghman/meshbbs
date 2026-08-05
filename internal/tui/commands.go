@@ -2,7 +2,9 @@ package tui
 
 import (
 	"errors"
+	"time"
 
+	"github.com/aghman/meshbbs/internal/auth"
 	"github.com/aghman/meshbbs/internal/keyring"
 	"github.com/aghman/meshbbs/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
@@ -124,6 +126,45 @@ func (m Model) tryUnlock(passphrase string) tea.Cmd {
 			return statusMsg{text: err.Error(), isErr: true}
 		}
 		return unlockedMsg{passphrase: passphrase}
+	}
+}
+
+// webCodeTTL is how long a passkey-enrolment code stays live.
+//
+// Short on purpose. The code is read off this terminal and typed into a browser
+// that is usually on the same desk, so minutes are generous; the window is the
+// only thing standing between a code left on a screen and somebody else's
+// passkey on the account.
+const webCodeTTL = 10 * time.Minute
+
+type webCodeMsg struct {
+	code    string
+	expires int64
+}
+
+// issueWebCode mints a passkey-enrolment code for this session's account
+// ([D18]).
+//
+// The authority this grants is narrow and must stay that way: the code
+// registers a credential and cannot log anybody in. This session already proved
+// account ownership, and the code carries exactly that proof to a browser —
+// nothing more.
+func (m Model) issueWebCode() tea.Cmd {
+	return func() tea.Msg {
+		if m.guest {
+			return statusMsg{text: "Guests have no account to enrol. Register with `ssh new@` first.", isErr: true}
+		}
+		code, hash, err := auth.NewEnrolmentCode()
+		if err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+		expires := m.clockNow().Add(webCodeTTL).Unix()
+		if err := m.cfg.Store.PutEnrolmentCode(m.ctx, m.nick, hash, expires); err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+		m.cfg.Logger.Info("passkey enrolment code issued",
+			"nick", m.nick, "remote", m.cfg.Remote, "expires_at", expires)
+		return webCodeMsg{code: code, expires: expires}
 	}
 }
 
