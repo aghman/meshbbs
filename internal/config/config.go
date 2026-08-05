@@ -95,6 +95,12 @@ type Web struct {
 	SessionTTLHours         int `toml:"session_ttl_hours" default:"12" doc:"Absolute lifetime of a browser session, however active it is."`
 
 	EnrolmentCodeTTLMins int `toml:"enrolment_code_ttl_mins" default:"10" doc:"How long a passkey-enrolment code stays valid ([D18]). It is read off a terminal and typed into a browser on the same desk, so minutes are generous."`
+
+	// The unauthenticated endpoints are the ones a stranger can reach, and each
+	// attempt costs a database lookup and a hash. These are ceilings on that
+	// work, not the thing making a 64-bit code unguessable.
+	EnrolAttemptsPerHour int `toml:"enrol_attempts_per_hour" default:"10" doc:"Passkey-enrolment code attempts allowed per client per hour. A person typing a code off their SSH session needs two or three; a script guessing codes needs far more. Note that X-Forwarded-For is not trusted, so behind a reverse proxy this becomes one shared allowance."`
+	AuthAttemptsPerHour  int `toml:"auth_attempts_per_hour" default:"60" doc:"Sign-in attempts allowed per client per hour. Looser than enrolment: a passkey prompt that the user dismisses costs an attempt, and that is a normal thing to do more than once."`
 }
 
 // Telnet configures the legacy plaintext front end ([D12]).
@@ -429,6 +435,14 @@ func (c *Config) validateWeb() []string {
 	}
 	if c.Web.SessionTTLHours < 1 {
 		problems = append(problems, "web.session_ttl_hours must be at least 1")
+	}
+	if c.Web.EnrolAttemptsPerHour < 1 {
+		problems = append(problems, "web.enrol_attempts_per_hour must be at least 1: "+
+			"zero would lock everyone out of passkey enrolment, not harden it")
+	}
+	if c.Web.AuthAttemptsPerHour < 1 {
+		problems = append(problems, "web.auth_attempts_per_hour must be at least 1: "+
+			"zero would lock everyone out of signing in")
 	}
 	return problems
 }

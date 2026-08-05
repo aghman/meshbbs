@@ -361,8 +361,35 @@ is enforced by the platform rather than by policy — but the config should refu
 plaintext listener on a non-loopback bind anyway, so the failure arrives at startup with an
 explanation instead of in a browser console.
 
-**Rate limiting.** The existing `auth_attempts_per_ip_per_hour` and `registrations_per_ip_per_day`
-(§11.5) apply unchanged. `max_sessions` needs a web equivalent for the same reason telnet has one
+**Rate limiting.** §11.5 lists `auth_attempts_per_ip_per_hour` and `registrations_per_ip_per_day`
+as Phase 1 config. **Neither is implemented** — they are planned keys, not existing machinery — so
+the web front end carries its own: `web.enrol_attempts_per_hour` (default 10) and
+`web.auth_attempts_per_hour` (default 60), as token buckets per client.
+
+What the limit is *for* is worth being precise about, because it is easy to overstate. It is not
+what makes a 64-bit code unguessable — the code already is, and no rate limit would rescue it if it
+were not. It does two narrower jobs: it gives `[D18]`'s "every guess costs the guesser" something to
+bite on beyond spending the code at ceremony start, and it puts a ceiling on unauthenticated work,
+since every attempt is a database lookup and a hash.
+
+Enrolment is the tighter of the two, and there is a test asserting it stays that way — it is where
+codes are tested, and inheriting sign-in's looser ceiling would be a silent regression.
+
+The limiter runs **before** redemption. If it ran after, an attacker could burn a victim's live
+code by spamming the endpoint without ever guessing it — turning the defence into a denial of
+service against the exact operation the code exists for.
+
+**`X-Forwarded-For` is not trusted**, and the cost of that is real enough to state rather than bury.
+A client sets the header, so honouring it means an attacker sends a different value per request and
+each is counted separately — which is worse than having no limiter, because it looks like
+protection and provides none. The price is that behind a TLS-terminating reverse proxy every request
+arrives from the proxy and the per-client buckets collapse into one shared allowance. An
+instance-wide ceiling (20× the per-client rate) means such a deployment still has a bound; it is set
+generously because a global cap is itself a denial-of-service lever. **A trusted-proxy list is the
+proper fix and is not built** — a sysop terminating TLS elsewhere should know the per-client limit
+is not doing what its name suggests.
+
+`max_sessions` covers the other exhaustion path, for the same reason telnet has one
 (`telnet.go:133`): a public listener with no cap is a file-descriptor exhaustion away from taking
 SSH down with it.
 

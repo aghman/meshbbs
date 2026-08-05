@@ -45,8 +45,10 @@ Generated from the source. Do not edit by hand.
 | `users.default_directory_listed` | bool | `true` | `MESHBBS_USERS_DEFAULT_DIRECTORY_LISTED` | Whether new users are listed in the network directory ([N9]). |
 | `users.guest_enabled` | bool | `true` | `MESHBBS_USERS_GUEST_ENABLED` | Allow anonymous read-only access via ssh guest@. |
 | `users.registration_mode` | string | `open` | `MESHBBS_USERS_REGISTRATION_MODE` | open, approval, invite, or closed. Default 'open' with federated posting withheld: the door is open, the shared airtime is gated ([N7]). |
+| `web.auth_attempts_per_hour` | int | `60` | `MESHBBS_WEB_AUTH_ATTEMPTS_PER_HOUR` | Sign-in attempts allowed per client per hour. Looser than enrolment: a passkey prompt that the user dismisses costs an attempt, and that is a normal thing to do more than once. |
 | `web.bind` | string | `0.0.0.0` | `MESHBBS_WEB_BIND` | Address to listen on. |
 | `web.enabled` | bool | `false` | `MESHBBS_WEB_ENABLED` | Serve the browser front end. Off by default: it needs a public origin and a TLS certificate, which have no sensible defaults. |
+| `web.enrol_attempts_per_hour` | int | `10` | `MESHBBS_WEB_ENROL_ATTEMPTS_PER_HOUR` | Passkey-enrolment code attempts allowed per client per hour. A person typing a code off their SSH session needs two or three; a script guessing codes needs far more. Note that X-Forwarded-For is not trusted, so behind a reverse proxy this becomes one shared allowance. |
 | `web.enrolment_code_ttl_mins` | int | `10` | `MESHBBS_WEB_ENROLMENT_CODE_TTL_MINS` | How long a passkey-enrolment code stays valid ([D18]). It is read off a terminal and typed into a browser on the same desk, so minutes are generous. |
 | `web.idle_timeout_mins` | int | `30` | `MESHBBS_WEB_IDLE_TIMEOUT_MINS` | Disconnect a browser session idle this long. |
 | `web.max_sessions` | int | `64` | `MESHBBS_WEB_MAX_SESSIONS` | Maximum concurrent browser sessions. A public listener with no cap is a file-descriptor exhaustion away from taking SSH down with it. |

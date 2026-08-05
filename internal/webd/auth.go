@@ -19,6 +19,12 @@ import (
 // credential belongs to this site and hands back the user handle, which is
 // most of why the browser path is less work than SSH rather than more ([D17]).
 func (s *Server) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
+	// Unauthenticated, and it allocates ceremony state — so it is bounded even
+	// though nothing here can be guessed.
+	if s.rateLimited(w, r, s.authLimit, s.authGlobal, "login/begin") {
+		return
+	}
+
 	options, sessionData, err := s.wa.BeginDiscoverableLogin()
 	if err != nil {
 		s.log.Error("begin login", "err", err)
@@ -37,6 +43,12 @@ func (s *Server) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
 
 // handleLoginFinish verifies an assertion and opens a session.
 func (s *Server) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
+	// Verifying an assertion is the expensive half of signing in, so it carries
+	// the same ceiling as beginning one.
+	if s.rateLimited(w, r, s.authLimit, s.authGlobal, "login/finish") {
+		return
+	}
+
 	cer, ok := s.takeCeremony(w, r)
 	if !ok {
 		httpError(w, http.StatusBadRequest, "that sign-in attempt expired — try again")
@@ -124,6 +136,12 @@ func (s *Server) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 // deliberate trade — the remedy is pressing P on the SSH session again, which
 // takes seconds.
 func (s *Server) handleEnrolBegin(w http.ResponseWriter, r *http.Request) {
+	// The strictest limit on the server. This is where a code is tested, and
+	// where [D18]'s "every guess costs the guesser" has to actually bite.
+	if s.rateLimited(w, r, s.enrolLimit, s.enrolGlobal, "enrol/begin") {
+		return
+	}
+
 	var body struct {
 		Code string `json:"code"`
 	}
@@ -206,6 +224,10 @@ func (s *Server) handleEnrolBegin(w http.ResponseWriter, r *http.Request) {
 // from a code to a session — and has the practical benefit of proving the
 // credential works before they walk away from the terminal that minted it.
 func (s *Server) handleEnrolFinish(w http.ResponseWriter, r *http.Request) {
+	if s.rateLimited(w, r, s.enrolLimit, s.enrolGlobal, "enrol/finish") {
+		return
+	}
+
 	cer, ok := s.takeCeremony(w, r)
 	if !ok || cer.Nick == "" {
 		httpError(w, http.StatusBadRequest, "that enrolment expired — press P on your SSH session for a new code")

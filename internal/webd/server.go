@@ -39,6 +39,9 @@ type Options struct {
 
 	DisplayName string
 
+	EnrolAttemptsPerHour int
+	AuthAttemptsPerHour  int
+
 	MaxSessions             int
 	MaxSessionsPerUser      int
 	IdleTimeoutMins         int
@@ -70,6 +73,14 @@ type Server struct {
 	sessions   *sessionStore
 	ceremonies *ceremonyStore
 
+	// Per-client and instance-wide ceilings on the unauthenticated endpoints.
+	// The global pair exists because X-Forwarded-For is not trusted, so behind
+	// a reverse proxy the per-client buckets collapse into one (limiter.go).
+	enrolLimit  *limiter
+	authLimit   *limiter
+	enrolGlobal *limiter
+	authGlobal  *limiter
+
 	http  *http.Server
 	ready chan struct{}
 }
@@ -97,6 +108,12 @@ func NewServer(svc *bbs.Service, st *store.Store, opts Options) (*Server, error)
 	}
 	if opts.ThemeName == "" {
 		opts.ThemeName = theme.DefaultName
+	}
+	if opts.EnrolAttemptsPerHour < 1 {
+		opts.EnrolAttemptsPerHour = 10
+	}
+	if opts.AuthAttemptsPerHour < 1 {
+		opts.AuthAttemptsPerHour = 60
 	}
 	if opts.Chat == nil {
 		// A web-only instance still has node chat; it just has it to itself.
@@ -129,7 +146,12 @@ func NewServer(svc *bbs.Service, st *store.Store, opts Options) (*Server, error)
 		wa:         wa,
 		sessions:   newSessionStore(opts.Clock, opts),
 		ceremonies: newCeremonyStore(opts.Clock),
-		ready:      make(chan struct{}),
+
+		enrolLimit:  newLimiter(opts.Clock, opts.EnrolAttemptsPerHour),
+		authLimit:   newLimiter(opts.Clock, opts.AuthAttemptsPerHour),
+		enrolGlobal: newLimiter(opts.Clock, opts.EnrolAttemptsPerHour*globalLimitFactor),
+		authGlobal:  newLimiter(opts.Clock, opts.AuthAttemptsPerHour*globalLimitFactor),
+		ready:       make(chan struct{}),
 	}
 
 	sub, err := fs.Sub(staticFS, "static")
