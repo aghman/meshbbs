@@ -64,8 +64,17 @@ func main() {
 			return err
 		}
 		if d.IsDir() {
+			// Skip dot-directories outright rather than just .git. A git
+			// worktree checked out under .claude/worktrees/ is a second full
+			// copy of the repo, and walking into it reports every exempt
+			// package (internal/clock, internal/rng) as a violation: the
+			// exemption is a path prefix, and the copy's paths are nested.
+			// The walk root itself may be "." — never skip that.
 			base := d.Name()
-			if base == ".git" || base == "vendor" || base == "testdata" {
+			if path != root && strings.HasPrefix(base, ".") {
+				return fs.SkipDir
+			}
+			if base == "vendor" || base == "testdata" || base == "node_modules" {
 				return fs.SkipDir
 			}
 			return nil
