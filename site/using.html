@@ -25,10 +25,10 @@
     <div class="eyebrow"><b>02</b> Using it</div>
     <h1>You already have the client</h1>
     <p class="lede col">
-      SSH is the front door, and it brings its own conveniences: public-key login means no
-      password to remember, and <strong>SFTP comes free</strong> as the file-area transport. No
-      ZMODEM, no XMODEM, no serial-protocol emulation — a large simplification over legacy BBS
-      software.
+      Two front doors onto one BBS. <strong>SSH</strong> brings its own conveniences — public-key
+      login means no password to remember, and SFTP comes free as the file-area transport. A
+      <strong>browser</strong> reaches the same screens, the same menu graph and the same people,
+      rendered for a screen that can wrap text instead of an 80-column grid.
     </p>
   </header>
 
@@ -52,6 +52,11 @@
         you connect and type <code>NEW</code> at the login prompt; SSH decides accept-or-reject
         before any session exists, so there is no prompt to type it at. Registration is handled at
         the auth layer instead.
+      </p>
+      <p>
+        On the web it inverts — there's a page, and a page can prompt for anything. What's missing
+        there is the key, which is why <a class="inline" href="#web">the browser front door uses
+        passkeys</a>.
       </p>
     </div>
 
@@ -397,29 +402,126 @@
   <section id="web">
     <div class="eyebrow">Web access</div>
     <div class="col prose">
-      <h2>Not yet</h2>
-    </div>
-
-    <div class="gap-s"></div>
-
-    <div class="planned">
-      <span class="tag">Planned — Phase 5</span>
+      <h2>The same BBS, in a browser</h2>
       <p>
-        A browser terminal — xterm.js over a WebSocket, running against the same session API as
-        SSH — is on the roadmap. It's good for casual visitors and for showing a board off to
-        someone who won't open a terminal. It is <strong>not built</strong>, and this page won't
-        pretend otherwise.
+        Not a terminal emulator in a web page. The screens themselves became a typed description of
+        <em>what</em> you're looking at, and there are now two renderers for it: one draws ANSI for
+        SSH, one builds DOM for the browser.
       </p>
       <p>
-        A read-only web view of the forums might follow it. A full web forum interface is an
-        explicit non-goal: SSH is the product.
+        That distinction is the whole point. The model emits a full area name and a hint about the
+        column; SSH cuts it to 26 characters, and the browser shows all of it and lets CSS handle
+        the overflow. A post wraps at a comfortable measure rather than at column 78. A mail list
+        scrolls rather than pages.
+      </p>
+      <p>
+        And because there's <strong>one navigation model rather than two</strong>, a screen cannot
+        exist over SSH and be missing from the web — there's nowhere for it to be missing from. The
+        ANSI renderer is held to byte-identical output by the golden-frame tests, so the terminal
+        experience didn't shift to make room for the browser.
       </p>
     </div>
 
     <div class="gap-m"></div>
 
+    <div class="cards">
+      <div class="card">
+        <h3>Everything is a keystroke</h3>
+        <p>Clicking the <code>[M]</code> row sends <code>m</code>. Tapping <em>enter open</em>
+           sends <code>enter</code>. The server never learns it was a click, so there is no
+           browser-only path through the BBS.</p>
+      </div>
+      <div class="card">
+        <h3>You're in the same room</h3>
+        <p>A browser session gets a node number and appears in Who's Online next to everyone else,
+           in the same chat. One BBS, three doors.</p>
+      </div>
+      <div class="card">
+        <h3>Shipped in the binary</h3>
+        <p>The whole front end is embedded — no CDN, no build step in the release path, nothing
+           fetched from anyone else at page load.</p>
+      </div>
+    </div>
+
+    <div class="gap-l"></div>
+
     <div class="col prose">
-      <h3>Meanwhile, if your client is picky</h3>
+      <h3>Signing in is a passkey, and nothing else</h3>
+      <p>
+        No password path, no SSH-key path. The credential is a keypair whose private half the
+        server never holds — the same shape as SSH key auth, and as the node identity itself. Since
+        the credentials are discoverable, <strong>you don't type a nick either</strong>: press sign
+        in, answer whatever unlocks your device, and you're through.
+      </p>
+      <p>
+        Which leaves one problem: a passkey has to be registered from a browser by someone already
+        established as the account holder, so passkeys can't bootstrap themselves. Every account
+        that predates the web needs a way across.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="d">In an SSH session you're already logged in to:</span>
+
+  <span class="p">Command:</span> <span class="c">P</span>
+
+<span class="d">  ┌──────────────────────────────────────────────┐</span>
+<span class="d">  │</span>  <span class="b">ADD A PASSKEY</span>                               <span class="d">│</span>
+<span class="d">  ├──────────────────────────────────────────────┤</span>
+<span class="d">  │</span>  Go to <span class="c">https://bbs.example.com</span>               <span class="d">│</span>
+<span class="d">  │</span>  and enter this code:                         <span class="d">│</span>
+<span class="d">  │</span>                                               <span class="d">│</span>
+<span class="d">  │</span>      <span class="g">K7QM-4X2P-B9TFR</span>                          <span class="d">│</span>
+<span class="d">  │</span>                                               <span class="d">│</span>
+<span class="d">  │</span>  <span class="d">Single use. Expires in 10 minutes.</span>           <span class="d">│</span>
+<span class="d">  └──────────────────────────────────────────────┘</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">What that code can and can't do</span>
+      <p>
+        It registers a credential and nothing else — no endpoint will trade it for a session, so it
+        can't be replayed as a bearer token. It's single-use, one live code per account, expires in
+        ten minutes, and is stored hashed like any other credential.
+      </p>
+      <p>
+        But an earlier draft of the design claimed a stolen code "gets an attacker no session", and
+        <strong>that was wrong</strong>. Someone holding a live code can register <em>their own</em>
+        passkey on your account and sign in with it whenever they like — that is what enrolling a
+        credential means, and no arrangement of endpoints changes it. The protection is the
+        ten-minute window and the fact that only an already-authenticated session can mint one.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note warn">
+      <span class="tag">Two consequences worth knowing up front</span>
+      <p>
+        <strong>There's no guest browsing on the web.</strong> A passkey-only front door means a
+        visitor without an account sees a sign-in prompt and nothing else. The SSH
+        <code>guest</code> account still exists, but the web is not currently a way to show a board
+        off to a stranger. That's a product decision rather than a technical limit.
+      </p>
+      <p>
+        <strong>A closing browser tab is a poor goodbye.</strong> Unlocking your mail puts the
+        passphrase in server memory exactly as it does over SSH — but a killed tab, a locked phone
+        or a sleeping laptop may never send a proper close. So the idle timer is doing real
+        security work here, and a session with mail unlocked times out sooner (10 minutes) than one
+        sitting in a forum (30).
+      </p>
+    </div>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3>If your client is picky</h3>
       <p>
         Telnet exists for the ANSI terminal clients BBS people actually use — SyncTERM, NetRunner,
         MagiTerm — which are telnet-only. It's <strong>off by default</strong>, and when a sysop

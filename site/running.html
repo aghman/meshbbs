@@ -27,7 +27,8 @@
     <p class="lede col">
       Pure Go with <strong><code>CGO_ENABLED=0</code> on every target</strong> — no build tags, no
       cgo variants, no split release artifacts. Building needs nothing but a Go toolchain, and
-      running needs nothing at all: no database server, no Node, no C libraries.
+      running needs nothing at all: no database server, no Node, no C libraries. The browser front
+      end is embedded in the binary too, so there's no CDN and no asset build in the release path.
     </p>
   </header>
 
@@ -102,6 +103,27 @@
 <span class="d">  ssh listening on :2222 · 4 areas · 0 peers</span>
 
 <span class="p">$</span> <span class="c">ssh austin@localhost -p 2222</span></pre>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="stepitem">
+        <div>
+          <h3>Optionally, open the second door</h3>
+          <p>The browser front end is off until you give it an origin and a certificate. Then get
+             your first passkey across by pressing <code>P</code> in an SSH session and typing the
+             code it shows into the sign-in page.</p>
+          <div class="term"><div class="term-body">
+<pre><span class="d"># in your config file</span>
+<span class="b">[web]</span>
+<span class="c">enabled</span>  = <span class="g">true</span>
+<span class="c">origin</span>   = <span class="c">"https://bbs.example.com"</span>   <span class="d"># required — passkeys bind to it</span>
+<span class="c">tls_cert</span> = <span class="c">"/etc/meshbbs/fullchain.pem"</span>
+<span class="c">tls_key</span>  = <span class="c">"/etc/meshbbs/privkey.pem"</span>
+
+<span class="p">$</span> <span class="c">./meshbbs config check</span>   <span class="d"># catches a missing origin before restart</span>
+<span class="p">$</span> <span class="c">./meshbbs serve</span>
+<span class="d">  ssh listening on :2222 · web listening on :8443</span></pre>
           </div></div>
         </div>
       </div>
@@ -334,6 +356,31 @@
           withheld</em> is the default.</div>
       </div>
       <div class="row">
+        <div class="k"><code>web.enabled</code><br><span style="color:var(--fg-faint);font-size:11px">false</span></div>
+        <div class="v">Serve the browser front end. Off by default, because it needs a public
+          origin and a TLS certificate and neither has a sensible default.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.origin</code><br><span style="color:var(--warn);font-size:11px">required when enabled</span></div>
+        <div class="v">The public origin browsers reach you at, e.g.
+          <code>https://bbs.example.com</code>. <strong>Get this wrong and it does not degrade</strong>
+          — passkeys are bound to it, so every sign-in fails with a browser error that says nothing
+          about the cause. Which is why it has no default and is validated at startup.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.unlocked_idle_timeout_mins</code><br><span style="color:var(--fg-faint);font-size:11px">10 — vs 30 idle</span></div>
+        <div class="v">Shorter on purpose. A session with mail unlocked holds the passphrase in
+          memory, and a closing browser tab is a far less reliable goodbye than an SSH
+          disconnect.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.enrol_attempts_per_hour</code><br><span style="color:var(--fg-faint);font-size:11px">10</span></div>
+        <div class="v">Passkey-enrolment code attempts per client. Someone typing a code off their
+          own terminal needs two or three; a script guessing needs far more. Note that
+          <code>X-Forwarded-For</code> is not trusted, so behind a reverse proxy this becomes one
+          shared allowance.</div>
+      </div>
+      <div class="row">
         <div class="k"><code>telnet.enabled</code><br><span style="color:var(--fg-faint);font-size:11px">false</span></div>
         <div class="v">Off by default: telnet is plaintext, so anything typed can be read by anyone
           on the network path. <code>telnet.guest_only</code> defaults to true and is the
@@ -407,9 +454,17 @@
           sandboxing, reference doors. Independent of federation.</div>
       </div>
       <div class="row">
+        <div class="k" style="color:var(--ok)">Web front end ✓</div>
+        <div class="v"><strong>Shipped out of order</strong>, ahead of the phase it was scheduled
+          in. The screen model was split from its rendering, then a browser renderer, passkey auth
+          and a session bridge were built on top. It arrived as a semantic terminal rather than the
+          xterm.js stopgap originally planned — see <a class="inline"
+          href="using.html#web">using it</a>.</div>
+      </div>
+      <div class="row">
         <div class="k">5 — Reach</div>
-        <div class="v">Web terminal, inter-BBS door events, sneakernet bundles, the client-held key
-          helper.</div>
+        <div class="v">What's left of it: inter-BBS door events, sneakernet bundles, and the
+          client-held key helper.</div>
       </div>
       <div class="row">
         <div class="k">6 — Interop</div>

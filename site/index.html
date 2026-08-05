@@ -35,9 +35,9 @@
         <h1>A BBS that fits in <em>233 bytes</em></h1>
 
         <p class="lede">
-          Forums, private mail, file areas and door games over SSH — federated between
-          independent BBS instances over <strong>Meshtastic LoRa radio</strong>. An instance
-          with no internet connection at all is a full participant in the network.
+          Forums, private mail, file areas and door games — over SSH or in a browser — federated
+          between independent BBS instances over <strong>Meshtastic LoRa radio</strong>. An
+          instance with no internet connection at all is a full participant in the network.
         </p>
 
         <div class="cta-row">
@@ -119,8 +119,9 @@
     <div class="col prose">
       <h2>You already have the client</h2>
       <p>
-        SSH is the front door. There's no new client to install, no ZMODEM and no serial-protocol
-        emulation — and SFTP comes free as the file-area transport.
+        SSH is the front door — no new client to install, no ZMODEM, no serial-protocol emulation,
+        and SFTP comes free as the file-area transport. A browser is the second door onto exactly
+        the same BBS.
       </p>
     </div>
 
@@ -186,12 +187,19 @@
 
     <div class="gap-s"></div>
 
-    <div class="planned">
-      <span class="tag">Planned — Phase 5</span>
+    <div class="note">
+      <span class="tag">And now, in a browser</span>
       <p>
-        A browser terminal (xterm.js over a WebSocket, same session API) is on the roadmap for
-        casual visitors. It isn't built yet, and this page won't pretend otherwise. SSH is the
-        product.
+        Not a terminal emulator in a web page. A screen is a typed description of <em>what</em>
+        you're looking at, and two renderers consume it — one draws ANSI, one builds DOM. So the
+        browser wraps a post at a readable measure instead of column 78 and shows an area name in
+        full instead of cutting it at 26 characters, while the terminal stays byte-for-byte what it
+        was.
+      </p>
+      <p>
+        One navigation model, so a screen cannot exist over SSH and be missing from the web. You
+        get a node number and show up in Who's Online next to everyone else. Sign-in is a passkey —
+        no password, and no nick to type.
       </p>
     </div>
 
