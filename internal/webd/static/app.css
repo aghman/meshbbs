@@ -143,13 +143,12 @@ p { margin: 0 0 1rem; }
    show an area description the terminal has to cut at column 26.
    --------------------------------------------------------------------------- */
 
-.screen {
-  display: flex;
-  flex-direction: column;
-  min-height: calc(100vh - 5rem);
-}
-
-.screen .body { flex: 1; }
+/* No forced height. An earlier version pinned this to the viewport so the help
+   line sat at the bottom, but body padding pushed the total past 100vh and the
+   help line ended up just below the fold on every short screen — the exact
+   opposite of the intent. Content flows; the mobile rule below is where sticky
+   navigation actually belongs. */
+.screen { display: flex; flex-direction: column; }
 
 .screen .block { margin-bottom: 1.5rem; }
 
@@ -227,6 +226,7 @@ p { margin: 0 0 1rem; }
 
 /* The terminal marks the cursor with "> "; a focus bar reads better here and
    survives a row being tall enough to wrap. */
+.row td:first-child { padding-left: 0.6rem; }
 .row.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 
 .article { max-width: 66ch; }
@@ -319,4 +319,37 @@ textarea.input { resize: vertical; letter-spacing: normal; line-height: 1.6; }
   }
   .help .key { flex: 1 1 auto; width: auto; justify-content: center; }
   .table td, .table th { padding-right: 0.5rem; }
+}
+
+/* Narrow screens: a three-column table squeezed into 375px wraps every cell to
+   three lines and is barely readable. Reflow each row to a card instead —
+   which is only possible because the model sends whole values and lets the
+   renderer decide the layout (webui.md §4). A terminal cannot do this. */
+@media (max-width: 40rem) {
+  .table, .table tbody, .table tr, .table td { display: block; width: 100%; }
+  .table thead { display: none; }
+
+  .table tr {
+    padding: 0.6rem 0.6rem 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .table td { padding: 0.1rem 0; }
+
+  /* The first cell is the row's name — the area, the nick, the sender. */
+  .table td:first-child { color: var(--accent); font-weight: 700; }
+
+  /* Labelled cells carry their column heading, so a card of values still says
+     what each value is. */
+  .table td[data-label]::before {
+    content: attr(data-label) " ";
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: 0.8rem;
+    letter-spacing: 0.06em;
+  }
+  .table td[data-label]:first-child::before { color: var(--muted); font-weight: 400; }
+
+  .row.selected td:first-child { box-shadow: none; }
+  .row.selected { box-shadow: inset 3px 0 0 var(--accent); }
 }

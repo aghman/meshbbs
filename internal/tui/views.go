@@ -102,9 +102,8 @@ func (m Model) buildAreaList() Screen {
 			},
 			// [N7]'s UI burden: say what "federated" costs, where someone is
 			// deciding which area to post in.
-			Lines(LevelMuted,
-				`"Local to this BBS" means posts stay here. "Federated" means they travel`,
-				"the mesh and spend shared airtime, which needs the post_federated capability."),
+			Prose(LevelMuted, `"Local to this BBS" means posts stay here. "Federated" means they `+
+				"travel the mesh and spend shared airtime, which needs the post_federated capability."),
 		},
 		Help: hints("up/down", "move", "enter", "open", "q", "back"),
 	}
@@ -300,8 +299,7 @@ func (m Model) buildNodeInfo() Screen {
 				{{Text: "  base32  ", Level: LevelHeading}, {Text: id.String(), Level: LevelAccent}},
 				{{Text: "  words   ", Level: LevelHeading}, {Text: id.Words(), Level: LevelAccent}},
 			}},
-			Lines(LevelMuted,
-				"Read the words aloud when confirming this node over the radio;",
+			Prose(LevelMuted, "Read the words aloud when confirming this node over the radio; "+
 				"type the base32 form when adding it to a config."),
 		},
 		Help: hints("any key", "back"),
@@ -373,12 +371,10 @@ func (m Model) buildSignup() Screen {
 		// man page. Losing the passphrase is genuinely unrecoverable.
 		blocks = append(blocks,
 			Say(LevelError, "Before you finish, one thing that cannot be undone:"),
-			Lines(LevelBody,
-				"If you forget your passphrase, your private messages become",
-				"permanently unreadable. Not by the sysop, not by anyone. There",
+			Prose(LevelBody, "If you forget your passphrase, your private messages become "+
+				"permanently unreadable. Not by the sysop, not by anyone. There "+
 				"is no reset, and inventing one would defeat the point."),
-			Lines(LevelMuted,
-				"The sysop can reset your password, but doing so destroys your",
+			Prose(LevelMuted, "The sysop can reset your password, but doing so destroys your "+
 				"existing mail — they will be warned, and so are you."),
 			Say(LevelAccent, "  [Y] I understand, create my account    [N] cancel"))
 	}

@@ -89,7 +89,15 @@ function renderTable(b) {
   const body = el("tbody");
   b.rows.forEach((row, i) => {
     const tr = el("tr", i === b.selected ? "row selected" : "row");
-    for (const cell of row.cells || []) tr.appendChild(el("td", "", cell));
+    (row.cells || []).forEach((cell, c) => {
+      const td = el("td", "", cell);
+      // Carry the column name onto every cell so the narrow layout can label
+      // it. A table reflowed to cards without labels is a stack of bare values
+      // — fine for an area list, useless for the sysop panel where "yes yes no"
+      // means nothing without its heading.
+      if (b.header && b.header[c]) td.dataset.label = b.header[c];
+      tr.appendChild(td);
+    });
     if (b.selected >= 0) {
       tr.tabIndex = 0;
       // Select then open, so one tap does what a click should. The cursor move
@@ -126,7 +134,9 @@ function renderForm(b) {
   const form = el("div", "block form");
   for (const f of b.fields || []) {
     const row = el("div", "field-row");
-    const label = (f.label || "").replace(/:\s*$/, "");
+    // The terminal's textarea has no prompt, so body fields arrive unlabelled.
+    // A browser wants a label regardless — presentation is the renderer's job.
+    const label = (f.label || f.name || "").replace(/:\s*$/, "");
     if (label) row.appendChild(el("label", "field-label", label));
 
     if (f.done) {

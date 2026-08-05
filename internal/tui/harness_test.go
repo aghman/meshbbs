@@ -235,6 +235,23 @@ func (s *session) contains(want ...string) *session {
 	return s
 }
 
+// containsProse asserts the screen says something, ignoring where it wrapped.
+//
+// Prose is wrapped by the RENDERER now (webui.md §4), so a phrase can land
+// across two lines and a literal substring check fails for a reason that has
+// nothing to do with what the screen says. Layout is the golden frames' job;
+// this is for content.
+func (s *session) containsProse(want ...string) *session {
+	s.t.Helper()
+	flat := strings.Join(strings.Fields(s.view()), " ")
+	for _, w := range want {
+		if !strings.Contains(flat, strings.Join(strings.Fields(w), " ")) {
+			s.t.Fatalf("screen does not say %q:\n%s", w, s.view())
+		}
+	}
+	return s
+}
+
 func (s *session) notContains(unwanted ...string) *session {
 	s.t.Helper()
 	v := s.view()
