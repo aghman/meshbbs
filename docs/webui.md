@@ -379,15 +379,26 @@ The limiter runs **before** redemption. If it ran after, an attacker could burn 
 code by spamming the endpoint without ever guessing it — turning the defence into a denial of
 service against the exact operation the code exists for.
 
-**`X-Forwarded-For` is not trusted**, and the cost of that is real enough to state rather than bury.
-A client sets the header, so honouring it means an attacker sends a different value per request and
-each is counted separately — which is worse than having no limiter, because it looks like
-protection and provides none. The price is that behind a TLS-terminating reverse proxy every request
-arrives from the proxy and the per-client buckets collapse into one shared allowance. An
-instance-wide ceiling (20× the per-client rate) means such a deployment still has a bound; it is set
-generously because a global cap is itself a denial-of-service lever. **A trusted-proxy list is the
-proper fix and is not built** — a sysop terminating TLS elsewhere should know the per-client limit
-is not doing what its name suggests.
+**`X-Forwarded-For` is consulted only behind a proxy the sysop named.** A client sets that header,
+so honouring it unconditionally means an attacker sends a different value per request and each is
+counted separately — worse than no limiter, because it looks like protection and provides none.
+`web.trusted_proxies` (empty by default) lists the IPs or CIDRs permitted to report a real client.
+
+The header is read **right to left, skipping trusted hops**, and that direction is the whole
+correctness argument: the rightmost entry is what the nearest proxy observed and the only one it can
+vouch for, while everything to its left was supplied by whoever spoke earlier — up to and including
+the client. Taking the leftmost, the common mistake, hands the attacker the header back, since they
+choose what it starts with. A malformed hop stops the walk; a chain of nothing but trusted proxies
+falls back to the transport address.
+
+Listing an address means trusting it to claim to be any client, so a malformed entry **fails open** —
+it matches nothing, the header is ignored, and limits silently become per-proxy. Startup validation
+rejects it instead, because a sysop who believes their limits are per-client should find out then
+rather than never.
+
+The instance-wide ceiling (20× the per-client rate) stays, and still matters: a misconfigured or
+absent allow list collapses every request onto one key again, and that is the bound holding when it
+does. It is set generously because a global cap is itself a denial-of-service lever.
 
 `max_sessions` covers the other exhaustion path, for the same reason telnet has one
 (`telnet.go:133`): a public listener with no cap is a file-descriptor exhaustion away from taking
@@ -410,10 +421,19 @@ the checker permits and security requires independently.
   makes an 80×24 screen tiring. The problem with reading a terminal in a browser was never the
   typeface.
 - **Colours come from the existing theme TOML.** The eight `Theme` fields (`Primary`, `Secondary`,
-  `Accent`, `Muted`, `Danger`, `Success`, `Text`, `Highlight`) map directly to CSS custom
-  properties, so `themes/*.toml` retheming (`[N5]`) works on the web with no second mechanism and
-  no second file format. ANSI indices 0–15 need one fixed palette mapping; `#rrggbb` values pass
-  through.
+  `Accent`, `Muted`, `Danger`, `Success`, `Text`, `Highlight`) are served as CSS custom properties
+  from `/theme.css`, so `themes/*.toml` retheming (`[N5]`) works on the web with no second mechanism
+  and no second file format. `#rrggbb` passes through; ANSI indices resolve against xterm's
+  defaults — the 6×6×6 cube and grey ramp are computed, and only the low sixteen need a table. An
+  unresolvable colour is **skipped rather than emitted empty**, so the stylesheet's own fallback
+  survives instead of the variable resolving to nothing and text rendering black on black.
+- **A theme does not set the page background**, because a terminal never supplies one either — that
+  belongs to the user's terminal configuration, and on the web to the stylesheet. Light and dark
+  page chrome therefore stays, and the theme layers on top. Which exposes a real problem: these
+  palettes are built for a dark terminal, and several of the classic sixteen — bright yellow
+  especially — are close to invisible on white. Rather than a second palette per theme, the
+  light-mode block darkens whatever the theme supplied with `color-mix`. A new theme file gets both
+  modes for free.
 - **`Border` is honoured as a CSS border style** — `double`, `single`, `ascii` → 3px double, 1px
   solid, 1px dashed. Small touch, keeps the four built-in themes visually distinct.
 - **Selection is a real focus ring**, not a `>` prefix — though the `>` can stay for texture.
@@ -468,6 +488,18 @@ Steps 2 and 3 are where an `xterm.js` stopgap would have paid off — it exercis
 auth, session lifecycle and WebSocket plumbing. If step 1 slips, shipping `xterm.js` on top of
 steps 2–3 remains a valid intermediate release, and step 1 replaces the renderer underneath it
 without touching either.
+
+### 13.1 What is not built
+
+All four steps are done. What remains is deliberately out of scope rather than pending:
+
+- **Mail on the web is untried.** The screens render, but nobody has unlocked a passphrase through
+  a browser, so §9's shorter idle bound has never bounded a real session.
+- **Themes are not hot-reloadable on the web.** §11.3 hot-reloads a theme file for SSH sessions;
+  `/theme.css` is generated per request but the theme set is loaded once at startup, so a sysop
+  editing a theme restarts to see it in a browser.
+- **No sysop view of enrolled passkeys.** A user accumulates credentials with no way to list or
+  revoke one from either front end. `RemoveWebAuthnCredential` exists and nothing calls it.
 
 ---
 
