@@ -5,8 +5,8 @@
 **Status:** Draft v0.1
 **Date:** 2026-08-04
 **Amends:** design.md §2 (non-goals), §5.3 (web terminal), §11.5 (config), §13 (Phase 5)
-**New decisions:** `[D16]` web UI shape, `[D17]` web authentication
-**New open question:** `[N13]` passkey bootstrap for existing accounts
+**New decisions:** `[D16]` web UI shape, `[D17]` web authentication, `[D18]` passkey bootstrap
+**Open questions:** none
 
 ---
 
@@ -249,29 +249,39 @@ with a message that names the symptom.
 
 ---
 
-## 8. `[N13]` — how does an existing user get their first passkey?
+## 8. How an existing account gets its first passkey `[D18]`
 
-This is the one thing the design does not yet answer, and it is not a small gap: **every account
-that exists today was created over SSH or the CLI, and none of them can sign in to the web.** A
-passkey has to be registered from a browser, by someone already established as the account holder.
-There is no way to bootstrap that from passkeys alone.
+Every account that exists today was created over SSH or the CLI, and none of them can sign in to
+the web: a passkey has to be registered from a browser, by someone already established as the
+account holder. Passkeys cannot bootstrap themselves.
 
-**Recommended answer:** an authenticated SSH session gains a menu item that displays a short,
-single-use, time-boxed code. The web sign-in page accepts that code for **passkey enrolment only** —
-it never mints a session, never grants read access, and expires in minutes. It is an enrolment
-ceremony, not a credential.
+**An authenticated SSH session mints a short, single-use, time-boxed enrolment code.** The web
+sign-in page accepts it for **passkey registration only**. It never mints a session, never grants
+read access, and expires in minutes.
 
-This is worth stating carefully because it is the kind of thing that becomes a backdoor by
-accident. The properties that keep it from being one: single use, short expiry, enrolment-only
-authority, invalidated by a second issuance, and logged. If it ever grows the ability to log
-someone in, it has become a password with worse ergonomics.
+This is the kind of mechanism that becomes a backdoor by accident, so the properties that keep it
+from being one are part of the decision rather than implementation detail:
 
-The alternative is sysop-issued invitations (`meshbbs user invite bob`), which is more work for the
-sysop and better for an instance that wants deliberate control over who reaches the web at all. The
-two are compatible; the question is whether the SSH-initiated path ships in v1.
+| Property | Why it is load-bearing |
+|---|---|
+| **Enrolment-only authority** | The code registers a credential. It cannot log anyone in, so stealing one gets an attacker no session. |
+| **Single use** | Redemption invalidates it, so a shoulder-surfed code is spent by the time it is read. |
+| **Short expiry** | Minutes, not hours. It is typed from a terminal into a browser sitting next to it. |
+| **One live code per account** | Issuing a second invalidates the first, so codes cannot be stockpiled. |
+| **Issued only to an authenticated session** | The SSH session already proved account ownership; the code carries that proof and adds nothing. |
+| **Logged on issue and redemption** | A sysop can see that an account gained a web credential and when. |
 
-**Recorded as open** rather than decided, because it is a policy call about how open the instance
-is, and that is the sysop's temperament rather than an engineering fact.
+The rule that keeps it honest: **if it ever grows the ability to log someone in, it has become a
+password with worse ergonomics.** Any future change that lets a code produce a session is a change
+to `[D17]`, not a convenience tweak.
+
+Codes are generated with `crypto/rand` and stored hashed, like any other credential — a leaked
+database should not yield live enrolment codes. They are displayed, never emailed (`[N8]`: there is
+no email field to send to).
+
+Sysop-issued invitations (`meshbbs user invite bob`) remain available as a later addition for an
+instance that wants deliberate control over who reaches the web at all. The two are compatible and
+neither blocks the other; only the SSH-minted path ships in v1.
 
 ---
 
@@ -435,14 +445,9 @@ forgets. Three things hold it off, and they are worth defending in review:
 | # | Question | Decision | Sections affected |
 |---|---|---|---|
 | **D16** | What shape is the web UI? | **Semantic terminal, reversing §5.3's `xterm.js`.** The Bubble Tea model emits a typed `Screen` description; ANSI and HTML renderers both consume it. Same screens, same keys, same wording, rendered twice. §2's "no web forum UI" non-goal is **narrowed, not reversed** — there is no second navigation model and no second UI to maintain. Geometry (truncation, windowing, wrapping) moves from the model into the renderers, which is what makes the web version more readable rather than a screenshot of a terminal. | design.md §2, §5.3, §13; this doc §2–§5 |
+| **D18** | How does an account that predates the web get its first passkey? | **A single-use, short-expiry, enrolment-only code minted by an authenticated SSH session.** It registers a credential and cannot mint a session — if it ever could, it would be a password with worse ergonomics, and that is the line any future change has to argue past. One live code per account, stored hashed, logged on issue and redemption. Sysop-issued invitations stay available as a later addition for instances wanting tighter control; they are compatible and do not block this. | this doc §8, §13 step 2 |
 | **D17** | How do people authenticate on the web? | **Passkeys / WebAuthn only.** No password path, no SSH-key path, no guest browsing. Discoverable credentials so no nick is typed. The credential is a keypair the server never holds — the same shape as SSH key auth and §6.1's node identity. Two accepted consequences, both stated rather than discovered: the web has **no unauthenticated front door**, removing §5.3's "showing the BBS off" rationale; and `web.origin` becomes a **required** config key, because an RP ID mismatch fails totally rather than degrading. | design.md §5.1, §11.5; this doc §7 |
 
 ## 16. Open questions
 
-**`N13` — how does an existing account get its first passkey?** Every account today predates the
-web and cannot sign in to it, and passkey enrolment requires a browser plus an already-established
-account holder. Recommended: a single-use, short-expiry, **enrolment-only** code issued from an
-authenticated SSH session — never a session-minting credential. Alternative: sysop-issued
-invitations, which suit an instance wanting deliberate control over who reaches the web at all. The
-two are compatible. Open because it is a policy call about how open the instance is, not an
-engineering fact. (§8)
+**None.** `N13` was resolved as `[D18]` before implementation began.

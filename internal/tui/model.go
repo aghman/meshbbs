@@ -65,6 +65,7 @@ const (
 	screenSysop
 	screenChat
 	screenNodeInfo
+	screenWebEnrol
 	screenGoodbye
 )
 
@@ -80,6 +81,12 @@ type Config struct {
 	Height    int
 	SessionID string
 	Remote    string
+	// WebEnabled reveals the passkey-enrolment path. The menu item is hidden
+	// when the sysop has not turned the web UI on, because a code that leads
+	// nowhere is worse than no offer at all.
+	WebEnabled bool
+	// WebURL is where the code gets typed, shown alongside it.
+	WebURL    string
 	Intent    Intent
 	Nick      string
 	User      store.User
@@ -141,6 +148,10 @@ type Model struct {
 	sysop_      sysopState
 	chatInput   textInput
 	chatLines   []ChatLine
+	// webCode is a live passkey-enrolment code ([D18]). It is shown once and
+	// held only to keep it on screen; the store keeps nothing but its hash.
+	webCode        string
+	webCodeExpires int64
 
 	quitting bool
 }
@@ -280,6 +291,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case webCodeMsg:
+		m.webCode, m.webCodeExpires = msg.code, msg.expires
+		m.screen = screenWebEnrol
+		return m, nil
+
 	case unlockedMsg:
 		// The passphrase lives only in this session's memory, only while
 		// unlocked, and is cleared on exit (§8.2 tier 2).
@@ -340,6 +356,8 @@ func (m Model) Screen() Screen {
 		return m.buildChat()
 	case screenNodeInfo:
 		return m.buildNodeInfo()
+	case screenWebEnrol:
+		return m.buildWebEnrol()
 	default:
 		return m.buildMenu()
 	}

@@ -114,7 +114,10 @@ func TestEveryScreenIsDescribable(t *testing.T) {
 	f.user(t, "austin", "pw")
 	base := f.login(t, "austin").model
 
-	for sc := screenSignup; sc <= screenNodeInfo; sc++ {
+	// The bound is the last real screen, not screenGoodbye — the goodbye is
+	// deliberately not a Screen (no frame, nothing to navigate). Adding a
+	// screen after this one without moving the bound silently skips it.
+	for sc := screenSignup; sc <= screenWebEnrol; sc++ {
 		m := base
 		m.screen = sc
 		scr := m.Screen()

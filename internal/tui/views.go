@@ -61,6 +61,9 @@ func (m Model) buildMenu() Screen {
 		{"W", "Who else is online"},
 		{"N", "This node's identity"},
 	}
+	if m.cfg.WebEnabled && !m.guest {
+		items = append(items, Choice{"P", "Passkey for the web — sign in from a browser"})
+	}
 	if m.sysop {
 		items = append(items, Choice{"S", "Sysop panel"})
 	}
@@ -387,6 +390,40 @@ func (m Model) buildSignup() Screen {
 	return Screen{
 		Kind: "signup", Title: "New User Registration", Blocks: blocks, Status: m.statusLine(),
 		Help: []KeyHint{{Key: "esc", Label: "to disconnect"}},
+	}
+}
+
+// buildWebEnrol shows a live passkey-enrolment code ([D18]).
+//
+// The screen has one job beyond displaying the code: making its authority
+// legible. A user who is told "here is a code, type it into a website" has been
+// handed something that looks exactly like a password, and will treat it like
+// one — so the screen says what it can and cannot do, in those words.
+func (m Model) buildWebEnrol() Screen {
+	where := m.cfg.WebURL
+	if where == "" {
+		where = "this BBS's web address"
+	}
+
+	return Screen{
+		Kind: "webenrol", Title: "Passkey Enrolment", Status: m.statusLine(),
+		Blocks: []Block{
+			Lines(LevelBody,
+				"Open "+where+" in a browser and enter this code to add a passkey",
+				"to your account. After that the passkey signs you in on its own."),
+			TextBlock{Lines: []Line{
+				{{Text: "  code   ", Level: LevelHeading}, {Text: m.webCode, Level: LevelAccent}},
+				{{Text: "  until  ", Level: LevelHeading},
+					{Text: m.at(m.webCodeExpires, "15:04:05"), Level: LevelAccent}},
+			}},
+			// Saying this plainly is the point. The code looks like a password
+			// and is not one, and a user who believes otherwise will guard it
+			// like a password — or worse, reuse the habit somewhere it matters.
+			Prose(LevelMuted, "This code can only add a passkey. It cannot log anyone in, it works "+
+				"once, and asking for another cancels this one."),
+			Say(LevelMuted, "It expires in ten minutes. Press P again for a fresh one."),
+		},
+		Help: hints("any key", "back"),
 	}
 }
 

@@ -65,6 +65,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenWho, screenNodeInfo:
 		m.screen = screenMenu
 		return m, nil
+	case screenWebEnrol:
+		// Clear the code from session memory on the way out. The store holds
+		// only its hash, and there is no reason for the plaintext to outlive
+		// the screen showing it.
+		m.webCode, m.webCodeExpires = "", 0
+		m.screen = screenMenu
+		return m, nil
 	}
 	return m, nil
 }
@@ -105,6 +112,11 @@ func (m Model) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		m.screen = screenNodeInfo
 		return m, nil
+	case "p":
+		if !m.cfg.WebEnabled {
+			return m, nil
+		}
+		return m, m.issueWebCode()
 	case "q":
 		return m.leave()
 	}
