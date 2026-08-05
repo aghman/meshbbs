@@ -17,6 +17,7 @@ Generated from the source. Do not edit by hand.
 | `mesh.hop_limit` | int | `0` | `MESHBBS_MESH_HOP_LIMIT` | Hop limit for BBS packets, 0-7. Zero uses the radio's own setting. Hop limit multiplies what every packet costs the mesh (§1.1), so set it as low as your topology allows. |
 | `mesh.mode` | string | `auto` | `MESHBBS_MESH_MODE` | How to reach the radio: 'serial', 'tcp', or 'auto' (try the configured serial device or auto-detect, then fall back to tcp_host). |
 | `mesh.quiet_hours` | string | *(empty)* | `MESHBBS_MESH_QUIET_HOURS` | Comma-separated local-time windows of zero transmission, e.g. '22:00-06:00'. Windows may wrap midnight. |
+| `mesh.rx_timeout_secs` | int | `300` | `MESHBBS_MESH_RX_TIMEOUT_SECS` | Reconnect if the radio has sent nothing for this many seconds. A USB serial handle can go one-way — writes keep succeeding and transmissions go out while nothing is ever received — and only silence reveals it. Zero disables the check. Below about 60 a busy-but-quiet radio may be reconnected needlessly, and each reconnect re-announces. |
 | `mesh.serial_baud` | int | `115200` | `MESHBBS_MESH_SERIAL_BAUD` | Serial baud rate. Every current firmware uses 115200. |
 | `mesh.serial_device` | string | *(empty)* | `MESHBBS_MESH_SERIAL_DEVICE` | Serial port, e.g. /dev/ttyUSB0 or COM3. Empty auto-detects; run 'meshbbs mesh ports' to see candidates. |
 | `mesh.tcp_host` | string | *(empty)* | `MESHBBS_MESH_TCP_HOST` | Host of a node on WiFi. Port defaults to 4403 if not given. |
@@ -44,3 +45,15 @@ Generated from the source. Do not edit by hand.
 | `users.default_directory_listed` | bool | `true` | `MESHBBS_USERS_DEFAULT_DIRECTORY_LISTED` | Whether new users are listed in the network directory ([N9]). |
 | `users.guest_enabled` | bool | `true` | `MESHBBS_USERS_GUEST_ENABLED` | Allow anonymous read-only access via ssh guest@. |
 | `users.registration_mode` | string | `open` | `MESHBBS_USERS_REGISTRATION_MODE` | open, approval, invite, or closed. Default 'open' with federated posting withheld: the door is open, the shared airtime is gated ([N7]). |
+| `web.bind` | string | `0.0.0.0` | `MESHBBS_WEB_BIND` | Address to listen on. |
+| `web.enabled` | bool | `false` | `MESHBBS_WEB_ENABLED` | Serve the browser front end. Off by default: it needs a public origin and a TLS certificate, which have no sensible defaults. |
+| `web.enrolment_code_ttl_mins` | int | `10` | `MESHBBS_WEB_ENROLMENT_CODE_TTL_MINS` | How long a passkey-enrolment code stays valid ([D18]). It is read off a terminal and typed into a browser on the same desk, so minutes are generous. |
+| `web.idle_timeout_mins` | int | `30` | `MESHBBS_WEB_IDLE_TIMEOUT_MINS` | Disconnect a browser session idle this long. |
+| `web.max_sessions` | int | `64` | `MESHBBS_WEB_MAX_SESSIONS` | Maximum concurrent browser sessions. A public listener with no cap is a file-descriptor exhaustion away from taking SSH down with it. |
+| `web.max_sessions_per_user` | int | `8` | `MESHBBS_WEB_MAX_SESSIONS_PER_USER` | Maximum concurrent browser sessions for one account. |
+| `web.origin` | string | *(empty)* | `MESHBBS_WEB_ORIGIN` | Public origin browsers reach this BBS at, e.g. https://bbs.example.com. REQUIRED when enabled and has no default: passkeys are bound to it, and a mismatch fails every sign-in with an error that does not say why (webui.md §7.1). |
+| `web.port` | int | `8443` | `MESHBBS_WEB_PORT` | Port to listen on. 443 is conventional but needs root. |
+| `web.session_ttl_hours` | int | `12` | `MESHBBS_WEB_SESSION_TTL_HOURS` | Absolute lifetime of a browser session, however active it is. |
+| `web.tls_cert` | string | *(empty)* | `MESHBBS_WEB_TLS_CERT` | Path to the TLS certificate chain. Required when enabled unless bound to loopback, which browsers treat as a secure context. |
+| `web.tls_key` | string | *(empty)* | `MESHBBS_WEB_TLS_KEY` | Path to the TLS private key. |
+| `web.unlocked_idle_timeout_mins` | int | `10` | `MESHBBS_WEB_UNLOCKED_IDLE_TIMEOUT_MINS` | Disconnect a session that has unlocked mail after this much idleness. Shorter than idle_timeout_mins on purpose: such a session holds the passphrase in memory, and a closing browser tab is a far less reliable goodbye than an SSH disconnect (webui.md §9). |

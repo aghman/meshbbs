@@ -110,6 +110,8 @@ Serves SSH on the configured port. Users connect with:
 				OpenSignup:   e.cfg.Users.RegistrationMode == "open",
 				Themes:       themes,
 				DefaultTheme: e.cfg.Theme.Default,
+				WebEnabled:   e.cfg.Web.Enabled,
+				WebURL:       e.cfg.Web.Origin,
 				Clock:        e.clock,
 				Location:     loc,
 				Logger:       log,
