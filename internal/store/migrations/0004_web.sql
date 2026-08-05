@@ -5,6 +5,22 @@
 -- server holds no reusable secret, and adding a password path would restore the
 -- exact loss it prevents.
 
+-- The WebAuthn user handle identifies the ACCOUNT to an authenticator. It is
+-- stored on the authenticator itself and surfaces in passkey managers, so the
+-- spec asks for an opaque random value rather than anything meaningful.
+--
+-- users.id would be safe — AUTOINCREMENT never reuses a rowid, so a deleted
+-- account cannot have its number inherited by a new one — but it is an
+-- enumerable account number that would then live in the user's password
+-- manager. Thirty-two random bytes cost nothing and leak nothing.
+--
+-- Generated lazily on first passkey enrolment, so accounts that never touch the
+-- web never get one. Empty means "not yet issued".
+ALTER TABLE users ADD COLUMN webauthn_handle BLOB NOT NULL DEFAULT x'';
+
+CREATE UNIQUE INDEX users_webauthn_handle
+    ON users (webauthn_handle) WHERE length(webauthn_handle) > 0;
+
 -- The shape deliberately mirrors user_keys. A user accumulates authenticators —
 -- some SSH keys, some passkeys — and any of them logs them in. That symmetry is
 -- not decoration: it means "enrol another device" is one concept on this BBS

@@ -1,0 +1,136 @@
+/* Modernised retro (webui.md §11): clearly terminal-descended, deliberately
+   more readable than a terminal.
+
+   The single highest-leverage choice is here — monospace throughout, sized and
+   spaced like prose rather than like an 80x24 grid. The problem with reading a
+   terminal in a browser was never the typeface.
+
+   These are placeholder values. The real palette comes from the theme TOML as
+   CSS custom properties, so themes/*.toml retheming works on the web with no
+   second mechanism ([N5]); that lands with the renderer. */
+
+:root {
+  --bg: #12131a;
+  --fg: #d6d9e0;
+  --muted: #8b90a0;
+  --accent: #e5c07b;
+  --heading: #7aa2f7;
+  --error: #e06c75;
+  --rule: #2a2d3a;
+
+  --measure: 68ch;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fbfbfd;
+    --fg: #23262e;
+    --muted: #626878;
+    --accent: #8a6d1f;
+    --heading: #2f5bb7;
+    --error: #b5303a;
+    --rule: #dcdee6;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2rem 1.25rem 4rem;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  /* Terminal look, prose spacing. */
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+.frame {
+  max-width: var(--measure);
+  margin: 0 auto;
+}
+
+.title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin: 0;
+  color: var(--heading);
+}
+
+.rule {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  margin: 0.75rem 0 1.5rem;
+}
+
+.rule.spaced { margin: 2rem 0 1.5rem; }
+
+p { margin: 0 0 1rem; }
+
+.muted { color: var(--muted); }
+
+.field {
+  display: block;
+  color: var(--heading);
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 0.35rem;
+}
+
+.input {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  margin-bottom: 0.75rem;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font: inherit;
+  letter-spacing: 0.12em;
+}
+
+.input:focus,
+.key:focus {
+  outline: 2px solid var(--heading);
+  outline-offset: 2px;
+}
+
+/* Key hints are buttons that keep their key label, so the web teaches the SSH
+   interface rather than replacing it. */
+.key {
+  padding: 0.55rem 1rem;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  font: inherit;
+  cursor: pointer;
+  /* Comfortably past the 44px touch target minimum. */
+  min-height: 2.75rem;
+}
+
+.key:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+.kbd {
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+.status {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+}
+
+.status.error { color: var(--error); }
+
+@media (max-width: 30rem) {
+  body { padding: 1.25rem 1rem 3rem; }
+  .key { width: 100%; }
+}

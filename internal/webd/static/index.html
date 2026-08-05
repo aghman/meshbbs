@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeshBBS</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main class="frame">
+  <h1 class="title">MeshBBS</h1>
+  <hr class="rule">
+
+  <div id="signin">
+    <p>Sign in with a passkey.</p>
+    <p class="muted">Your browser will ask for whatever unlocks this device.</p>
+    <p><button id="login" class="key">Sign in</button></p>
+
+    <hr class="rule spaced">
+
+    <p>No passkey on this account yet?</p>
+    <p class="muted">
+      Connect over SSH, press <span class="kbd">P</span> at the menu, and type the code it shows.
+    </p>
+    <p>
+      <label class="field" for="code">code</label>
+      <input id="code" class="input" autocomplete="off" autocapitalize="characters"
+             spellcheck="false" placeholder="XXXX-XXXX-XXXXX">
+      <button id="enrol" class="key">Add passkey</button>
+    </p>
+  </div>
+
+  <div id="hello" hidden>
+    <p>You are signed in as <strong id="nick"></strong>.</p>
+    <p class="muted">The BBS itself is not wired up here yet — that is the next piece.</p>
+    <p><button id="logout" class="key">Sign out</button></p>
+  </div>
+
+  <p id="status" class="status" hidden></p>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -186,6 +187,68 @@ func (s *Store) RemoveWebAuthnCredential(ctx context.Context, nick string, crede
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// User handles
+// ---------------------------------------------------------------------------
+
+// handleBytes is the size of a WebAuthn user handle. The spec allows up to 64
+// and recommends using the space; 32 is well past any collision concern and
+// keeps the value a manageable size in the places it gets echoed.
+const handleBytes = 32
+
+// EnsureWebAuthnHandle returns the account's opaque user handle, creating one
+// on first use.
+//
+// Lazy on purpose: an account that never touches the web never gets a handle,
+// so the column stays empty for the majority of users on a BBS where SSH is
+// still the product.
+func (s *Store) EnsureWebAuthnHandle(ctx context.Context, nick string) ([]byte, error) {
+	u, err := s.GetUser(ctx, nick)
+	if err != nil {
+		return nil, err
+	}
+
+	var handle []byte
+	err = s.db.QueryRowContext(ctx,
+		`SELECT webauthn_handle FROM users WHERE id = ?`, u.ID).Scan(&handle)
+	if err != nil {
+		return nil, fmt.Errorf("read user handle: %w", err)
+	}
+	if len(handle) > 0 {
+		return handle, nil
+	}
+
+	handle = make([]byte, handleBytes)
+	// Credential material requires cryptographic randomness, never the seeded
+	// rng.Source used by domain logic (§12.1).
+	if _, err := rand.Read(handle); err != nil {
+		return nil, fmt.Errorf("generate user handle: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE users SET webauthn_handle = ? WHERE id = ?`, handle, u.ID); err != nil {
+		return nil, fmt.Errorf("store user handle: %w", err)
+	}
+	return handle, nil
+}
+
+// UserByWebAuthnHandle resolves an account from the handle an authenticator
+// presented.
+func (s *Store) UserByWebAuthnHandle(ctx context.Context, handle []byte) (User, error) {
+	if len(handle) == 0 {
+		return User{}, ErrNotFound
+	}
+	var nick string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT nick FROM users WHERE webauthn_handle = ?`, handle).Scan(&nick)
+	if isNoRows(err) {
+		return User{}, ErrNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("look up user handle: %w", err)
+	}
+	return s.GetUser(ctx, nick)
 }
 
 // ---------------------------------------------------------------------------

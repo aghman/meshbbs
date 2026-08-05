@@ -264,8 +264,9 @@ from being one are part of the decision rather than implementation detail:
 
 | Property | Why it is load-bearing |
 |---|---|
-| **Enrolment-only authority** | The code registers a credential. It cannot log anyone in, so stealing one gets an attacker no session. |
+| **Enrolment-only authority** | The code registers a credential and is accepted at no other endpoint, so it cannot be replayed as a bearer token. See the correction below for what this does *not* mean. |
 | **Single use** | Redemption invalidates it, so a shoulder-surfed code is spent by the time it is read. |
+| **Spent at ceremony start** | The redemption happens when registration *begins*, not when it finishes — otherwise the endpoint is an oracle that lets a caller test codes indefinitely and only burn one on success. Every guess costing an attempt is what makes 64 bits enough. |
 | **Short expiry** | Minutes, not hours. It is typed from a terminal into a browser sitting next to it. |
 | **One live code per account** | Issuing a second invalidates the first, so codes cannot be stockpiled. |
 | **Issued only to an authenticated session** | The SSH session already proved account ownership; the code carries that proof and adds nothing. |
@@ -273,7 +274,30 @@ from being one are part of the decision rather than implementation detail:
 
 The rule that keeps it honest: **if it ever grows the ability to log someone in, it has become a
 password with worse ergonomics.** Any future change that lets a code produce a session is a change
-to `[D17]`, not a convenience tweak.
+to `[D17]`, not a convenience tweak. `handleEnrolFinish` therefore does not open a session either —
+the user signs in with the passkey they just made, which keeps the invariant literally true and has
+the practical benefit of proving the credential works before they leave the terminal that minted
+the code.
+
+### 8.1 A correction to the above
+
+An earlier draft of this section claimed that stealing a code "gets an attacker no session". **That
+is wrong, and the mistake is worth recording rather than quietly editing out**, because it is the
+kind of reasoning error that makes a mechanism look stronger than it is.
+
+An attacker holding a live code can register *their own* passkey on the victim's account, and then
+sign in with it whenever they like. A completed enrolment grants ongoing access — that is what
+enrolling a credential *means*, and no arrangement of endpoints changes it.
+
+So the narrow authority buys two real things, and not a third:
+
+- ✅ The code is not a bearer token: no endpoint trades it for a session, so it cannot be replayed.
+- ✅ The exposure window is minutes, single-use, and one-per-account.
+- ❌ It does **not** mean a stolen code is harmless.
+
+Which is why the properties that actually carry the weight are the *window* and the *authenticated
+issuance*, not the endpoint shape. A code is only ever minted by a session that has already proved
+account ownership, and it dies in ten minutes or on first use, whichever comes first.
 
 Codes are generated with `crypto/rand` and stored hashed, like any other credential — a leaked
 database should not yield live enrolment codes. They are displayed, never emailed (`[N8]`: there is
