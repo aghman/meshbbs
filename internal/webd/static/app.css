@@ -5,9 +5,12 @@
    spaced like prose rather than like an 80x24 grid. The problem with reading a
    terminal in a browser was never the typeface.
 
-   These are placeholder values. The real palette comes from the theme TOML as
-   CSS custom properties, so themes/*.toml retheming works on the web with no
-   second mechanism ([N5]); that lands with the renderer. */
+   The colours below are FALLBACKS. /theme.css is served ahead of this file and
+   overrides them from the configured theme, so themes/*.toml retheming ([N5])
+   works on the web through the same eight fields the terminal reads. What stays
+   here is everything a theme has no business setting: layout, spacing, and the
+   page background, which a terminal never supplies because it belongs to the
+   user's own terminal configuration. */
 
 :root {
   --bg: #12131a;
@@ -24,12 +27,20 @@
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #fbfbfd;
-    --fg: #23262e;
-    --muted: #626878;
-    --accent: #8a6d1f;
-    --heading: #2f5bb7;
-    --error: #b5303a;
     --rule: #dcdee6;
+  }
+
+  /* Theme palettes are built for a dark terminal, and several of the classic
+     sixteen — bright yellow especially — are close to invisible on white. Rather
+     than shipping a second palette per theme, darken whatever the theme gave us
+     just for this mode. A theme stays recognisable; the text stays legible. */
+  :root {
+    --fg: color-mix(in srgb, var(--fg) 55%, black);
+    --muted: color-mix(in srgb, var(--muted) 70%, black);
+    --accent: color-mix(in srgb, var(--accent) 55%, black);
+    --heading: color-mix(in srgb, var(--heading) 65%, black);
+    --error: color-mix(in srgb, var(--error) 75%, black);
+    --success: color-mix(in srgb, var(--success) 70%, black);
   }
 }
 
@@ -61,7 +72,8 @@ body {
 
 .rule {
   border: 0;
-  border-top: 1px solid var(--rule);
+  /* The theme's box-drawing set carries across: double, single or ascii. */
+  border-top: var(--rule-style, 1px solid) var(--rule);
   margin: 0.75rem 0 1.5rem;
 }
 
