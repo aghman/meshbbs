@@ -1,0 +1,42 @@
+MODULE  := github.com/aghman/meshbbs
+BINARY  := meshbbs
+VERSION := $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo dev)
+LDFLAGS := -s -w -X $(MODULE)/internal/cli.Version=$(VERSION)
+
+.PHONY: build test test-race vet fmt fmt-check check cross clean
+
+build:
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/meshbbs
+
+test:
+	go test ./...
+
+test-race:
+	go test -race ./...
+
+vet:
+	go vet ./...
+
+fmt:
+	gofmt -w .
+
+fmt-check:
+	@unformatted=$$(gofmt -l . | grep -v '^internal/identity/wordlist.go$$' || true); \
+	if [ -n "$$unformatted" ]; then \
+		echo "These files need gofmt:"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+
+check: fmt-check vet test-race
+
+# Cross-compile for all platforms shipped by CI.
+cross:
+	CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-amd64     ./cmd/meshbbs
+	CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-arm64     ./cmd/meshbbs
+	CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-darwin-amd64    ./cmd/meshbbs
+	CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-darwin-arm64    ./cmd/meshbbs
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-windows-amd64.exe ./cmd/meshbbs
+
+clean:
+	rm -rf $(BINARY) dist
