@@ -52,7 +52,14 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 
-	srv, err := NewServer(bbs.New(st, key, clk), st, Options{
+	// Seed the default areas: without them the forum screens are empty and the
+	// bridge tests have nothing to navigate.
+	svc := bbs.New(st, key, clk)
+	if err := svc.SeedDefaultAreas(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := NewServer(svc, st, Options{
 		Origin:                  testOrigin,
 		MaxSessions:             4,
 		MaxSessionsPerUser:      2,

@@ -1,3 +1,5 @@
+import { connect } from "/bbs.js";
+
 // Passkey sign-in and enrolment (webui.md §7, §8).
 //
 // WebAuthn speaks ArrayBuffers; JSON does not. Every conversion below is that
@@ -52,11 +54,13 @@ function reviveRequest(o) {
   return o.publicKey;
 }
 
-const signedIn = (nick) => {
-  document.getElementById("signin").hidden = true;
-  document.getElementById("hello").hidden = false;
-  document.getElementById("nick").textContent = nick;
+// Signing in swaps the auth page for the BBS itself and opens the session
+// socket. From here on the server drives the screen.
+const signedIn = () => {
+  document.querySelector("main.frame").hidden = true;
+  document.getElementById("screen").hidden = false;
   say("");
+  connect();
 };
 
 document.getElementById("login").addEventListener("click", async () => {
@@ -65,7 +69,7 @@ document.getElementById("login").addEventListener("click", async () => {
     const options = reviveRequest(await post("/auth/login/begin"));
     const assertion = await navigator.credentials.get({ publicKey: options });
 
-    const { nick } = await post("/auth/login/finish", {
+    await post("/auth/login/finish", {
       id: assertion.id,
       rawId: bufToB64url(assertion.rawId),
       type: assertion.type,
@@ -76,7 +80,7 @@ document.getElementById("login").addEventListener("click", async () => {
         userHandle: bufToB64url(assertion.response.userHandle),
       },
     });
-    signedIn(nick);
+    signedIn();
   } catch (err) {
     // A user who dismisses the browser prompt has not hit an error, so do not
     // shout at them about one.
@@ -116,14 +120,9 @@ document.getElementById("enrol").addEventListener("click", async () => {
   }
 });
 
-document.getElementById("logout").addEventListener("click", async () => {
-  await post("/auth/logout").catch(() => {});
-  location.reload();
-});
-
 // Pick up an existing session on load, so a refresh does not look like a
 // sign-out.
 fetch("/api/me", { credentials: "same-origin" })
   .then((r) => (r.ok ? r.json() : null))
-  .then((me) => me && signedIn(me.nick))
+  .then((me) => me && signedIn())
   .catch(() => {});

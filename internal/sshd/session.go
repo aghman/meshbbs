@@ -98,6 +98,14 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 	)
 }
 
+// TUI adapts the tracker to the interface the session layer needs.
+//
+// Exported so the WEB front end joins this same tracker rather than starting a
+// parallel one. That is what puts a browser user in [W] Who's Online next to
+// everyone else, and it is most of what makes the web feel like part of the BBS
+// instead of an adjacent website (webui.md §9).
+func (p *Presence) TUI() tui.PresenceTracker { return presenceAdapter{p} }
+
 // presenceAdapter adapts the server's Presence to the interface the TUI needs,
 // so the tui package does not import sshd (which would be a cycle).
 type presenceAdapter struct{ p *Presence }

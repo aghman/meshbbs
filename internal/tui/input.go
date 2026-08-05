@@ -62,6 +62,20 @@ func (t textInput) Render() string {
 func (t textInput) String() string { return t.value }
 func (t *textInput) Clear()        { t.value = "" }
 
+// setValue replaces the whole value, honouring the limit.
+//
+// The limit is enforced HERE as well as in Update because the web sets values
+// wholesale rather than a keystroke at a time (webui.md §5.1) — a browser that
+// pasted a megabyte would otherwise walk straight past a bound the terminal
+// path could never exceed.
+func (t *textInput) setValue(s string) {
+	s = strings.ReplaceAll(s, "\n", "")
+	if r := []rune(s); t.limit > 0 && len(r) > t.limit {
+		s = string(r[:t.limit])
+	}
+	t.value = s
+}
+
 // textArea is a minimal multi-line editor for message bodies.
 type textArea struct {
 	lines []string
@@ -126,3 +140,21 @@ func (t textArea) Render() string {
 }
 
 func (t *textArea) Clear() { t.lines = []string{""} }
+
+// setValue replaces the whole body, honouring the limit. Same reasoning as
+// textInput.setValue: the web sets values wholesale, so the bound has to hold
+// on this path too.
+func (t *textArea) setValue(s string) {
+	if t.limit > 0 && len(s) > t.limit {
+		// Cut on a rune boundary so a truncated body is still valid UTF-8.
+		r := []rune(s)
+		for len(string(r)) > t.limit {
+			r = r[:len(r)-1]
+		}
+		s = string(r)
+	}
+	t.lines = strings.Split(s, "\n")
+	if len(t.lines) == 0 {
+		t.lines = []string{""}
+	}
+}

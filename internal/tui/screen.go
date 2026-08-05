@@ -1,5 +1,10 @@
 package tui
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // Screen is a renderer-independent description of what a session is looking at
 // (webui.md §2).
 //
@@ -92,7 +97,11 @@ type Line []Span
 // The vocabulary is small and CLOSED on purpose. Eight kinds cover all fifteen
 // screens, and adding a ninth should feel like a decision — a screen that needs
 // its own bespoke block is usually a screen that wants rethinking.
-type Block interface{ isBlock() }
+type Block interface {
+	isBlock()
+	// blockKind names the type on the wire.
+	blockKind() string
+}
 
 func (TextBlock) isBlock()    {}
 func (ChoicesBlock) isBlock() {}
@@ -102,6 +111,101 @@ func (FormBlock) isBlock()    {}
 func (ChatLogBlock) isBlock() {}
 func (TabsBlock) isBlock()    {}
 func (ConfirmBlock) isBlock() {}
+
+func (TextBlock) blockKind() string    { return "text" }
+func (ChoicesBlock) blockKind() string { return "choices" }
+func (TableBlock) blockKind() string   { return "table" }
+func (ArticleBlock) blockKind() string { return "article" }
+func (FormBlock) blockKind() string    { return "form" }
+func (ChatLogBlock) blockKind() string { return "chatlog" }
+func (TabsBlock) blockKind() string    { return "tabs" }
+func (ConfirmBlock) blockKind() string { return "confirm" }
+
+// Blocks are marshalled with an explicit "kind" tag.
+//
+// Go's interface encoding drops the concrete type, which would leave a client
+// guessing a block's kind from which fields happen to be present. That works
+// until two kinds overlap — a table and a chat log are both lists of rows — and
+// then it fails as a rendering bug rather than a decode error. Tagging the wire
+// makes the format self-describing, which it has to be anyway for anything
+// other than this one renderer to consume it.
+func marshalBlock(b Block) ([]byte, error) {
+	inner, err := json.Marshal(blockPayload{b})
+	if err != nil {
+		return nil, err
+	}
+	return inner, nil
+}
+
+// blockPayload splices the kind tag into the block's own object.
+type blockPayload struct{ b Block }
+
+func (p blockPayload) MarshalJSON() ([]byte, error) {
+	var raw []byte
+	var err error
+	switch v := p.b.(type) {
+	case TextBlock:
+		raw, err = json.Marshal(struct {
+			Kind string `json:"kind"`
+			TextBlock
+		}{v.blockKind(), v})
+	case ChoicesBlock:
+		raw, err = json.Marshal(struct {
+			Kind string `json:"kind"`
+			ChoicesBlock
+		}{v.blockKind(), v})
+	case TableBlock:
+		raw, err = json.Marshal(struct {
+			Kind string `json:"kind"`
+			TableBlock
+		}{v.blockKind(), v})
+	case ArticleBlock:
+		raw, err = json.Marshal(struct {
+			Kind string `json:"kind"`
+			ArticleBlock
+		}{v.blockKind(), v})
+	case FormBlock:
+		raw, err = json.Marshal(struct {
+			Kind string `json:"kind"`
+			FormBlock
+		}{v.blockKind(), v})
+	case ChatLogBlock:
+		raw, err = json.Marshal(struct {
+			Kind string `json:"kind"`
+			ChatLogBlock
+		}{v.blockKind(), v})
+	case TabsBlock:
+		raw, err = json.Marshal(struct {
+			Kind string `json:"kind"`
+			TabsBlock
+		}{v.blockKind(), v})
+	case ConfirmBlock:
+		raw, err = json.Marshal(struct {
+			Kind string `json:"kind"`
+			ConfirmBlock
+		}{v.blockKind(), v})
+	default:
+		return nil, fmt.Errorf("tui: block type %T has no wire encoding", p.b)
+	}
+	return raw, err
+}
+
+// MarshalJSON emits the screen with every block tagged by kind.
+func (s Screen) MarshalJSON() ([]byte, error) {
+	blocks := make([]json.RawMessage, 0, len(s.Blocks))
+	for _, b := range s.Blocks {
+		raw, err := marshalBlock(b)
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, raw)
+	}
+	type alias Screen
+	return json.Marshal(struct {
+		alias
+		Blocks []json.RawMessage `json:"blocks"`
+	}{alias(s), blocks})
+}
 
 // TextBlock is a paragraph: one or more lines at some emphasis.
 type TextBlock struct {

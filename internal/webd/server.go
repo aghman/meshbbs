@@ -16,6 +16,8 @@ import (
 	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/store"
+	"github.com/aghman/meshbbs/internal/theme"
+	"github.com/aghman/meshbbs/internal/tui"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
 
@@ -42,6 +44,15 @@ type Options struct {
 	IdleTimeoutMins         int
 	UnlockedIdleTimeoutMins int
 	SessionTTLHours         int
+
+	// Presence and Chat are the SSH front end's, shared rather than duplicated:
+	// a browser user gets a node number and appears in who's-online next to
+	// everyone else, and joins the same conversation. One BBS, three doors.
+	Presence tui.PresenceTracker
+	Chat     *tui.ChatRoom
+
+	Themes    *theme.Set
+	ThemeName string
 
 	Clock    clock.Clock
 	Location *time.Location
@@ -76,6 +87,20 @@ func NewServer(svc *bbs.Service, st *store.Store, opts Options) (*Server, error)
 	}
 	if opts.DisplayName == "" {
 		opts.DisplayName = "MeshBBS"
+	}
+	if opts.Themes == nil {
+		set, err := theme.Load("")
+		if err != nil {
+			return nil, err
+		}
+		opts.Themes = set
+	}
+	if opts.ThemeName == "" {
+		opts.ThemeName = theme.DefaultName
+	}
+	if opts.Chat == nil {
+		// A web-only instance still has node chat; it just has it to itself.
+		opts.Chat = tui.NewChatRoom(200)
 	}
 
 	u, err := url.Parse(opts.Origin)
@@ -120,6 +145,7 @@ func NewServer(svc *bbs.Service, st *store.Store, opts Options) (*Server, error)
 	mux.HandleFunc("POST /auth/enrol/finish", s.handleEnrolFinish)
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/me", s.handleMe)
+	mux.HandleFunc("GET /ws", s.handleWS)
 
 	s.http = &http.Server{
 		Addr:    net.JoinHostPort(opts.Bind, fmt.Sprint(opts.Port)),

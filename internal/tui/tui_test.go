@@ -249,7 +249,7 @@ func TestLeavingClearsThePassphrase(t *testing.T) {
 	if s.model.unlocked {
 		t.Fatal("the session is still marked unlocked after leaving")
 	}
-	if !f.presence.left {
+	if !f.presence.didLeave() {
 		t.Error("presence was not notified of the departure")
 	}
 }

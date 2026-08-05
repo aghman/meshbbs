@@ -206,9 +206,16 @@ Serves SSH on the configured port. Users connect with:
 					IdleTimeoutMins:         e.cfg.Web.IdleTimeoutMins,
 					UnlockedIdleTimeoutMins: e.cfg.Web.UnlockedIdleTimeoutMins,
 					SessionTTLHours:         e.cfg.Web.SessionTTLHours,
-					Clock:                   e.clock,
-					Location:                loc,
-					Logger:                  log,
+					// Shared with SSH and telnet, not duplicated: a browser user
+					// gets a node number, shows up in who's-online, and joins the
+					// same chat as everyone else.
+					Presence:  srv.Presence().TUI(),
+					Chat:      srv.Chat(),
+					Themes:    themes,
+					ThemeName: e.cfg.Theme.Default,
+					Clock:     e.clock,
+					Location:  loc,
+					Logger:    log,
 				})
 				if err != nil {
 					return err

@@ -134,3 +134,189 @@ p { margin: 0 0 1rem; }
   body { padding: 1.25rem 1rem 3rem; }
   .key { width: 100%; }
 }
+
+/* ---------------------------------------------------------------------------
+   The BBS screen (webui.md §2, §11)
+
+   Geometry lives here, not in the model. Long values arrive whole and are
+   wrapped, scrolled or elided by CSS — which is the entire reason a browser can
+   show an area description the terminal has to cut at column 26.
+   --------------------------------------------------------------------------- */
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 5rem);
+}
+
+.screen .body { flex: 1; }
+
+.screen .block { margin-bottom: 1.5rem; }
+
+.line { min-height: 1.6em; }
+
+/* Prose the model marked as wrappable gets a readable measure. Blocks without
+   it keep their line breaks, because those breaks are load-bearing — the ssh
+   invocation on the key-unknown screen has to stay one command. */
+.text.wrap { max-width: 62ch; }
+.text:not(.wrap) .line { white-space: pre-wrap; }
+
+.heading { color: var(--heading); font-weight: 700; }
+.accent  { color: var(--accent); }
+.error   { color: var(--error); }
+.success { color: var(--success, #98c379); }
+
+.section-title {
+  color: var(--heading);
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+
+/* Menus: the whole row is the target, which is what makes this work on a phone
+   where a single bracketed letter is not. */
+.choices { display: flex; flex-direction: column; gap: 0.25rem; }
+
+.choice {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  min-height: 2.75rem;
+}
+
+.choice:hover, .choice:focus-visible {
+  border-color: var(--rule);
+  background: color-mix(in srgb, var(--heading) 8%, transparent);
+}
+
+.hotkey { color: var(--accent); font-weight: 700; }
+
+/* Wide tables scroll inside their own box; the page never scrolls sideways. */
+.table-wrap { overflow-x: auto; }
+
+.table { width: 100%; border-collapse: collapse; }
+
+.table th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  letter-spacing: 0.06em;
+  padding: 0.3rem 0.75rem 0.3rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.table td { padding: 0.45rem 0.75rem 0.45rem 0; vertical-align: top; }
+
+.row { cursor: pointer; }
+.row:hover { background: color-mix(in srgb, var(--heading) 8%, transparent); }
+
+.row.selected {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* The terminal marks the cursor with "> "; a focus bar reads better here and
+   survives a row being tall enough to wrap. */
+.row.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+.article { max-width: 66ch; }
+.article-heading { font-size: 1.05rem; color: var(--heading); margin: 0 0 0.25rem; }
+.article-meta { margin-bottom: 1rem; font-size: 0.9rem; }
+.article-body { white-space: pre-wrap; }
+
+.field-row { margin-bottom: 1rem; }
+.field-label {
+  display: block;
+  color: var(--heading);
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 0.3rem;
+}
+textarea.input { resize: vertical; letter-spacing: normal; line-height: 1.6; }
+.hint { margin-top: -0.5rem; margin-bottom: 1rem; font-size: 0.9rem; }
+
+.chatlog {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+.chat-line { display: flex; gap: 0.6rem; align-items: baseline; }
+.chat-time { color: var(--muted); font-size: 0.85rem; flex: none; }
+.chat-nick { color: var(--accent); flex: none; }
+.chat-text { white-space: pre-wrap; }
+
+.tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--rule); }
+.tab {
+  padding: 0.5rem 0.9rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+  min-height: 2.75rem;
+}
+.tab.selected {
+  color: var(--accent);
+  border-color: var(--rule);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.confirm {
+  padding: 1rem;
+  border: 1px solid var(--error);
+  border-radius: 3px;
+}
+.confirm-question { margin-bottom: 1rem; }
+.confirm-actions { display: flex; gap: 0.5rem; }
+.key.danger { color: var(--error); border-color: var(--error); }
+
+/* Key hints keep their key label, so the browser teaches the SSH interface
+   rather than replacing it. */
+.help {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+}
+.help .key {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  padding: 0.45rem 0.8rem;
+  border-color: var(--rule);
+  color: var(--fg);
+}
+.help .key:hover { border-color: var(--accent); }
+.help-note { color: var(--muted); }
+
+@media (max-width: 30rem) {
+  /* On a phone the key hints are the navigation, so they get pinned where a
+     thumb reaches rather than living at the bottom of a scrolling page. */
+  .help {
+    position: sticky;
+    bottom: 0;
+    margin: 2rem -1rem 0;
+    padding: 0.75rem 1rem calc(0.75rem + env(safe-area-inset-bottom));
+    background: var(--bg);
+    border-top: 1px solid var(--rule);
+  }
+  .help .key { flex: 1 1 auto; width: auto; justify-content: center; }
+  .table td, .table th { padding-right: 0.5rem; }
+}
