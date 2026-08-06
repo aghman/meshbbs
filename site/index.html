@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>meshbbs — a BBS that fits in 233 bytes</title>
+<meta name="description" content="A modern cross-platform BBS in Go: SSH access, forums, private mail, file areas and door games, federated between independent instances over Meshtastic LoRa mesh.">
+<meta property="og:title" content="meshbbs — a BBS that fits in 233 bytes">
+<meta property="og:description" content="Forums, private mail and door games over SSH, federated between independent BBS instances over LoRa radio. An instance with no internet at all is a full participant.">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-grid">
+      <div>
+        <div class="status-line">
+          <span class="dot"></span>
+          Phase 2 complete · Phase 3 in progress · mesh federation not yet live
+        </div>
+
+        <h1>A BBS that fits in <em>233 bytes</em></h1>
+
+        <p class="lede">
+          Forums, private mail, file areas and door games — over SSH or in a browser — federated
+          between independent BBS instances over <strong>Meshtastic LoRa radio</strong>. An
+          instance with no internet connection at all is a full participant in the network.
+        </p>
+
+        <div class="cta-row">
+          <a class="btn primary" href="running.html">Run an instance</a>
+          <a class="btn" href="protocol.html">How the sync works</a>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-cap">
+          <span>One forum post, on the air</span>
+          <span>233 B · 2.157 s</span>
+        </div>
+        <div id="packet" role="img"
+             aria-label="A 233-byte Meshtastic packet divided into 93 bytes of protocol overhead — of which 64 bytes are the Ed25519 signature — leaving 140 bytes for the compressed message body."></div>
+        <div class="legend" data-packet-legend></div>
+      </div>
+    </div>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><span class="v">108 B/s</span><span class="k">LongFast goodput</span></div>
+    <div class="stat"><span class="v">2.3%</span><span class="k">channel used at 50 nodes</span></div>
+    <div class="stat"><span class="v">0</span><span class="k">registries, authorities, PKI</span></div>
+    <div class="stat"><span class="v">1</span><span class="k">binary, no runtime</span></div>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="concept">
+    <div class="eyebrow"><b>01</b> The constraint that shapes everything</div>
+    <div class="col prose">
+      <h2>The link is brutally small</h2>
+      <p>
+        A Meshtastic packet carries at most <span class="num">233</span> bytes. On the default
+        LongFast preset, one full packet occupies the channel for <span class="num">2.157</span>
+        seconds — and because Meshtastic floods, every node that hears a broadcast rebroadcasts
+        it. One transmission costs the commons roughly <span class="num">4×</span> what it costs
+        you.
+      </p>
+      <p>
+        Share a 5% airtime ceiling across fifty instances and each one gets about
+        <span class="num">21</span> seconds of transmit time a day. Ten full packets. That is the
+        budget every other decision in the design answers to.
+      </p>
+      <p>
+        Three things fall straight out of it. Batching and dictionary compression are load-bearing
+        requirements rather than optimisations. File transfer over mesh doesn't exist as a code
+        path at all — only catalogs replicate. And every byte on the wire has to justify itself,
+        which is why record IDs are derived rather than transmitted and node IDs hoist out into a
+        per-bundle table.
+      </p>
+      <p><a class="inline" href="concept.html">The concept in full →</a></p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="cards">
+      <div class="card">
+        <h3>No addresses to register</h3>
+        <p>A node's ID <em>is</em> its key — <code>BLAKE3(pubkey)[:8]</code>. Self-certifying, so
+           there is nothing to squat, no binding to maintain and no authority to run.</p>
+      </div>
+      <div class="card">
+        <h3>Petnames, like an SSH config</h3>
+        <p>Sysops name peers locally: <code>austin@pnw</code>. Two BBSes may disagree about what
+           <code>pnw</code> means and neither is wrong. No alias ever goes on the wire.</p>
+      </div>
+      <div class="card">
+        <h3>Sysops can't read your mail</h3>
+        <p>Private messages are encrypted under a key only your passphrase opens — subject lines
+           included. The server stores ciphertext.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="use">
+    <div class="eyebrow"><b>02</b> Using it</div>
+    <div class="col prose">
+      <h2>You already have the client</h2>
+      <p>
+        SSH is the front door — no new client to install, no ZMODEM, no serial-protocol emulation,
+        and SFTP comes free as the file-area transport. A browser is the second door onto exactly
+        the same BBS.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-bar" role="tablist" aria-label="Ways to connect">
+        <button role="tab" aria-selected="true"  data-tab="new">Register</button>
+        <button role="tab" aria-selected="false" data-tab="login">Log in</button>
+        <button role="tab" aria-selected="false" data-tab="files">Files</button>
+        <button role="tab" aria-selected="false" data-tab="guest">Guest</button>
+      </div>
+      <div class="term-body">
+<pre data-panel="new"><span class="p">$</span> <span class="c">ssh new@bbs.example.com</span>
+
+<span class="d">  ┌──────────────────────────────────────────────┐</span>
+<span class="d">  │</span>  <span class="b">NEW USER REGISTRATION</span>                       <span class="d">│</span>
+<span class="d">  ├──────────────────────────────────────────────┤</span>
+<span class="d">  │</span>  Nick        <span class="c">austin_</span>                        <span class="d">│</span>
+<span class="d">  │</span>  Public key  <span class="g">✓ enrolled from this session</span>    <span class="d">│</span>
+<span class="d">  │</span>  Passphrase  <span class="d">••••••••  (wraps your DM key)</span>   <span class="d">│</span>
+<span class="d">  └──────────────────────────────────────────────┘</span>
+
+<span class="d">  SSH already handed us your public key, so your next</span>
+<span class="d">  login is passwordless. Nothing to paste.</span></pre>
+
+<pre data-panel="login" hidden><span class="p">$</span> <span class="c">ssh austin@bbs.example.com</span>
+
+<span class="d">  ╔══════════════════════════════════════════════╗</span>
+<span class="d">  ║</span>   <span class="c">fog city bbs</span>  <span class="d">K7QM4X2P…</span>        <span class="g">3 nodes up</span>   <span class="d">║</span>
+<span class="d">  ╚══════════════════════════════════════════════╝</span>
+
+    <span class="b">[F]</span> Forums          <span class="d">12 new in 4 areas</span>
+    <span class="b">[M]</span> Mail            <span class="c">2 unread</span>
+    <span class="b">[D]</span> Doors           <span class="d">3 available</span>
+    <span class="b">[A]</span> File areas      <span class="d">1,204 files network-wide</span>
+    <span class="b">[C]</span> Node chat       <span class="d">nobody around</span>
+
+  <span class="p">Command:</span> <span class="c">_</span></pre>
+
+<pre data-panel="files" hidden><span class="p">$</span> <span class="c">sftp -P 2222 austin@bbs.example.com</span>
+
+<span class="p">sftp&gt;</span> <span class="c">cd /areas/utils</span>
+<span class="p">sftp&gt;</span> <span class="c">put mesh-survey.tar.gz</span>
+<span class="d">Uploading mesh-survey.tar.gz  100%  84KB  84.0KB/s</span>
+
+<span class="d">  Files never cross the mesh — only their catalogs do.</span>
+<span class="d">  A 1 MB file at the 5% budget would take over a week</span>
+<span class="d">  of channel time, so bytes move over IP or sneakernet.</span></pre>
+
+<pre data-panel="guest" hidden><span class="p">$</span> <span class="c">ssh guest@bbs.example.com</span>
+
+<span class="d">  Read-only session. No persistent identity.</span>
+<span class="d">  Browse the forums, see what's here, decide later.</span>
+
+    <span class="b">[F]</span> Forums          <span class="d">read-only</span>
+    <span class="b">[A]</span> File areas      <span class="d">read-only</span>
+    <span class="d">[M] Mail            requires an account</span>
+
+  <span class="p">Command:</span> <span class="c">_</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="note">
+      <span class="tag">And now, in a browser</span>
+      <p>
+        Not a terminal emulator in a web page. A screen is a typed description of <em>what</em>
+        you're looking at, and two renderers consume it — one draws ANSI, one builds DOM. So the
+        browser wraps a post at a readable measure instead of column 78 and shows an area name in
+        full instead of cutting it at 26 characters, while the terminal stays byte-for-byte what it
+        was.
+      </p>
+      <p>
+        One navigation model, so a screen cannot exist over SSH and be missing from the web. You
+        get a node number and show up in Who's Online next to everyone else. Sign-in is a passkey —
+        no password, and no nick to type.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+    <p class="col"><a class="inline" href="using.html">Everything a user can do →</a></p>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="sync">
+    <div class="eyebrow"><b>03</b> Sync &amp; protocol</div>
+    <div class="col prose">
+      <h2>BSMP — five layers, one job each</h2>
+      <p>
+        Everything replicable is an immutable, signed record in one append-only log. Reconciling
+        two instances is a version-vector problem, and because records are immutable, forums have
+        no merge conflicts at all — an edit is a new record, a delete is a signed tombstone.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="stack">
+      <div class="layer">
+        <span class="lv">L4</span>
+        <div>
+          <div class="ln">Records</div>
+          <div class="ld">POST, DM, NODE, SUCCESSION, FILE, TOMBSTONE. Signed by the node rather
+          than the user — a 64-byte signature is 27% of a packet, so dual-signing every post is
+          unaffordable. Private mail is the exception.</div>
+        </div>
+      </div>
+      <div class="layer">
+        <span class="lv">L3</span>
+        <div>
+          <div class="ln">Replication</div>
+          <div class="ld">Version vectors and anti-entropy digests. Fifty nodes broadcasting every
+          30 minutes would eat 11% of the channel, so digests carry rolling hashes only — and 95%
+          of scheduled beats are suppressed because they would carry no news.</div>
+        </div>
+      </div>
+      <div class="layer">
+        <span class="lv">L2</span>
+        <div>
+          <div class="ln">Bundle</div>
+          <div class="ld">Records batched over a 15–30 minute window and compressed with a
+          pre-trained zstd dictionary. Generic zstd manages 1.3× on a short post; a trained
+          dictionary gets 3–5×.</div>
+        </div>
+      </div>
+      <div class="layer">
+        <span class="lv">L1</span>
+        <div>
+          <div class="ln">Fountain coding</div>
+          <div class="ld">One broadcast serves every listener, each missing a different random
+          subset — so there are no NACKs and cost is flat in audience size. Symbols 0…K−1 are the
+          original fragments, so a clean link decodes at zero coding overhead.</div>
+        </div>
+      </div>
+      <div class="layer">
+        <span class="lv">L0</span>
+        <div>
+          <div class="ln">Datagram</div>
+          <div class="ld">A Meshtastic MeshPacket on a dedicated channel. No packet carries
+          identity bytes at all; node-to-radio bindings are learned from a signed announcement,
+          on demand.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3 style="color:var(--fg-dim)">Why a fountain code, measured</h3>
+      <p style="font-size:16px;color:var(--fg-dim)">
+        Symbols needed at K=10 and 15% loss. ARQ wins at a single receiver — which is why unicast
+        repair to one lagging peer is still the right move — but its cost grows with the audience
+        while the fountain's doesn't.
+      </p>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Receivers</th><th>ARQ</th><th>Fountain</th><th>Ratio</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>12</td><td>20</td><td class="bad">0.60×</td></tr>
+          <tr><td>5</td><td>21</td><td>20</td><td>1.05×</td></tr>
+          <tr><td>20</td><td>24</td><td>20</td><td class="good">1.20×</td></tr>
+          <tr class="mark"><td>50</td><td>29</td><td>20</td><td>1.45×</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="gap-m"></div>
+    <p class="col" style="font-size:16px;color:var(--fg-dim)">
+      Fifty simulated instances at 15% loss converge in <span class="num">3 h 20 m</span> using
+      <span class="num">2.3%</span> of the channel, against a 5% budget.
+      <a class="inline" href="protocol.html">Read the protocol in full →</a>
+    </p>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="run">
+    <div class="eyebrow"><b>04</b> Run a node</div>
+    <div class="col prose">
+      <h2>One binary, no runtime</h2>
+      <p>
+        Pure Go with <code>CGO_ENABLED=0</code> on every target. No database server, no Node, no C
+        toolchain — Linux, macOS and Windows on amd64 and arm64, from one build matrix.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">go build -o meshbbs ./cmd/meshbbs</span>
+<span class="p">$</span> <span class="c">./meshbbs init --display-name fog-city --sysop-nick austin \
+      --sysop-password-stdin</span>
+
+<span class="g">  ✓</span> node key generated  <span class="d">keys/node.ed25519</span>
+<span class="g">  ✓</span> node id  <span class="b">K7QM-4X2P-B9TFR</span>
+<span class="d">           pilot ranch obey vivid scout amber</span>
+
+<span class="w">  ⚠</span>  <span class="d">Back up keys/. A lost node key cannot be recovered —</span>
+<span class="d">     the instance would rejoin the network as a new node.</span>
+
+<span class="p">$</span> <span class="c">./meshbbs serve</span>
+<span class="d">  ssh listening on :2222 · 4 areas · 0 peers</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+    <p class="col"><a class="inline" href="running.html">Full setup, config and peering →</a></p>
+  </section>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/config.md">Configuration reference</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>

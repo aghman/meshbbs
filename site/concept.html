@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concept — meshbbs</title>
+<meta name="description" content="Why a BBS on LoRa radio: the airtime budget that shapes every decision, identity without a registry, and the trust model of a shared public channel.">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <header class="pagehead">
+    <div class="eyebrow"><b>01</b> Concept</div>
+    <h1>A bulletin board that survives the internet going away</h1>
+    <p class="lede col">
+      meshbbs is a BBS in the 1990s sense — forums, private mail, file areas, door games, people
+      typing at each other over a terminal. What's different is the wire underneath it: instances
+      federate over <strong>LoRa radio</strong> at roughly a hundred bytes a second, so a BBS with
+      no internet connection at all is a full member of the network.
+    </p>
+  </header>
+
+  <div class="toc">
+    <span>On this page</span>
+    <a href="#budget">The airtime budget</a>
+    <a href="#identity">Identity without a registry</a>
+    <a href="#names">The petname layer</a>
+    <a href="#trust">Trust on a public channel</a>
+    <a href="#nots">What it deliberately isn't</a>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="budget">
+    <div class="eyebrow">The one thing that shapes everything else</div>
+    <div class="col prose">
+      <h2>Start with the airtime, not the architecture</h2>
+      <p>
+        A Meshtastic packet carries at most <span class="num">233</span> bytes of application
+        payload. On LongFast — the default preset, the one a community mesh actually runs — a full
+        packet holds the channel for <span class="num">2.157</span> seconds. That is about
+        <span class="num">108</span> bytes per second of theoretical goodput.
+      </p>
+      <p>
+        But that figure is the channel's capacity, not yours. Meshtastic uses managed flood
+        routing: every node that hears a broadcast rebroadcasts it. So one origination costs the
+        <em>channel</em> roughly R times the airtime of a single transmission, where R is how many
+        nodes actually rebroadcast. On a well-connected mesh R is typically 3–5.
+      </p>
+      <p>
+        Every airtime figure in this project is therefore stated twice — what your node spends,
+        and what the commons pays. The governor budgets the second one.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="tablewrap">
+      <table>
+        <caption class="tnote" style="text-align:left;caption-side:bottom">
+          LongFast, mesh-wide ceiling of 5% of wall clock, shared evenly, R = 4.
+        </caption>
+        <thead>
+          <tr>
+            <th>Instances</th><th>Local TX/day</th><th>Full packets/day</th><th>Raw payload/day</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>5</td><td>216 s</td><td>108</td><td>25 KB</td></tr>
+          <tr><td>20</td><td>54 s</td><td>27</td><td>6.3 KB</td></tr>
+          <tr class="mark"><td>50</td><td>21.6 s</td><td>10.8</td><td>2.5 KB</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3>What that budget forces</h3>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <h3>Batching is structural</h3>
+        <p>One packet per post wastes the fixed header every time and burns two seconds of airtime
+           on a forty-character message. Posts accumulate for 15–30 minutes so framing amortises
+           and the compressor can find redundancy across messages.</p>
+      </div>
+      <div class="card">
+        <h3>No files over mesh, ever</h3>
+        <p>A single 1 MB file would take over a week of channel time. Only catalogs replicate — you
+           see the whole network's file list, and bytes move over IP or sneakernet. This is
+           enforced in the type system, not a config toggle.</p>
+      </div>
+      <div class="card">
+        <h3>Every byte argued for</h3>
+        <p>Record IDs are derived from content rather than transmitted. Node IDs and area tags
+           hoist into a per-bundle table. Binary encoding, truncated hashes, a pre-shared
+           compression dictionary. Not JSON, not UUIDs.</p>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">The social constraint</span>
+      <p>
+        A shared Meshtastic channel is a commons. A BBS network that parks itself on a community
+        mesh and eats 30% of the airtime will be — rightly — unwelcome. Note that a separate
+        channel is <em>not</em> separate airtime: every channel on the same frequency slot shares
+        the same physical medium. Channel separation buys tidiness; only the governor buys
+        neighbourliness.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="identity">
+    <div class="eyebrow">Addressing</div>
+    <div class="col prose">
+      <h2>The node ID <em>is</em> the key</h2>
+      <p>
+        There is no separate address, and nothing to apply for. A node's identity is the first
+        eight bytes of the BLAKE3 hash of its Ed25519 public key:
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="b">node_id</span> = BLAKE3(ed25519_pubkey)[:8]        <span class="d">// 8 bytes / 64 bits</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <p>
+        The property this buys is <strong>self-certification</strong>. Anyone holding a record can
+        hash the claimed public key and check it against the ID in the header. There is no binding
+        to maintain, no registry to consult, no authority to run — and no way to squat an identity
+        you don't hold the key for.
+      </p>
+      <p>
+        An entire category of machinery disappears with it: first-seen address bindings,
+        anti-squatting detection, a numbering scheme, a coordinator to assign numbers. None of it
+        needs to exist, because the binding is arithmetic.
+      </p>
+      <p>
+        Eight bytes rather than four because the threat is adversarial rather than accidental. An
+        attacker can grind keypairs until one hashes to a target's ID, then present forged records
+        to peers that haven't yet learned the real key. 32 bits falls in minutes on a GPU; 48 bits
+        in hours to days. 64 bits puts it out of reach.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Cost on the wire</div>
+        <div class="v">None, in practice. <code>origin</code> hoists out of each record into a
+          per-bundle origin table, so an 8-byte ID is paid once per bundle and each record carries
+          a 1-byte index. Break-even against a 4-byte numeric address is three records — and
+          batching puts normal traffic well past that.</div>
+      </div>
+      <div class="row">
+        <div class="k">Key rotation</div>
+        <div class="v">Because the ID is the key, rotating means becoming a different node. A
+          signed <code>SUCCESSION</code> record handles the planned case and peers auto-follow it,
+          with four guardrails: always alert, tombstone the old ID at the effective time, one
+          succession per predecessor, and reject implausible effective times.</div>
+      </div>
+      <div class="row">
+        <div class="k">A lost key</div>
+        <div class="v">Has no recovery path, and the docs say so plainly. With no old key there is
+          nothing to sign a succession with. You are a new node — which, because peer setup is
+          just an ID exchange, is a handful of messages rather than a re-registration. This is the
+          price of having no registry, and the reason there is no registry to petition.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="names">
+    <div class="eyebrow">The human problem</div>
+    <div class="col prose">
+      <h2>Nobody wants to type <code>K7QM4X2PB9TFR</code></h2>
+      <p>
+        This is the real cost of key-derived IDs and it deserves a straight answer. Zooko's
+        triangle says identifiers can be globally unique, human-meaningful and decentralised —
+        pick two. Numeric addressing chose unique and meaningful, and paid for it with a registry.
+        Key-derived chooses unique and decentralised. The missing leg has to come from somewhere
+        else.
+      </p>
+      <p>
+        It comes from <strong>petnames</strong>, and they are a real feature rather than an
+        afterthought. Each BBS keeps one sysop-owned alias table, exactly like <code>Host</code>
+        entries in an SSH config. Users type <code>austin@pnw</code> and never see an ID.
+      </p>
+      <p>
+        Aliases are strictly local, which is why no registry is needed: two BBSes may disagree
+        about what <code>pnw</code> means and neither is wrong. They resolve at compose time and
+        <strong>never travel on the wire</strong> — putting <code>pnw</code> in a record would make
+        delivery depend on the recipient sharing your private naming.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <h3>Two renderings of the same 64 bits</h3>
+      <p style="color:var(--fg-dim);font-size:16px">
+        One identifier, two display codecs, losslessly convertible. They exist because they serve
+        different physical channels — nobody types the words, and nobody speaks the base32.
+      </p>
+    </div>
+
+    <div class="tablewrap">
+      <table class="text">
+        <thead><tr><th>Rendering</th><th>Form</th><th>Used for</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Crockford base32</td>
+            <td style="font-family:var(--mono);font-size:13px;color:var(--fg)">K7QM-4X2P-B9TFR</td>
+            <td>Typing, config files, allowlists, logs, everyday display — usually the first eight
+                characters, git-short-hash style</td>
+          </tr>
+          <tr>
+            <td>BIP-39 wordlist</td>
+            <td style="font-family:var(--mono);font-size:13px;color:var(--fg)">pilot ranch obey<br>vivid scout amber</td>
+            <td>Reading aloud — voice radio, phone, confirming a fingerprint in person. Appears
+                only where a human verifies an identity out of band; it is not an input method</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="tnote">
+        Six words, not four: 64 bits at 11 bits per word from a 2048-word list. Four words would
+        need a 65,536-word dictionary.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">The honest trade</span>
+      <p>
+        Routing and trust get simpler and safer; typing an unfamiliar node ID gets worse. The alias
+        table is what hides that, and if the alias experience is weak this decision will feel bad
+        in daily use.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="trust">
+    <div class="eyebrow">Security model</div>
+    <div class="col prose">
+      <h2>Assume the whole channel is public</h2>
+      <p>
+        The mesh channel key is shared by every BBS on the network — which means every participating
+        sysop holds it. Meshtastic's channel encryption has known limitations besides. So the mesh
+        is treated as a <strong>public broadcast medium</strong>, and the design follows from that
+        rather than fighting it.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <ul class="plain col">
+      <li><strong>Everything is signed</strong>, so content can't be forged or tampered with in
+        transit, regardless of who is listening.</li>
+      <li><strong>Forum posts are public by definition.</strong> There is no confidentiality
+        expectation and the interface says so.</li>
+      <li><strong>Private messages are end-to-end encrypted</strong>, so the shared channel key is
+        irrelevant to them. They are also user-signed rather than node-signed — non-repudiation
+        between individuals is worth the bytes.</li>
+      <li><strong>Message metadata is not protected</strong>, and this is a deliberate documented
+        trade rather than an oversight. Other sysops can see that one user messaged another, and
+        when. It buys immediate bounces for undeliverable mail and per-recipient spam filtering.</li>
+      <li><strong>Trust is not transitive.</strong> If A trusts B and B trusts C, A does not accept
+        C's records — though A will happily relay them, because records are signed end-to-end and
+        relaying is safe regardless of trust.</li>
+      <li><strong>Local moderation always wins.</strong> A remote tombstone is honoured by default
+        when it comes from the same node as the post it deletes, and never auto-honoured when it
+        comes from a different one.</li>
+    </ul>
+
+    <div class="gap-m"></div>
+
+    <div class="note warn">
+      <span class="tag">⚠ Amateur radio operators</span>
+      <p>
+        If your node runs in Meshtastic's ham mode, you operate under FCC Part 97, which prohibits
+        messages encoded to obscure their meaning. meshbbs hard-blocks encrypted private messages
+        in that mode — and, because the channel key is also encryption, refuses to start with an
+        encrypted channel at all.
+      </p>
+      <p>
+        Signing is fine. Ed25519 authenticates without obscuring anything, so the record log, node
+        records and forum federation all work normally under Part 97. Only confidentiality is the
+        problem. There's an override, with a self-documenting name and a banner every launch.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="nots">
+    <div class="eyebrow">Scope</div>
+    <div class="col prose">
+      <h2>What it deliberately isn't</h2>
+      <p>
+        A design is as much what it refuses. These are decisions, not gaps — each was considered
+        and turned down for a reason.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">File transfer over mesh</div>
+        <div class="v">Not a quota, not a sysop toggle, not a tiny-files exception. The mesh link
+          refuses file payloads outright. Catalogs replicate; bytes go over IP or sneakernet.</div>
+      </div>
+      <div class="row">
+        <div class="k">Bluetooth LE</div>
+        <div class="v">USB serial and TCP cover every realistic deployment, and BLE was the only
+          dependency that would have forced cgo. Dropping it makes every release artifact
+          cgo-free with no build tags at all.</div>
+      </div>
+      <div class="row">
+        <div class="k">Real-time chat between BBSes</div>
+        <div class="v">Mesh latency runs to tens of seconds or minutes. Node chat is local; do
+          cross-instance chat over IP.</div>
+      </div>
+      <div class="row">
+        <div class="k">A second, web-shaped UI</div>
+        <div class="v">Narrowed rather than reversed when the browser front end landed. There is a
+          web interface, but it is the <em>same</em> menu graph and the same screens rendered
+          differently — not a forum UI with its own navigation, its own screens and its own place
+          for every future feature to be implemented twice. The thing being refused is the
+          drift.</div>
+      </div>
+      <div class="row">
+        <div class="k">User-authored ANSI theme packs</div>
+        <div class="v">Screen templates, layout manifests and per-menu artwork are out. A curated
+          set of built-in themes plus a <code>themes/*.toml</code> loader for colour and glyph
+          overrides is in.</div>
+      </div>
+      <div class="row">
+        <div class="k">Legacy DOS door emulation</div>
+        <div class="v">Deferred to Phase 7 and may never ship. The modern door API is the product.
+          Nothing depends on the DOS path.</div>
+      </div>
+    </div>
+  </section>
+
+  <a class="next" href="using.html">
+    <span class="nk">Next</span>
+    <span class="nt">Using it — SSH, mail, files and doors →</span>
+  </a>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/config.md">Configuration reference</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>

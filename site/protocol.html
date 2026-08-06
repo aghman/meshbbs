@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sync &amp; protocol — meshbbs</title>
+<meta name="description" content="BSMP, the BBS Sync over Mesh Protocol: an immutable signed record log, version-vector anti-entropy, dictionary compression, fountain coding, and an airtime governor.">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <header class="pagehead">
+    <div class="eyebrow"><b>03</b> Sync &amp; protocol</div>
+    <h1>BSMP — five layers, one job each</h1>
+    <p class="lede col">
+      The BBS Sync over Mesh Protocol. Everything replicable is an immutable signed record in one
+      append-only log, and reconciling two instances is a version-vector problem. The whole thing
+      is designed against a 233-byte MTU — <strong>design for the mesh and you get IP for
+      free</strong>, not the other way round.
+    </p>
+  </header>
+
+  <div class="toc">
+    <span>On this page</span>
+    <a href="#log">The record log</a>
+    <a href="#stack">The layer stack</a>
+    <a href="#gossip">Anti-entropy</a>
+    <a href="#fountain">Fountain coding</a>
+    <a href="#compress">Compression</a>
+    <a href="#governor">The airtime governor</a>
+    <a href="#links">Other links</a>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="log">
+    <div class="eyebrow">L4 · Records</div>
+    <div class="col prose">
+      <h2>One append-only log</h2>
+      <p>
+        Everything that replicates — posts, private mail, node metadata, file catalog entries,
+        deletions — is an immutable signed record in a single log.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="b">Record</span> {
+  <span class="c">id</span>        [16]byte   <span class="d">// BLAKE3(canonical_body)[:16] — DERIVED, NOT TRANSMITTED</span>
+  <span class="c">origin</span>    [8]byte    <span class="d">// BLAKE3(node_pubkey)[:8] — HOISTED to a bundle origin table</span>
+  <span class="c">seq</span>       varint     <span class="d">// per-origin monotonic sequence</span>
+  <span class="c">ts</span>        varint     <span class="d">// delta from the bundle's base timestamp</span>
+  <span class="c">type</span>      uint8      <span class="d">// POST, DM, PROFILE, NODE, SUCCESSION, AREA, FILE, …</span>
+  <span class="c">area</span>      [4]byte    <span class="d">// truncated hash of area name — HOISTED to bundle header</span>
+  <span class="c">parent</span>    [16]byte   <span class="d">// threading, flag-gated so top-level posts don't pay</span>
+  <span class="c">body</span>      []byte     <span class="d">// zstd-compressed with a shared dictionary</span>
+  <span class="c">sig</span>       [64]byte   <span class="d">// Ed25519 over everything above</span>
+}</pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">The ID is never sent</div>
+        <div class="v">It's <code>BLAKE3(canonical_body)[:16]</code>, and the receiver recomputes it
+          from fields it already has. An earlier draft put it on the wire — 16 wasted bytes, 7% of
+          a packet, per record. Content addressing still gives free deduplication, which matters
+          because a flood mesh delivers the same record by several paths; the ID just doesn't need
+          transmitting to do that.</div>
+      </div>
+      <div class="row">
+        <div class="k">Origin, area and base timestamp hoist</div>
+        <div class="v">Bundles are per-area and usually single-origin, so the 8-byte node ID and
+          4-byte area tag are paid once per bundle while records carry a 1-byte index and a small
+          delta. This is what makes 8-byte self-certifying IDs <em>cheaper</em> than 4-byte numeric
+          addresses at any bundle size of three or more.</div>
+      </div>
+      <div class="row">
+        <div class="k">Immutable, with tombstones</div>
+        <div class="v">Forums have no merge conflicts at all. An edit is a new record with a
+          supersedes pointer; a delete is a signed tombstone. Whether a BBS honours a remote delete
+          is local sysop policy.</div>
+      </div>
+      <div class="row">
+        <div class="k">The node signs, not the user</div>
+        <div class="v">A 64-byte signature is 27% of a mesh packet, so dual-signing every post is
+          unaffordable. Node-signing means "the instance holding this key vouches that this user
+          posted this" — the FidoNet trust model. Private mail is user-signed, where
+          non-repudiation actually matters and volume is low.</div>
+      </div>
+    </div>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3>Three ways to silently break every signature</h3>
+      <p style="font-size:16px;color:var(--fg-dim)">
+        Found while auditing the test strategy. All three are architectural constraints from day
+        zero rather than later hardening — each is cheap to design in and effectively unfixable
+        once a network has history.
+      </p>
+    </div>
+
+    <div class="steps">
+      <div class="stepitem">
+        <div>
+          <h3>Freeze the canonical encoding</h3>
+          <p>Verifying a signature means reconstructing the signed bytes exactly. Store records
+             decomposed into columns and re-serialize to verify, and any encoder change — a field
+             reorder, a varint tweak, a migration — invalidates every historical signature at once.
+             The original signed bytes are stored verbatim and verified against; the encoder is a
+             frozen artifact with its own version byte and conformance vectors.</p>
+        </div>
+      </div>
+      <div class="stepitem">
+        <div>
+          <h3>Never range over a map</h3>
+          <p>Go randomizes map iteration order deliberately. An encoder that walks a map produces
+             different bytes on different runs, hence a different record ID and a signature that
+             verifies on the machine that made it and nowhere else. This is the single easiest way
+             to introduce a heisenbug that only appears in federation — so it's a lint rule with a
+             property test behind it.</p>
+        </div>
+      </div>
+      <div class="stepitem">
+        <div>
+          <h3>Sequence numbers must never regress</h3>
+          <p>The subtle one. Version vectors mean a peer that has seen sequence 500 from you will
+             never ask for 450–500 again. Restore a week-old backup, reissue those numbers with
+             different content, and the divergence is permanent and <em>silent</em> — no error, no
+             conflict, peers simply hold different records under identical coordinates forever. The
+             high-water mark is fsynced on every advance, and an incarnation counter in the node
+             record tells peers when a regression was detected at startup.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="stack">
+    <div class="eyebrow">The stack</div>
+    <div class="col prose">
+      <h2>Five layers</h2>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="stack">
+      <div class="layer">
+        <span class="lv">L4</span>
+        <div>
+          <div class="ln">Records</div>
+          <div class="ld">Immutable, signed, content-addressed. Above.</div>
+        </div>
+      </div>
+      <div class="layer">
+        <span class="lv">L3</span>
+        <div>
+          <div class="ln">Replication</div>
+          <div class="ld">Version vectors, anti-entropy digests, delta requests.</div>
+        </div>
+      </div>
+      <div class="layer">
+        <span class="lv">L2</span>
+        <div>
+          <div class="ln">Bundle</div>
+          <div class="ld">N records framed together and zstd-compressed with a trained dictionary.</div>
+        </div>
+      </div>
+      <div class="layer">
+        <span class="lv">L1</span>
+        <div>
+          <div class="ln">Coding</div>
+          <div class="ld">Bundle split into ≤225-byte symbols: a systematic prefix plus fountain
+            repair symbols.</div>
+        </div>
+      </div>
+      <div class="layer">
+        <span class="lv">L0</span>
+        <div>
+          <div class="ln">Datagram</div>
+          <div class="ld">A Meshtastic MeshPacket on a dedicated channel, currently on the private
+            port number. A registered allocation gets requested once the wire format is frozen —
+            registering a port is a public commitment to a stable format, so it comes after the
+            format survives real radios, not before.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">Two load-bearing abstractions</span>
+      <p>
+        <strong>Link</strong> is the federation transport. Meshtastic is just one kind: a datagram
+        link with a 233-byte MTU, 108 B/s, high loss and multi-minute latency. IP is another with a
+        1400-byte MTU and megabytes per second. Sneakernet — export a bundle to a USB stick — is a
+        third, and the FidoNet gateway a fourth, with the unusual property of being a trust
+        boundary as well as a transport.
+      </p>
+      <p>
+        <strong>Transport</strong> is how we reach the local radio. Serial and TCP speak the same
+        protobuf stream, so it's a thin layer over a four-byte frame header.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="gossip">
+    <div class="eyebrow">L3 · Replication</div>
+    <div class="col prose">
+      <h2>The safety net should be idle</h2>
+      <p>
+        For each area a node tracks the highest contiguous sequence it holds from every origin. At
+        fifty instances that's 500 bytes per area — three mesh packets — and across ten federated
+        areas, 5 KB. Fine to hold, impossible to broadcast routinely.
+      </p>
+      <p>
+        An early draft proposed a digest broadcast every 15–30 minutes. At fifty instances that is
+        fatal:
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Instances</th><th>Digest interval</th><th>Mesh airtime consumed</th></tr></thead>
+        <tbody>
+          <tr><td>5</td><td>30 min</td><td>1.1%</td></tr>
+          <tr><td>20</td><td>30 min</td><td>4.5%</td></tr>
+          <tr class="mark"><td>50</td><td>30 min</td><td>11.2%</td></tr>
+          <tr><td>50</td><td>120 min</td><td>2.8%</td></tr>
+        </tbody>
+      </table>
+      <p class="tnote">
+        11% of the channel for control traffic carrying no content — more than the entire 5% budget,
+        before a single post is sent.
+      </p>
+    </div>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3>Five mitigations, all required</h3>
+    </div>
+
+    <ul class="plain col">
+      <li><strong>Digests never carry full vectors.</strong> Per area, a digest carries an area tag,
+        a rolling hash and a count — ten bytes. Ten areas is one packet. Full vectors are exchanged
+        unicast, on demand, only once a hash mismatch proves divergence.</li>
+      <li><strong>The interval scales with peer count</strong>, clamped so control traffic stays
+        under a configured share of the budget. At fifty nodes that lands around five hours. The
+        clamp is derived from bytes, airtime and the flood multiplier rather than chosen, so it's
+        the number to reason about.</li>
+      <li><strong>Digests piggyback</strong> on any bundle already in flight, so a node with normal
+        traffic almost never sends a standalone one. The standalone digest is genuinely just the
+        idle-node heartbeat.</li>
+      <li><strong>Suppression.</strong> Hear a digest from a peer whose hashes match yours across
+        every shared area, and skip your own — it would carry no information.</li>
+      <li><strong>Reply suppression.</strong> One broadcast digest heard by fifty peers who are all
+        behind produces fifty simultaneous unicast requests to one node — the digest storm wearing
+        a different hat, and the reply is bigger than the digest that triggered it. So a peer waits
+        a random fraction of a window before asking and drops its request entirely if the answer
+        arrives first. Because responses are broadcast, the first peer to ask answers everyone.</li>
+    </ul>
+
+    <div class="gap-l"></div>
+
+    <figure>
+      <svg viewBox="0 0 900 360" role="img"
+           aria-label="Two paths through the gossip cycle. The primary path: new local posts are batched for 15 to 30 minutes, bundled with a piggybacked digest, broadcast once, and reach every peer. The safety-net path, used almost never: an idle node sends a digest heartbeat, a peer notices a rolling-hash mismatch, unicasts a delta request, and the holder broadcasts the missing bundle.">
+        <text class="dgm-tb" x="16" y="26">PRIMARY PATH — opportunistic push</text>
+        <text class="dgm-td" x="16" y="44">This is how content actually propagates.</text>
+
+        <g class="dgm-node">
+          <rect x="16"  y="62" width="126" height="56" rx="2"/>
+          <rect x="182" y="62" width="126" height="56" rx="2"/>
+          <rect x="348" y="62" width="142" height="56" rx="2"/>
+          <rect x="530" y="62" width="126" height="56" rx="2"/>
+          <rect x="696" y="62" width="126" height="56" rx="2"/>
+        </g>
+        <g class="dgm-t" text-anchor="middle">
+          <text x="79"  y="86">New local</text><text x="79"  y="101">posts</text>
+          <text x="245" y="86">Batch</text><text x="245" y="101">15–30 min</text>
+          <text x="419" y="86">Bundle +</text><text x="419" y="101">digest</text>
+          <text x="593" y="86">Broadcast</text><text x="593" y="101">once</text>
+          <text x="759" y="86">Every</text><text x="759" y="101">peer</text>
+        </g>
+        <g class="dgm-lineb" stroke-width="1.5">
+          <path d="M146 90 L176 90"/><path d="M170 85 L178 90 L170 95" fill="none"/>
+          <path d="M312 90 L342 90"/><path d="M336 85 L344 90 L336 95" fill="none"/>
+          <path d="M494 90 L524 90"/><path d="M518 85 L526 90 L518 95" fill="none"/>
+          <path d="M660 90 L690 90"/><path d="M684 85 L692 90 L684 95" fill="none"/>
+        </g>
+
+        <line class="dgm-line" x1="16" y1="158" x2="884" y2="158" stroke-dasharray="3 4"/>
+
+        <text class="dgm-td" x="16" y="196" style="letter-spacing:.1em">SAFETY NET — anti-entropy</text>
+        <text class="dgm-td" x="16" y="214">Almost never used. On a converged mesh it is silent.</text>
+
+        <g class="dgm-node" opacity="0.75">
+          <rect x="16"  y="232" width="126" height="56" rx="2"/>
+          <rect x="182" y="232" width="126" height="56" rx="2"/>
+          <rect x="348" y="232" width="142" height="56" rx="2"/>
+          <rect x="530" y="232" width="126" height="56" rx="2"/>
+          <rect x="696" y="232" width="126" height="56" rx="2"/>
+        </g>
+        <g class="dgm-td" text-anchor="middle">
+          <text x="79"  y="256">Idle, heard</text><text x="79"  y="271">nothing</text>
+          <text x="245" y="256">Digest beat</text><text x="245" y="271">~5 h at N=50</text>
+          <text x="419" y="256">Peer sees hash</text><text x="419" y="271">mismatch</text>
+          <text x="593" y="256">Delta request</text><text x="593" y="271">unicast</text>
+          <text x="759" y="256">Bundle push</text><text x="759" y="271">broadcast</text>
+        </g>
+        <g class="dgm-lined" stroke-width="1" stroke-dasharray="3 3">
+          <path d="M146 260 L178 260"/>
+          <path d="M312 260 L344 260"/>
+          <path d="M494 260 L526 260"/>
+          <path d="M660 260 L692 260"/>
+        </g>
+
+        <text class="dgm-td" x="16" y="330">Measured over 50 instances: 13 standalone digests all told,</text>
+        <text class="dgm-td" x="16" y="346">224 beats suppressed (95%), and exactly 1 vector request.</text>
+      </svg>
+      <figcaption>
+        Content propagates by opportunistic push. Anti-entropy is a safety net, not the delivery
+        path — which is why a multi-hour heartbeat is not alarming. What the interval bounds is how
+        long a node that has been silent <em>and</em> has heard nothing waits before announcing
+        itself.
+      </figcaption>
+    </figure>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3>What it measures out at</h3>
+      <p style="font-size:16px;color:var(--fg-dim)">
+        Fifty instances on a simulated LongFast mesh at 15% loss, ten of them publishing, R = 4.
+      </p>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <tbody>
+          <tr><td>Time to full convergence</td><td>3 h 20 m</td></tr>
+          <tr class="mark"><td>Channel utilisation</td><td>2.3% &nbsp;<span style="color:var(--fg-faint)">(budget: 5%)</span></td></tr>
+          <tr><td>Standalone digests, whole mesh</td><td>13</td></tr>
+          <tr><td>Digest beats suppressed</td><td>224 — 95%</td></tr>
+          <tr><td>Vector requests needed</td><td>1</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <p>
+        A node offline for a week comes back, broadcasts a digest with stale hashes, and peers
+        backfill it. There is no session, no handshake, and no state machine that can wedge — which
+        is exactly why anti-entropy beats a FidoNet-style polling session here. Mesh links are far
+        too flaky for sessions.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">The number to design around</span>
+      <p>
+        Against the 5% federation budget, the whole network can publish about <strong>six records
+        an hour</strong> — roughly 144 a day shared across every instance and every area. Note the
+        1.39% floor at one record per hour: anti-entropy and per-record framing cost something even
+        when almost nothing is being said. This is also why batching isn't optional; those figures
+        are for one record per bundle, and amortising framing is what moves the ceiling.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="fountain">
+    <div class="eyebrow">L1 · Coding</div>
+    <div class="col prose">
+      <h2>Erasure coding, not retransmission</h2>
+      <p>
+        The reasoning is broadcast asymmetry. A mesh broadcast reaches every listening BBS at once,
+        and each one misses a <em>different</em> random subset. Under retransmission, N receivers
+        send N different negative acknowledgements and the sender retransmits the union — cost
+        grows with peer count, which at fifty peers is exactly the wrong scaling.
+      </p>
+      <p>
+        Under a fountain code the sender emits encoded symbols and each receiver decodes as soon as
+        it has collected enough of them. One transmission serves everyone and there is no
+        acknowledgement traffic at all. On a link where a retransmit round-trip costs minutes,
+        removing the round-trip entirely is worth more than the coding overhead.
+      </p>
+    </div>
+
+    <div class="gap-l"></div>
+
+    <figure>
+      <svg viewBox="0 0 900 250" role="img"
+           aria-label="A bundle sent as fourteen symbols. Symbols zero through nine are the original fragments sent in order; symbols ten through thirteen are XOR repair symbols. A peer that loses four of them still holds ten and decodes the bundle.">
+        <text class="dgm-tb" x="16" y="22">SENT ONCE, TO EVERYONE</text>
+
+        <g>
+          <rect class="dgm-hot" x="110" y="38" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="164" y="38" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="218" y="38" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="272" y="38" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="326" y="38" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="380" y="38" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="434" y="38" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="488" y="38" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="542" y="38" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="596" y="38" width="48" height="34" rx="2"/>
+          <g class="dgm-node" stroke-dasharray="3 2">
+            <rect x="668" y="38" width="48" height="34" rx="2"/>
+            <rect x="722" y="38" width="48" height="34" rx="2"/>
+            <rect x="776" y="38" width="48" height="34" rx="2"/>
+            <rect x="830" y="38" width="48" height="34" rx="2"/>
+          </g>
+        </g>
+        <text class="dgm-td" x="16" y="60">Sender</text>
+        <text class="dgm-td" x="110" y="92">symbols 0…9 — the original fragments, in order</text>
+        <text class="dgm-td" x="668" y="92">10…13 — XOR repair</text>
+
+        <text class="dgm-td" x="16" y="150">Peer B</text>
+        <text class="dgm-t"  x="16" y="132" style="font-size:10px">HEARD</text>
+        <g>
+          <rect class="dgm-hot" x="110" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-miss" x="164" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="218" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="272" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-miss" x="326" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="380" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="434" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-miss" x="488" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="542" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-hot" x="596" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-cool" x="668" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-miss" x="722" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-cool" x="776" y="128" width="48" height="34" rx="2"/>
+          <rect class="dgm-cool" x="830" y="128" width="48" height="34" rx="2"/>
+        </g>
+
+        <text class="dgm-t" x="110" y="196">4 lost · 10 arrived · decodes.</text>
+        <text class="dgm-td" x="110" y="216">Peer C lost a different four and also decodes — from the same transmission.</text>
+        <text class="dgm-td" x="110" y="234">A peer with no loss at all decodes from symbols 0…9 alone, at zero coding overhead.</text>
+      </svg>
+      <figcaption>
+        The systematic prefix is the property pure fountain schemes give up: on a clean link the
+        common case costs nothing extra. Repair symbols are XOR combinations whose masks are
+        derived from a seeded PRNG at both ends, so <strong>the mask is never transmitted</strong>.
+      </figcaption>
+    </figure>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3>Why not an off-the-shelf RaptorQ</h3>
+      <p>
+        Block sizes here are tiny — a typical bundle is 1 to 10 symbols and rarely more than 30.
+        The classic ~5% overhead figures assume K in the hundreds or thousands; below K=20 the
+        degree distributions those codes rely on behave poorly and overhead can exceed 20%. RFC
+        6330 RaptorQ also carries patent declarations, which is worth checking before it lands in
+        an MIT-licensed binary.
+      </p>
+      <p>
+        Writing it as a small LT code with a tuned distribution is a few hundred lines, avoids the
+        licensing question, and — the actual reason — lets the distribution be tuned against the
+        simulator. Which is what caught the next two things.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Dense rows, not sparse</div>
+        <div class="v">An earlier draft called for degree 2–3, which is correct for
+          belief-propagation decoding — it needs sparse rows to peel. We decode by Gaussian
+          elimination, which wants the opposite: dense rows are far likelier to be independent of
+          what the decoder already holds. Measured at K=40, sparse needed <strong>14.41</strong>
+          symbols beyond K; uniform-half needs <strong>1.72</strong>. At mesh airtime that's
+          minutes per bundle.</div>
+      </div>
+      <div class="row">
+        <div class="k">Bundle IDs from content</div>
+        <div class="v">An earlier draft drew them at random per node. That livelocks under the
+          governor: when a transmission is interrupted partway, a random ID makes the retry a
+          <em>different block</em>, so every symbol receivers already hold becomes worthless.
+          Measured at a 0.1% duty cycle — <strong>30 simulated days, 43 minutes of airtime, zero
+          records delivered.</strong> Deriving the ID from the bundle's content makes an
+          interrupted transmission resumable; the same run then converged in 58 seconds of channel
+          time.</div>
+      </div>
+      <div class="row">
+        <div class="k">Repair is a common path</div>
+        <div class="v">Sizing targets one receiver's decode probability at about 98%. The chance
+          that <em>every</em> receiver decodes is that raised to the audience size, and it falls
+          off fast: 97% for one receiver, 79% across ten, 29% across fifty. So roughly two thirds
+          of broadcasts leave somebody short — and that's the right trade, because sizing for fifty
+          would inflate every transmission to spare one straggler a unicast. It just means repair
+          requests are engineered as a routine rate-limited path, not an exception handler.</div>
+      </div>
+    </div>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3>Against retransmission, measured</h3>
+      <p style="font-size:16px;color:var(--fg-dim)">
+        Symbols needed at K=10 and 15% loss, modelling retransmission properly: send K, then resend
+        the union of what anyone still lacks, subject to the same loss, repeating until everyone is
+        whole.
+      </p>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Receivers</th><th>ARQ</th><th>Fountain</th><th>Ratio</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>12</td><td>20</td><td class="bad">0.60×</td></tr>
+          <tr><td>5</td><td>21</td><td>20</td><td>1.05×</td></tr>
+          <tr><td>20</td><td>24</td><td>20</td><td class="good">1.20×</td></tr>
+          <tr class="mark"><td>50</td><td>29</td><td>20</td><td>1.45×</td></tr>
+        </tbody>
+      </table>
+      <p class="tnote">
+        Note the crossover: at a single receiver, retransmission genuinely wins, and unicast repair
+        to one peer is the better strategy. The fountain argument is about broadcast to many, and
+        holds from about five receivers up.
+      </p>
+    </div>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3>What loss costs</h3>
+      <p style="font-size:16px;color:var(--fg-dim)">
+        Channel time for a 3 KB bundle at K=15, R=4 on LongFast. This table is why the assumed loss
+        rate has to adapt rather than be set pessimistically — assuming 50% on a link that is
+        actually clean triples the airtime bill for every peer on the channel.
+      </p>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Loss</th><th>Symbols</th><th>Channel time</th><th>vs. payload alone</th></tr></thead>
+        <tbody>
+          <tr><td>0%</td><td>16</td><td>1m 54s</td><td class="good">1.11×</td></tr>
+          <tr><td>10%</td><td>24</td><td>2m 52s</td><td>1.66×</td></tr>
+          <tr><td>30%</td><td>34</td><td>4m 03s</td><td>2.36×</td></tr>
+          <tr><td>50%</td><td>50</td><td>5m 58s</td><td class="warn">3.47×</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="compress">
+    <div class="eyebrow">L2 · Bundle</div>
+    <div class="col prose">
+      <h2>A dictionary is worth three times the network</h2>
+      <p>
+        Generic zstd on a 400-byte forum post manages maybe 1.3–1.5× — there isn't enough data for
+        the compressor to build a model. <strong>zstd with a pre-trained dictionary</strong> on the
+        same post typically gets 3–5×, because the dictionary already holds common English
+        fragments, BBS vocabulary, quoting conventions and structural boilerplate.
+      </p>
+      <p>
+        At ten originated packets a day, tripling effective throughput is the difference between 25
+        posts a day and 8. It is free range and the design takes all of it. The dictionary ships
+        embedded in the binary and versioned; nodes announce which ones they hold, and old
+        dictionaries stay supported.
+      </p>
+      <p>
+        Compression is applied to the <em>bundle</em> rather than to individual records, so
+        cross-record redundancy gets captured too — which is a second reason batching earns its
+        place.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note warn">
+      <span class="tag">Decompression bombs</span>
+      <p>
+        A 233-byte packet can expand to gigabytes, and this is a trivial attack for anyone holding
+        the channel key — which the threat model assumes is everyone. The decompressed output is
+        hard-capped, enforced inside the streaming decoder rather than checked afterwards, and a
+        breach is treated as a peer-quota violation worth alerting the sysop about.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="governor">
+    <div class="eyebrow">Civic infrastructure</div>
+    <div class="col prose">
+      <h2>The airtime governor</h2>
+      <p>
+        The most important piece of civic infrastructure in the system, and a first-class feature
+        rather than a nice-to-have. It is a token bucket sized in <em>mesh</em> airtime-seconds:
+        per-packet airtime from the Semtech formula, multiplied by the estimated flood multiplier
+        to get what the commons actually pays.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">Charge per packet, not per byte</span>
+      <p>
+        Airtime is <strong>affine</strong> in payload — a large fixed cost plus a linear term — so
+        per byte it is strongly sublinear: 436 ms for a one-byte payload against 9.3 ms per byte
+        for a full one. A byte-denominated budget therefore doesn't under-price large packets, it
+        wildly under-prices <em>small</em> ones. 233 bytes in a single packet costs 2.16 s; the
+        same 233 bytes sent one byte at a time costs <strong>101 s</strong>. A chatty protocol can
+        stay inside a byte budget and still take the channel apart.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <ul class="plain col">
+      <li><strong>A ceiling expressed as a mesh-wide share</strong>, default 5%, hard-capped in code
+        at 15%. That's what the BBS network as a whole should consume; a node's own allowance is the
+        ceiling divided by the expected instance count, which it learns from the node roster.</li>
+      <li><strong>Sysops never have to compute this.</strong> The first-run wizard and the status
+        screen show the derived figure in human terms: "your share: about 11 full packets a day, or
+        25 short posts."</li>
+      <li><strong>Read the radio's own telemetry.</strong> Meshtastic reports channel utilisation
+        and transmit utilisation. Above about 25% channel use, back off exponentially; above 40%,
+        transmit nothing but already-queued private mail.</li>
+      <li><strong>Respect regional duty cycles.</strong> EU 433/868 is limited to 10% over a rolling
+        hour and firmware enforces it — so track it locally and queue rather than getting
+        rejected.</li>
+      <li><strong>Priority classes.</strong> Control traffic beats private mail, which beats forum
+        posts, which beats file catalogs. Under backpressure, drop from the bottom. There is no
+        mesh-file class because there are no mesh files.</li>
+      <li><strong>Quiet hours</strong>, and per-area sub-budgets so one chatty area can't consume a
+        node's whole allocation. Per-peer inbound quotas stop a rogue or malfunctioning BBS
+        flooding you, with an alert when one exceeds them.</li>
+    </ul>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3>R is a guess, and every budget scales with it</h3>
+      <p>
+        The flood multiplier defaults to 4. If the real value on your mesh is 8, every airtime
+        figure in the design is twice as generous as it should be. It's also the one parameter that
+        <strong>cannot be derived, simulated or reasoned about</strong> — it's a property of a
+        specific mesh's RF topology at a specific moment, so it has to be measured.
+      </p>
+      <p>
+        The trick that makes measuring it easy: Meshtastic reports both how long <em>your</em> node
+        spent transmitting and how busy <em>the channel</em> was. Measure ambient busy-ness while
+        transmitting nothing, measure again under a known load, and attribute the difference to
+        your own packets and their echoes.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="b">R</span> ≈ (channel_utilization<span class="d">_load</span> − channel_utilization<span class="d">_baseline</span>) / air_util_tx<span class="d">_load</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <p>
+        <code>meshbbs mesh survey</code> automates it. It <strong>runs without a BBS</strong> —
+        just a radio, no database, no SSH server, no config beyond the device connection — so
+        someone curious about hosting can measure their mesh before committing to anything. It
+        self-governs the load phase, refuses to run if the channel is already busy, aborts if it
+        gets busy mid-test, sweeps the hop limit across 1/3/5 to show what hop limit costs the
+        commons, and reports the derived budget in the units a sysop actually needs.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="links">
+    <div class="eyebrow">The other transports</div>
+    <div class="col prose">
+      <h2>Same protocol, different physics</h2>
+      <p>
+        Because the sync protocol was designed for the mesh, the other links come nearly free — but
+        each inverts something that's true on the radio, and the governor needs to know which.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">IP · TCP + TLS 1.3</div>
+        <div class="v">Mutually authenticated with self-signed Ed25519 certificates pinned to node
+          IDs. No PKI is needed because node IDs are already self-certifying — a certificate whose
+          key hashes to the expected ID authenticates that node completely. <strong>The certificate
+          is a container, not a credential</strong>: nothing checks dates, issuer or subject, since
+          expiry would imply a renewal process that can't exist without an authority. Inbound is
+          default-closed; a link with no allow list accepts nobody, because a listener that accepts
+          any node dialling it is an open relay.</div>
+      </div>
+      <div class="row">
+        <div class="k">Broadcast costs N here</div>
+        <div class="v">On the mesh one transmission reaches everyone, which is the entire reason for
+          the fountain code. Over IP a broadcast is N separate sends, so the link reports
+          broadcast as <em>not free</em> — and a governor reading that knows the fountain economics
+          don't apply and unicast repair to one lagging peer is cheaper. IP is also reliable, so
+          repair symbols are redundant and a caller can skip them.</div>
+      </div>
+      <div class="row">
+        <div class="k">Sneakernet</div>
+        <div class="v">Export a bundle to a USB stick. It's a link like any other, and it's how
+          files reach a site with no IP route.</div>
+      </div>
+      <div class="row">
+        <div class="k">FidoNet gateway</div>
+        <div class="v">Echomail maps onto posts, netmail onto private messages, message IDs onto
+          record IDs. Unusually, it's a trust boundary as well as a transport: FidoNet mail is
+          plaintext and unsigned, so records entering are signed by the <em>gateway's</em> key and
+          displayed as gateway-attested rather than author-attested. It's also the single most
+          dangerous feature for the airtime budget — one busy echo can exceed the whole network's
+          daily output — so it's IP-side by default and bridging an echo to mesh is an explicit
+          per-area opt-in with a hard sub-budget.</div>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="planned">
+      <span class="tag">Phase 6 — not yet built</span>
+      <p>
+        The FidoNet gateway and the wire-format freeze land together, and in that order: gatewaying
+        into a format that is still changing is how you generate angry FidoNet sysops. Phase 6 is
+        the first point at which the project makes promises to strangers.
+      </p>
+    </div>
+  </section>
+
+  <a class="next" href="running.html">
+    <span class="nk">Next</span>
+    <span class="nt">Run a node — setup, config and peering →</span>
+  </a>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/config.md">Configuration reference</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>

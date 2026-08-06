@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Run a node — meshbbs</title>
+<meta name="description" content="Install and run a meshbbs instance: build, init, configure, attach a Meshtastic radio, peer with other instances. Plus the project roadmap and current status.">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <header class="pagehead">
+    <div class="eyebrow"><b>04</b> Run a node</div>
+    <h1>One binary, no runtime</h1>
+    <p class="lede col">
+      Pure Go with <strong><code>CGO_ENABLED=0</code> on every target</strong> — no build tags, no
+      cgo variants, no split release artifacts. Building needs nothing but a Go toolchain, and
+      running needs nothing at all: no database server, no Node, no C libraries. The browser front
+      end is embedded in the binary too, so there's no CDN and no asset build in the release path.
+    </p>
+  </header>
+
+  <div class="toc">
+    <span>On this page</span>
+    <a href="#start">Getting started</a>
+    <a href="#users">Accounts and areas</a>
+    <a href="#radio">Attaching a radio</a>
+    <a href="#peers">Peering</a>
+    <a href="#config">Configuration</a>
+    <a href="#status">Status and roadmap</a>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="start">
+    <div class="eyebrow">First run</div>
+    <div class="col prose">
+      <h2>Four commands to a working BBS</h2>
+      <p>
+        Federation is off until you turn it on, so this gets you a complete single-node board with
+        forums, private mail, file areas and node chat — no radio required.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="steps">
+      <div class="stepitem">
+        <div>
+          <h3>Build</h3>
+          <p>Linux, macOS and Windows, on amd64 and arm64.</p>
+          <div class="term"><div class="term-body">
+<pre><span class="p">$</span> <span class="c">go build -o meshbbs ./cmd/meshbbs</span></pre>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="stepitem">
+        <div>
+          <h3>Initialise</h3>
+          <p>This generates your node key. There is no address to choose, request or register —
+             the node ID is derived from the key itself.</p>
+          <div class="term"><div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs init --display-name fog-city \
+      --sysop-nick austin --sysop-password-stdin</span>
+
+<span class="g">  ✓</span> node key generated  <span class="d">keys/node.ed25519</span>
+<span class="g">  ✓</span> node id  <span class="b">K7QM-4X2P-B9TFR</span>
+<span class="d">           pilot ranch obey vivid scout amber</span>
+<span class="g">  ✓</span> database  <span class="d">bbs.db</span>
+<span class="g">  ✓</span> sysop account  <span class="d">austin</span></pre>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="stepitem">
+        <div>
+          <h3>Back up <code>keys/</code></h3>
+          <p>Before anything else. A lost node key cannot be recovered — with no key there is
+             nothing to sign a succession record with, and the instance would have to re-establish
+             with its peers as an entirely new node. The first-run wizard says so and offers to
+             print the key as a recovery phrase.</p>
+        </div>
+      </div>
+
+      <div class="stepitem">
+        <div>
+          <h3>Serve</h3>
+          <p>Port 2222 by default, which avoids needing root. Use 22 on a dedicated host.</p>
+          <div class="term"><div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs serve</span>
+<span class="d">  ssh listening on :2222 · 4 areas · 0 peers</span>
+
+<span class="p">$</span> <span class="c">ssh austin@localhost -p 2222</span></pre>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="stepitem">
+        <div>
+          <h3>Optionally, open the second door</h3>
+          <p>The browser front end is off until you give it an origin and a certificate. Then get
+             your first passkey across by pressing <code>P</code> in an SSH session and typing the
+             code it shows into the sign-in page.</p>
+          <div class="term"><div class="term-body">
+<pre><span class="d"># in your config file</span>
+<span class="b">[web]</span>
+<span class="c">enabled</span>  = <span class="g">true</span>
+<span class="c">origin</span>   = <span class="c">"https://bbs.example.com"</span>   <span class="d"># required — passkeys bind to it</span>
+<span class="c">tls_cert</span> = <span class="c">"/etc/meshbbs/fullchain.pem"</span>
+<span class="c">tls_key</span>  = <span class="c">"/etc/meshbbs/privkey.pem"</span>
+
+<span class="p">$</span> <span class="c">./meshbbs config check</span>   <span class="d"># catches a missing origin before restart</span>
+<span class="p">$</span> <span class="c">./meshbbs serve</span>
+<span class="d">  ssh listening on :2222 · web listening on :8443</span></pre>
+          </div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note warn">
+      <span class="tag">Don't restore <code>bbs.db</code> from a backup casually</span>
+      <p>
+        Restoring a week-old database reissues sequence numbers that peers have already seen, with
+        different content behind them. The divergence is permanent and completely silent — no
+        error, no conflict, peers just hold different records under identical coordinates forever.
+        meshbbs detects the regression at startup and flags it to peers via an incarnation counter,
+        but restoring the database is not a routine operation.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="users">
+    <div class="eyebrow">Administration</div>
+    <div class="col prose">
+      <h2>Accounts, capabilities and areas</h2>
+      <p>
+        Everything the sysop terminal does is also a subcommand, so it's all scriptable. Cobra
+        generates the help and shell completions.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="d"># accounts</span>
+<span class="p">$</span> <span class="c">./meshbbs user add bob</span>
+<span class="d">  New accounts cannot post to federated areas by default —</span>
+<span class="d">  the door is open, the shared airtime is gated.</span>
+
+<span class="p">$</span> <span class="c">./meshbbs user grant bob post_federated</span>
+<span class="p">$</span> <span class="c">./meshbbs user list</span>
+<span class="p">$</span> <span class="c">./meshbbs user show bob</span>
+<span class="p">$</span> <span class="c">./meshbbs user passwd bob</span>
+<span class="p">$</span> <span class="c">./meshbbs user revoke bob post_federated</span>
+
+<span class="d"># message areas — new areas are local-only until you say otherwise</span>
+<span class="p">$</span> <span class="c">./meshbbs area create general</span>
+<span class="p">$</span> <span class="c">./meshbbs area federate general</span>
+<span class="p">$</span> <span class="c">./meshbbs area list</span>
+
+<span class="d"># your own identity, in both renderings</span>
+<span class="p">$</span> <span class="c">./meshbbs id</span>
+<span class="b">  K7QM-4X2P-B9TFR</span>
+<span class="d">  pilot ranch obey vivid scout amber</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="radio">
+    <div class="eyebrow">Hardware</div>
+    <div class="col prose">
+      <h2>Attaching a Meshtastic node</h2>
+      <p>
+        Over USB serial or over TCP to a node on WiFi — both speak the same protobuf stream. Serial
+        is the recommended default; TCP is better when the radio is mounted somewhere with decent
+        RF rather than in the server closet.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs mesh ports</span>
+<span class="d">  Ranked candidates, with the reasoning for each:</span>
+  <span class="g">1.</span> <span class="b">/dev/cu.usbmodem14201</span>  <span class="d">name matches a known USB-UART pattern</span>
+  <span class="d">2. /dev/cu.usbserial-0001  generic bridge, weaker evidence</span>
+
+<span class="p">$</span> <span class="c">./meshbbs mesh info</span>
+<span class="p">$</span> <span class="c">./meshbbs mesh info --tcp mesh.local</span>
+
+<span class="d"># measure YOUR mesh before trusting the default budget</span>
+<span class="p">$</span> <span class="c">./meshbbs mesh survey</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Why ports are ranked</div>
+        <div class="v">Reading USB vendor and product IDs is pure Go on Linux and Windows, but on
+          macOS it needs IOKit through cgo — which is non-negotiable to avoid. So macOS matches
+          device names instead, which is weaker evidence, and detection explains each guess rather
+          than silently picking one. Most Meshtastic boards use generic USB-UART bridges anyway, so
+          even a vendor-ID match identifies a <em>chip</em>, not a radio.</div>
+      </div>
+      <div class="row">
+        <div class="k">Run the survey first</div>
+        <div class="v">It needs only the radio — no database, no SSH server, no config beyond the
+          device connection. It measures the flood multiplier on <em>your</em> mesh, sweeps the hop
+          limit to show what each hop costs the commons, and reports your derived budget in real
+          terms: "at R = 5.2, your instance can originate about 8 full packets a day, roughly 20
+          short posts."</div>
+      </div>
+      <div class="row">
+        <div class="k">Set the hop limit low</div>
+        <div class="v">Hop limit is a direct multiplier on what everything you send costs the mesh.
+          Set it explicitly, as low as your topology allows. The survey tells you what "as low as"
+          means for your deployment.</div>
+      </div>
+      <div class="row">
+        <div class="k">Channel setup</div>
+        <div class="v">Create a secondary channel — <code>bbsnet</code> by default — with the same
+          name and key on every instance, using the Meshtastic app. Note that a separate channel is
+          not separate airtime; it keeps BBS traffic logically apart so non-BBS nodes can ignore
+          it, but only the governor makes you a good neighbour.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="peers">
+    <div class="eyebrow">Federation</div>
+    <div class="col prose">
+      <h2>Peering is an ID exchange</h2>
+      <p>
+        There's no registration and no pairing ceremony. You add a peer's node ID to your allow
+        list — and because the ID <em>is</em> the key, allowlisting an ID is allowlisting a key.
+        There is nothing to get wrong and no way for a different key to answer to that ID.
+      </p>
+      <p>
+        Then you give it a local name, the way you'd name a host in an SSH config. That name is
+        yours alone and never travels on the wire.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs peer alias pnw K7QM4X2PB9TFR</span>
+<span class="d">  Local petname only. Never goes on the wire — two BBSes</span>
+<span class="d">  may disagree about what 'pnw' means and neither is wrong.</span>
+
+<span class="p">$</span> <span class="c">./meshbbs peer list</span>
+<span class="p">$</span> <span class="c">./meshbbs peer resolve pnw</span>
+<span class="p">$</span> <span class="c">./meshbbs peer unalias pnw</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">Verify out of band</span>
+      <p>
+        When a peer's node record arrives, its display name is a <em>suggestion</em> you may accept
+        as an alias with one keystroke — nothing ever auto-binds. Display-name spoofing is the
+        residual naming attack now that address squatting is impossible: nothing stops a node
+        calling itself <code>Fog City</code>, so the interface always renders a display name next
+        to its short ID. The ID itself cannot be spoofed. The six-word rendering exists for
+        confirming a fingerprint over voice radio or the phone.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="config">
+    <div class="eyebrow">Configuration</div>
+    <div class="col prose">
+      <h2>One TOML file, strictly validated</h2>
+      <p>
+        An unknown key is a startup <em>error</em>, not a silently ignored line. Config is
+        hot-reloadable, so a sysop can iterate on a theme without dropping sessions, and every
+        setting has an environment-variable equivalent.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs config check</span>       <span class="d"># validate before restarting</span>
+<span class="p">$</span> <span class="c">./meshbbs config show</span>        <span class="d"># effective values, after precedence</span>
+<span class="p">$</span> <span class="c">./meshbbs config reference</span>   <span class="d"># every setting, generated from source</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <h3>The settings that matter most</h3>
+      <p style="font-size:16px;color:var(--fg-dim)">
+        A selection. <code>meshbbs config reference</code> generates the complete list from the
+        source, so it can't drift.
+      </p>
+    </div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>mesh.enabled</code><br><span style="color:var(--fg-faint);font-size:11px">false</span></div>
+        <div class="v">Federate over a radio. Off by default, because enabling it transmits on a
+          shared band.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.airtime_ceiling_pct</code><br><span style="color:var(--fg-faint);font-size:11px">5</span></div>
+        <div class="v">The share of the channel the <em>whole BBS network</em> should use, divided
+          by the expected instance count to get this node's allowance. Clamped to 15 in code.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.flood_multiplier</code><br><span style="color:var(--fg-faint);font-size:11px">4</span></div>
+        <div class="v">R — how many times the mesh rebroadcasts each packet. Every airtime figure
+          scales linearly with it, and <strong>4 is a guess</strong>. Run the survey to measure
+          yours.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.hop_limit</code><br><span style="color:var(--fg-faint);font-size:11px">0 — use the radio's own</span></div>
+        <div class="v">Multiplies what every packet costs the mesh, so set it as low as your
+          topology allows.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.quiet_hours</code></div>
+        <div class="v">Local-time windows of zero transmission, e.g. <code>22:00-06:00</code>.
+          Windows may wrap midnight.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>users.registration_mode</code><br><span style="color:var(--fg-faint);font-size:11px">open</span></div>
+        <div class="v">Open, approval, invite or closed. Open <em>with federated posting
+          withheld</em> is the default.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.enabled</code><br><span style="color:var(--fg-faint);font-size:11px">false</span></div>
+        <div class="v">Serve the browser front end. Off by default, because it needs a public
+          origin and a TLS certificate and neither has a sensible default.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.origin</code><br><span style="color:var(--warn);font-size:11px">required when enabled</span></div>
+        <div class="v">The public origin browsers reach you at, e.g.
+          <code>https://bbs.example.com</code>. <strong>Get this wrong and it does not degrade</strong>
+          — passkeys are bound to it, so every sign-in fails with a browser error that says nothing
+          about the cause. Which is why it has no default and is validated at startup.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.unlocked_idle_timeout_mins</code><br><span style="color:var(--fg-faint);font-size:11px">10 — vs 30 idle</span></div>
+        <div class="v">Shorter on purpose. A session with mail unlocked holds the passphrase in
+          memory, and a closing browser tab is a far less reliable goodbye than an SSH
+          disconnect.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.enrol_attempts_per_hour</code><br><span style="color:var(--fg-faint);font-size:11px">10</span></div>
+        <div class="v">Passkey-enrolment code attempts per client. Someone typing a code off their
+          own terminal needs two or three; a script guessing needs far more. Note that
+          <code>X-Forwarded-For</code> is not trusted, so behind a reverse proxy this becomes one
+          shared allowance.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>telnet.enabled</code><br><span style="color:var(--fg-faint);font-size:11px">false</span></div>
+        <div class="v">Off by default: telnet is plaintext, so anything typed can be read by anyone
+          on the network path. <code>telnet.guest_only</code> defaults to true and is the
+          recommended middle setting.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.ham_mode_override</code></div>
+        <div class="v">Set to <code>i_accept_part97_responsibility</code> to transmit encrypted
+          traffic while the radio reports a licensed operator. Part 97 prohibits obscuring the
+          meaning of amateur transmissions; the licence at risk is yours.</div>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <p class="col">
+      <a class="inline" href="https://github.com/aghman/meshbbs/blob/main/docs/config.md">The complete configuration reference →</a>
+    </p>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="status">
+    <div class="eyebrow">Where the project is</div>
+    <div class="col prose">
+      <h2>Status and roadmap</h2>
+      <p>
+        Phase 2 is complete: a usable single-node BBS, the sync protocol and its simulator, and
+        instances able to federate over IP. Phase 3 is in progress — the Meshtastic link itself, so
+        <strong>federation over the mesh does not work yet</strong>.
+      </p>
+      <p>
+        The first two-radio bring-up has run: two Heltec V3s on a <code>bbsnet</code> channel, with
+        discovery, broadcast in both directions and attribution all working. Two things hardware
+        taught that no amount of simulation would — packet IDs are part of the wire contract, so a
+        deterministically seeded node goes silent after a restart; and firmware 2.5+ encrypts
+        unicast with the destination's own key, so a direct packet to a peer whose key you haven't
+        exchanged is acknowledged by the firmware and never seen by the application.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k" style="color:var(--ok)">0 — Skeleton ✓</div>
+        <div class="v">Config loader, SQLite schema, node key and ID, alias table, command tree,
+          account CLI, injected clock and seeded RNG, CI cross-compiling all five targets
+          cgo-free.</div>
+      </div>
+      <div class="row">
+        <div class="k" style="color:var(--ok)">1 — Single-node BBS ✓</div>
+        <div class="v">SSH server, signup, capability grants, the terminal interface, themes, local
+          forums and mail with passphrase-wrapped keys, file areas over SFTP, node chat, the sysop
+          panel.</div>
+      </div>
+      <div class="row">
+        <div class="k" style="color:var(--ok)">2 — Federation over IP ✓</div>
+        <div class="v">Record log, version vectors, anti-entropy, bundle format, zstd dictionary,
+          the fountain codec, succession records, the deterministic simulator and its property,
+          invariant and fuzz suites.</div>
+      </div>
+      <div class="row">
+        <div class="k" style="color:var(--amber)">3 — Meshtastic link →</div>
+        <div class="v"><strong>In progress.</strong> Serial and TCP transports, protobuf framing,
+          the airtime governor with flood-multiplier accounting, ham-mode safety checks, file
+          catalog replication, the mesh survey and live R estimation.</div>
+      </div>
+      <div class="row">
+        <div class="k">4 — Doors</div>
+        <div class="v">The modern door API and its capability model, PTY and ConPTY bridging,
+          sandboxing, reference doors. Independent of federation.</div>
+      </div>
+      <div class="row">
+        <div class="k" style="color:var(--ok)">Web front end ✓</div>
+        <div class="v"><strong>Shipped out of order</strong>, ahead of the phase it was scheduled
+          in. The screen model was split from its rendering, then a browser renderer, passkey auth
+          and a session bridge were built on top. It arrived as a semantic terminal rather than the
+          xterm.js stopgap originally planned — see <a class="inline"
+          href="using.html#web">using it</a>.</div>
+      </div>
+      <div class="row">
+        <div class="k">5 — Reach</div>
+        <div class="v">What's left of it: inter-BBS door events, sneakernet bundles, and the
+          client-held key helper.</div>
+      </div>
+      <div class="row">
+        <div class="k">6 — Interop</div>
+        <div class="v">Freeze the wire format, publish a spec and conformance vectors, request a
+          registered Meshtastic port number, ship the FidoNet gateway. The first point at which the
+          project makes promises to strangers, and not to be rushed toward.</div>
+      </div>
+      <div class="row">
+        <div class="k">7 — Legacy DOS doors</div>
+        <div class="v">A DOSBox-X bridge. Nice-to-have; may never ship, and nothing depends on
+          it.</div>
+      </div>
+    </div>
+
+    <div class="gap-l"></div>
+
+    <div class="col prose">
+      <h3>How it gets tested</h3>
+      <p>
+        Deterministic simulation is the centrepiece, because it's how the federation protocol gets
+        tested at all. That depends on domain code never calling <code>time.Now()</code> or
+        package-level <code>rand</code>, and never letting map iteration order reach output bytes —
+        the last of which would silently corrupt record signatures. A checker enforces it:
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">go test ./...</span>
+<span class="p">$</span> <span class="c">go run ./tools/checkdeterminism ./...</span>
+<span class="p">$</span> <span class="c">go test ./internal/tui/ -update</span>   <span class="d"># regenerate golden screens</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <p>
+        Nearly every measured number on this site — convergence times, channel utilisation, the
+        coding overhead constants, the publish ceiling — came out of that simulator rather than a
+        whiteboard. Several of them contradicted what an earlier draft of the design assumed, which
+        is the whole reason it exists.
+      </p>
+    </div>
+  </section>
+
+  <a class="next" href="concept.html">
+    <span class="nk">Back to the start</span>
+    <span class="nt">Concept — why a BBS on LoRa →</span>
+  </a>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/config.md">Configuration reference</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>
