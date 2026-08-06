@@ -283,3 +283,29 @@ func TestEnrolFinishNeedsACeremony(t *testing.T) {
 		t.Error("a session cookie was issued without a completed ceremony")
 	}
 }
+
+// doAs runs a request as if it arrived from a given transport address, with an
+// X-Forwarded-For claiming a client behind it. For the trusted-proxy tests.
+func (f *fixture) doAs(t *testing.T, method, path string, body any,
+	origin, remote, forwarded string) *httptest.ResponseRecorder {
+	t.Helper()
+	var r io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, r)
+	req.RemoteAddr = remote
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	if forwarded != "" {
+		req.Header.Set("X-Forwarded-For", forwarded)
+	}
+	w := httptest.NewRecorder()
+	f.srv.http.Handler.ServeHTTP(w, req)
+	return w
+}

@@ -5,9 +5,12 @@
    spaced like prose rather than like an 80x24 grid. The problem with reading a
    terminal in a browser was never the typeface.
 
-   These are placeholder values. The real palette comes from the theme TOML as
-   CSS custom properties, so themes/*.toml retheming works on the web with no
-   second mechanism ([N5]); that lands with the renderer. */
+   The colours below are FALLBACKS. /theme.css is served ahead of this file and
+   overrides them from the configured theme, so themes/*.toml retheming ([N5])
+   works on the web through the same eight fields the terminal reads. What stays
+   here is everything a theme has no business setting: layout, spacing, and the
+   page background, which a terminal never supplies because it belongs to the
+   user's own terminal configuration. */
 
 :root {
   --bg: #12131a;
@@ -21,6 +24,9 @@
   --measure: 68ch;
 }
 
+/* Only the page's own chrome. A theme's colours for this mode are generated
+   server-side in /theme.css, where the actual values are known and can be
+   darkened only where they are genuinely illegible on white. */
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #fbfbfd;
@@ -31,6 +37,7 @@
     --error: #b5303a;
     --rule: #dcdee6;
   }
+
 }
 
 * { box-sizing: border-box; }
@@ -61,7 +68,8 @@ body {
 
 .rule {
   border: 0;
-  border-top: 1px solid var(--rule);
+  /* The theme's box-drawing set carries across: double, single or ascii. */
+  border-top: var(--rule-style, 1px solid) var(--rule);
   margin: 0.75rem 0 1.5rem;
 }
 

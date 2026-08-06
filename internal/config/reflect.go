@@ -107,10 +107,34 @@ func setFromString(f reflect.Value, s string) error {
 			return fmt.Errorf("%q is not a number", s)
 		}
 		f.SetFloat(n)
+	case reflect.Slice:
+		// A list arrives as TOML's own array when it comes from the file, so
+		// this path only handles the two places a value is a STRING: a
+		// `default:` tag and an environment override. Comma-separated is the
+		// only sane spelling for both.
+		if f.Type().Elem().Kind() != reflect.String {
+			return fmt.Errorf("unsupported config list of %s", f.Type().Elem().Kind())
+		}
+		var items []string
+		for _, part := range strings.Split(s, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				items = append(items, part)
+			}
+		}
+		f.Set(reflect.ValueOf(items))
 	default:
 		return fmt.Errorf("unsupported config field kind %s", f.Kind())
 	}
 	return nil
+}
+
+// kindName renders a field's type for the generated reference. "slice" would
+// tell a sysop nothing about what to put in the file.
+func kindName(f reflect.Value) string {
+	if f.Kind() == reflect.Slice {
+		return "list of " + f.Type().Elem().Kind().String()
+	}
+	return f.Kind().String()
 }
 
 // Entry describes one configuration key for the generated reference.
@@ -141,7 +165,7 @@ func Reference() []Entry {
 	_ = walk(reflect.ValueOf(&c).Elem(), nil, func(f reflect.Value, sf reflect.StructField, path []string) error {
 		out = append(out, Entry{
 			Key:     strings.Join(path, "."),
-			Type:    f.Kind().String(),
+			Type:    kindName(f),
 			Default: sf.Tag.Get("default"),
 			Doc:     sf.Tag.Get("doc"),
 			Env:     envName(path),

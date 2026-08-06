@@ -1,6 +1,7 @@
 package webd
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -74,22 +75,145 @@ func TestLimiterRefillIsCapped(t *testing.T) {
 	}
 }
 
-// TestClientKeyIgnoresForwardedFor is the one that matters. Trusting the header
-// means an attacker sends a different value per request and the limiter counts
-// each separately — worse than no limiter, because it looks like protection.
-func TestClientKeyIgnoresForwardedFor(t *testing.T) {
+// TestClientKeyIgnoresForwardedForByDefault is the one that matters. With no
+// trusted proxies configured, honouring the header would let an attacker send a
+// different value per request — worse than no limiter, because it looks like
+// protection and provides none.
+func TestClientKeyIgnoresForwardedForByDefault(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/auth/enrol/begin", nil)
 	r.RemoteAddr = "203.0.113.7:44321"
 
-	base := clientKey(r)
+	base := clientKey(r, nil)
 	for _, spoof := range []string{"1.2.3.4", "5.6.7.8, 9.10.11.12", ""} {
 		r.Header.Set("X-Forwarded-For", spoof)
-		if got := clientKey(r); got != base {
+		if got := clientKey(r, nil); got != base {
 			t.Errorf("X-Forwarded-For %q changed the key: %q vs %q", spoof, got, base)
 		}
 	}
 	if base != "203.0.113.7" {
 		t.Errorf("key = %q, want the remote host without its port", base)
+	}
+}
+
+func proxies(t *testing.T, cidrs ...string) []*net.IPNet {
+	t.Helper()
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// TestClientKeyBehindATrustedProxy — the header is only consulted when the
+// request actually came from a proxy the sysop listed.
+func TestClientKeyBehindATrustedProxy(t *testing.T) {
+	trusted := proxies(t, "10.0.0.0/8")
+
+	cases := []struct {
+		name      string
+		remote    string
+		forwarded []string
+		want      string
+	}{
+		{
+			name:      "proxy reports the client",
+			remote:    "10.0.0.1:5000",
+			forwarded: []string{"203.0.113.7"},
+			want:      "203.0.113.7",
+		},
+		{
+			// The rightmost entry is what the nearest proxy observed and the
+			// only one it can vouch for. Everything left of it came from
+			// whoever spoke earlier — including the client.
+			name:      "a spoofed prefix is ignored",
+			remote:    "10.0.0.1:5000",
+			forwarded: []string{"1.2.3.4, 5.6.7.8, 203.0.113.7"},
+			want:      "203.0.113.7",
+		},
+		{
+			name:      "trusted hops are skipped",
+			remote:    "10.0.0.1:5000",
+			forwarded: []string{"203.0.113.7, 10.0.0.9"},
+			want:      "203.0.113.7",
+		},
+		{
+			name:      "repeated header lines are one chain",
+			remote:    "10.0.0.1:5000",
+			forwarded: []string{"1.2.3.4", "203.0.113.7, 10.0.0.9"},
+			want:      "203.0.113.7",
+		},
+		{
+			// An untrusted sender's header is not evidence of anything.
+			name:      "untrusted remote keeps its own address",
+			remote:    "198.51.100.4:5000",
+			forwarded: []string{"203.0.113.7"},
+			want:      "198.51.100.4",
+		},
+		{
+			name:      "no header falls back to the proxy",
+			remote:    "10.0.0.1:5000",
+			forwarded: nil,
+			want:      "10.0.0.1",
+		},
+		{
+			// If every hop is a proxy there is no client to attribute to, so
+			// the nearest real address is the honest answer.
+			name:      "all hops trusted",
+			remote:    "10.0.0.1:5000",
+			forwarded: []string{"10.0.0.8, 10.0.0.9"},
+			want:      "10.0.0.1",
+		},
+		{
+			// Garbage means the chain cannot be believed past that point.
+			name:      "malformed hop stops the walk",
+			remote:    "10.0.0.1:5000",
+			forwarded: []string{"203.0.113.7, not-an-ip"},
+			want:      "10.0.0.1",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/auth/enrol/begin", nil)
+			r.RemoteAddr = tc.remote
+			for _, line := range tc.forwarded {
+				r.Header.Add("X-Forwarded-For", line)
+			}
+			if got := clientKey(r, trusted); got != tc.want {
+				t.Errorf("clientKey = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTrustedProxyLimitsAreStillPerClient is the point of the whole feature:
+// two clients behind one proxy must not share an allowance.
+func TestTrustedProxyLimitsAreStillPerClient(t *testing.T) {
+	f := newFixture(t)
+	f.srv.opts.TrustedProxies = proxies(t, "192.0.2.0/24")
+
+	body := map[string]string{"code": "AAAA-AAAA-AAAAA"}
+	exhaust := func(client string) int {
+		var last int
+		for range f.srv.opts.EnrolAttemptsPerHour + 2 {
+			last = f.doAs(t, http.MethodPost, "/auth/enrol/begin", body,
+				testOrigin, "192.0.2.10:5000", client).Code
+		}
+		return last
+	}
+
+	if got := exhaust("203.0.113.7"); got != http.StatusTooManyRequests {
+		t.Fatalf("first client was never throttled: %d", got)
+	}
+	// A different client behind the same proxy still has its own budget.
+	w := f.doAs(t, http.MethodPost, "/auth/enrol/begin", body,
+		testOrigin, "192.0.2.10:5000", "198.51.100.4")
+	if w.Code == http.StatusTooManyRequests {
+		t.Error("a second client behind the same proxy inherited the first's exhaustion")
 	}
 }
 

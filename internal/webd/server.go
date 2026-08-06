@@ -41,6 +41,10 @@ type Options struct {
 
 	EnrolAttemptsPerHour int
 	AuthAttemptsPerHour  int
+	// TrustedProxies are the reverse proxies permitted to report a real client
+	// address via X-Forwarded-For. Empty means the header is ignored entirely,
+	// which is the safe default (limiter.go).
+	TrustedProxies []*net.IPNet
 
 	MaxSessions             int
 	MaxSessionsPerUser      int
@@ -166,6 +170,7 @@ func NewServer(svc *bbs.Service, st *store.Store, opts Options) (*Server, error)
 	mux.HandleFunc("POST /auth/enrol/begin", s.handleEnrolBegin)
 	mux.HandleFunc("POST /auth/enrol/finish", s.handleEnrolFinish)
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
+	mux.HandleFunc("GET /theme.css", s.handleThemeCSS)
 	mux.HandleFunc("GET /api/me", s.handleMe)
 	mux.HandleFunc("GET /ws", s.handleWS)
 

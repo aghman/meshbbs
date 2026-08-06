@@ -208,6 +208,7 @@ Serves SSH on the configured port. Users connect with:
 					SessionTTLHours:         e.cfg.Web.SessionTTLHours,
 					EnrolAttemptsPerHour:    e.cfg.Web.EnrolAttemptsPerHour,
 					AuthAttemptsPerHour:     e.cfg.Web.AuthAttemptsPerHour,
+					TrustedProxies:          e.cfg.TrustedProxyRanges(),
 					// Shared with SSH and telnet, not duplicated: a browser user
 					// gets a node number, shows up in who's-online, and joins the
 					// same chat as everyone else.

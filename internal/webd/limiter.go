@@ -3,6 +3,7 @@ package webd
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,24 +104,79 @@ func (l *limiter) sweepLocked(now time.Time) {
 
 // clientKey identifies a caller for rate-limiting purposes.
 //
-// # Why X-Forwarded-For is ignored
+// # How X-Forwarded-For is handled
 //
-// Because a client sets it. Trusting it means an attacker sends a different
-// value on every request and the limiter counts each one separately — which is
-// worse than having no limiter, since it looks like protection and provides
-// none.
+// A client sets that header, so it is worthless on its own: honouring it
+// unconditionally means an attacker sends a fresh value per request and the
+// limiter counts each separately — worse than no limiter, because it looks like
+// protection and provides none.
 //
-// The cost of ignoring it is real and worth stating: behind a TLS-terminating
-// reverse proxy every request arrives from the proxy, so the per-client limit
-// collapses into a single shared bucket. That is why globalLimitFactor exists —
-// a deployment where per-IP is meaningless still has a ceiling. A proper fix is
-// a trusted-proxy list, which is a config surface this does not need yet.
-func clientKey(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+// It is therefore consulted ONLY when the request arrived from an address the
+// sysop listed in web.trusted_proxies, and then read RIGHT TO LEFT, skipping
+// trusted hops. The rightmost entry is the one the nearest proxy observed and
+// is the only one it could vouch for; everything to its left was supplied by
+// whoever came before, up to and including the client itself. Taking the
+// leftmost — the common mistake — hands an attacker the header back, since they
+// choose what it starts with.
+//
+// With no trusted proxies configured (the default) the header is ignored
+// entirely and every request is attributed to its transport address.
+func clientKey(r *http.Request, trusted []*net.IPNet) string {
+	remote := hostOf(r.RemoteAddr)
+	if len(trusted) == 0 || !ipInAny(remote, trusted) {
+		return remote
 	}
-	return host
+
+	forwarded := r.Header.Values("X-Forwarded-For")
+	if len(forwarded) == 0 {
+		return remote
+	}
+
+	// Flatten, since the header may appear several times as well as
+	// comma-separated within one line.
+	var hops []string
+	for _, line := range forwarded {
+		for _, h := range strings.Split(line, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				hops = append(hops, h)
+			}
+		}
+	}
+
+	for i := len(hops) - 1; i >= 0; i-- {
+		ip := hostOf(hops[i])
+		if net.ParseIP(ip) == nil {
+			// A garbage hop means the chain cannot be trusted past this point.
+			break
+		}
+		if !ipInAny(ip, trusted) {
+			return ip
+		}
+	}
+	// Every hop was a trusted proxy, so the proxy itself is the best answer.
+	return remote
+}
+
+// hostOf strips a port if there is one. Header entries usually have none;
+// RemoteAddr always does.
+func hostOf(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return strings.Trim(addr, "[]")
+}
+
+func ipInAny(ip string, ranges []*net.IPNet) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, n := range ranges {
+		if n.Contains(parsed) {
+			return true
+		}
+	}
+	return false
 }
 
 // globalLimitFactor scales the per-client rate into an instance-wide ceiling.
@@ -129,13 +185,17 @@ func clientKey(r *http.Request) string {
 // attacker can spend it and lock everyone out — so it is set high enough that
 // only bulk automated guessing reaches it, and never so low that a busy evening
 // on a shared network does.
+//
+// It still matters with trusted proxies configured, because a misconfigured or
+// absent allow list silently collapses every request onto one key, and this is
+// the bound that holds when that happens.
 const globalLimitFactor = 20
 
 // rateLimited reports whether a request should be refused, and writes the
 // refusal if so.
 func (s *Server) rateLimited(w http.ResponseWriter, r *http.Request,
 	per *limiter, global *limiter, what string) bool {
-	if ok, wait := per.allow(clientKey(r)); !ok {
+	if ok, wait := per.allow(clientKey(r, s.opts.TrustedProxies)); !ok {
 		s.refuse(w, r, wait, what, "client")
 		return true
 	}
