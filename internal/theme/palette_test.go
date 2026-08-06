@@ -59,3 +59,63 @@ func TestEveryBuiltinResolves(t *testing.T) {
 		}
 	}
 }
+
+// TestForLightBackgroundFixesTerminalBrights is the problem this exists for:
+// ANSI 11 is bright yellow, unreadable on white at about 1.07:1.
+func TestForLightBackgroundFixesTerminalBrights(t *testing.T) {
+	for _, spec := range []string{"11", "10", "14", "15"} {
+		hex := Hex(spec)
+		fixed := ForLightBackground(hex)
+		if fixed == hex {
+			t.Errorf("ANSI %s (%s) was left unreadable on white", spec, hex)
+		}
+		if got := contrastOnWhite(fixed); got < 4.5 {
+			t.Errorf("ANSI %s corrected to %s, contrast %.2f, want >= 4.5", spec, fixed, got)
+		}
+	}
+}
+
+// TestForLightBackgroundLeavesReadableColours — correcting a colour that is
+// already fine would darken every theme for no reason.
+func TestForLightBackgroundLeavesReadableColours(t *testing.T) {
+	for _, hex := range []string{"#000000", "#23262e", "#b5303a", Hex("4")} {
+		if got := ForLightBackground(hex); got != hex {
+			t.Errorf("ForLightBackground(%s) = %s, want it unchanged", hex, got)
+		}
+	}
+}
+
+// TestForLightBackgroundKeepsTheHue — a theme should stay recognisably itself
+// rather than sliding toward grey.
+func TestForLightBackgroundKeepsTheHue(t *testing.T) {
+	// A saturated orange, the sort a sysop would pick.
+	fixed := ForLightBackground("#ff8c42")
+	r, g, b, ok := rgb(fixed)
+	if !ok {
+		t.Fatalf("unparseable result %q", fixed)
+	}
+	if !(r > g && g > b) {
+		t.Errorf("orange became %s (r=%v g=%v b=%v); channel order should survive", fixed, r, g, b)
+	}
+}
+
+// TestEveryBuiltinIsReadableInLightMode — a shipped theme that is illegible in
+// a browser's light mode is a theme the sysop cannot safely select.
+func TestEveryBuiltinIsReadableInLightMode(t *testing.T) {
+	for _, th := range Builtins() {
+		p := th.Palette()
+		for name, hex := range map[string]string{
+			"primary": p.Primary, "accent": p.Accent, "text": p.Text,
+			"danger": p.Danger, "success": p.Success, "muted": p.Muted,
+		} {
+			fixed := ForLightBackground(hex)
+			if got := contrastOnWhite(fixed); got < 4.5 {
+				t.Errorf("theme %q %s: %s -> %s, contrast %.2f", th.Name, name, hex, fixed, got)
+			}
+		}
+	}
+}
+
+func contrastOnWhite(hex string) float64 {
+	return 1.05 / (luminance(hex) + 0.05)
+}

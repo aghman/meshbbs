@@ -24,24 +24,20 @@
   --measure: 68ch;
 }
 
+/* Only the page's own chrome. A theme's colours for this mode are generated
+   server-side in /theme.css, where the actual values are known and can be
+   darkened only where they are genuinely illegible on white. */
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #fbfbfd;
+    --fg: #23262e;
+    --muted: #626878;
+    --accent: #8a6d1f;
+    --heading: #2f5bb7;
+    --error: #b5303a;
     --rule: #dcdee6;
   }
 
-  /* Theme palettes are built for a dark terminal, and several of the classic
-     sixteen — bright yellow especially — are close to invisible on white. Rather
-     than shipping a second palette per theme, darken whatever the theme gave us
-     just for this mode. A theme stays recognisable; the text stays legible. */
-  :root {
-    --fg: color-mix(in srgb, var(--fg) 55%, black);
-    --muted: color-mix(in srgb, var(--muted) 70%, black);
-    --accent: color-mix(in srgb, var(--accent) 55%, black);
-    --heading: color-mix(in srgb, var(--heading) 65%, black);
-    --error: color-mix(in srgb, var(--error) 75%, black);
-    --success: color-mix(in srgb, var(--success) 70%, black);
-  }
 }
 
 * { box-sizing: border-box; }

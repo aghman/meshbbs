@@ -31,14 +31,37 @@ func (s *Server) handleThemeCSS(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(themeCSS(th)))
 }
 
-// themeCSS renders a theme as a `:root` block.
+// themeCSS renders a theme as `:root` blocks for both colour schemes.
+//
+// This file is served AFTER app.css, so these declarations win. That order is
+// load-bearing: both define the same variables at the same specificity, and an
+// earlier theme.css would simply be overwritten by the stylesheet's defaults.
+//
+// The light-mode block is generated here rather than expressed in CSS because
+// the correction needs the actual colour. An earlier attempt wrote
+// `--fg: color-mix(in srgb, var(--fg) 55%, black)` in a media query, which is a
+// custom property referring to itself — a cycle, invalid at computed-value
+// time, and silently a no-op. Doing the arithmetic in Go has no such trap and
+// produces a better answer besides: it darkens only what is actually illegible.
 func themeCSS(t theme.Theme) string {
 	p := t.Palette()
 
 	// A theme carries no background: on a terminal that belongs to the user's
 	// own configuration, which is exactly why the BBS looks at home there. The
-	// browser has to supply one, so the stylesheet's own light/dark defaults
-	// stand and only the theme's own colours are overridden here.
+	// browser supplies one, so only the theme's own colours appear here.
+	//
+	// Only colours that MEAN something are taken from the theme: an error is
+	// red, a heading is the theme's blue, and those read as themselves against
+	// any background.
+	//
+	// The theme's `text` and `highlight` are deliberately absent. They are not
+	// hues, they are "whatever contrasts with the background" — every built-in
+	// sets text to some near-white, because a terminal is dark — and the
+	// background is the one thing a theme does not supply. Foreground and
+	// background are a pair, and splitting ownership of a pair is how this file
+	// first shipped body text that was invisible in light mode: theme.css loads
+	// after app.css, so an unconditional --fg here beat the stylesheet's own
+	// light-mode value. The stylesheet owns both halves.
 	vars := [][2]string{
 		{"--heading", p.Primary},
 		{"--heading-alt", p.Secondary},
@@ -46,23 +69,31 @@ func themeCSS(t theme.Theme) string {
 		{"--muted", p.Muted},
 		{"--error", p.Danger},
 		{"--success", p.Success},
-		{"--fg", p.Text},
-		{"--highlight", p.Highlight},
-		{"--rule-style", t.BorderCSS()},
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "/* Generated from theme %q. Edit themes/*.toml, not this. */\n", t.Name)
-	b.WriteString(":root {\n")
-	for _, v := range vars {
-		// An unresolvable colour is skipped rather than emitted empty, so the
-		// stylesheet's own default survives instead of the variable resolving
-		// to nothing and the text rendering black on black.
-		if v[1] == "" {
-			continue
+
+	writeBlock := func(correct func(string) string) {
+		b.WriteString(":root {\n")
+		for _, v := range vars {
+			// An unresolvable colour is skipped rather than emitted empty, so
+			// the stylesheet's own default survives instead of the variable
+			// resolving to nothing and text rendering black on black.
+			if v[1] == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "  %s: %s;\n", v[0], correct(v[1]))
 		}
-		fmt.Fprintf(&b, "  %s: %s;\n", v[0], v[1])
+		fmt.Fprintf(&b, "  --rule-style: %s;\n", t.BorderCSS())
+		b.WriteString("}\n")
 	}
+
+	writeBlock(func(c string) string { return c })
+
+	b.WriteString("\n@media (prefers-color-scheme: light) {\n")
+	writeBlock(theme.ForLightBackground)
 	b.WriteString("}\n")
+
 	return b.String()
 }

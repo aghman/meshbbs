@@ -22,7 +22,7 @@ func TestThemeCSSCarriesTheConfiguredTheme(t *testing.T) {
 	}
 
 	css := w.Body.String()
-	for _, want := range []string{"--accent:", "--heading:", "--muted:", "--fg:", "--rule-style:"} {
+	for _, want := range []string{"--accent:", "--heading:", "--muted:", "--rule-style:"} {
 		if !strings.Contains(css, want) {
 			t.Errorf("theme CSS is missing %s:\n%s", want, css)
 		}
@@ -63,5 +63,37 @@ func TestEveryBuiltinThemeServes(t *testing.T) {
 		if !strings.Contains(css, "--accent:") {
 			t.Errorf("theme %q produced no accent", th.Name)
 		}
+	}
+}
+
+// TestThemeCSSNeverSetsForegroundOrBackground.
+//
+// Foreground and background are a pair, and the stylesheet owns both. This file
+// once emitted the theme's `text` — a near-white, because a terminal is dark —
+// unconditionally, and since theme.css loads AFTER app.css it beat the
+// stylesheet's light-mode value and left body text invisible on white. A theme
+// contributes hues, not the contrast pair.
+func TestThemeCSSNeverSetsForegroundOrBackground(t *testing.T) {
+	css := themeCSS(theme.Theme{
+		Name: "pale", Primary: "#ff8c42", Text: "#f2e9e4", Highlight: "#ffffff",
+		Muted: "#8d7b68", Border: "single",
+	})
+
+	for _, forbidden := range []string{"--fg:", "--bg:", "--highlight:"} {
+		if strings.Contains(css, forbidden) {
+			t.Errorf("theme CSS sets %s, which the stylesheet owns:\n%s", forbidden, css)
+		}
+	}
+
+	_, light, ok := strings.Cut(css, "@media (prefers-color-scheme: light)")
+	if !ok {
+		t.Fatalf("no light-mode block:\n%s", css)
+	}
+	// Hued colours do cross over, corrected for contrast.
+	if !strings.Contains(light, "--heading:") {
+		t.Error("light mode dropped the theme's heading colour")
+	}
+	if strings.Contains(light, "#ff8c42") {
+		t.Error("light mode used the uncorrected heading colour")
 	}
 }

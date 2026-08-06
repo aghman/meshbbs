@@ -2,6 +2,7 @@ package theme
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -111,4 +112,86 @@ func (t Theme) BorderCSS() string {
 	default:
 		return "1px solid"
 	}
+}
+
+// Contrast correction for light backgrounds.
+//
+// A theme is a TERMINAL palette, built on the assumption of a dark background —
+// and several of the classic sixteen are close to invisible on white. ANSI 11
+// (bright yellow, #ffff00) against white is a contrast ratio of about 1.07,
+// where 4.5 is the readable floor.
+//
+// The alternative to correcting them would be a second palette per theme, which
+// doubles the format for a problem the numbers can solve: darken until the
+// colour is legible, and leave it alone when it already is. A theme stays
+// recognisably itself, and a theme file written by a sysop who only ever looks
+// at a dark terminal still works for someone who prefers light.
+
+// luminance is the WCAG relative luminance of an #rrggbb colour.
+func luminance(hex string) float64 {
+	r, g, b, ok := rgb(hex)
+	if !ok {
+		return 0
+	}
+	lin := func(c float64) float64 {
+		c /= 255
+		if c <= 0.03928 {
+			return c / 12.92
+		}
+		return math.Pow((c+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(r) + 0.7152*lin(g) + 0.0722*lin(b)
+}
+
+// maxLuminanceOnWhite is the brightest a colour may be and still reach a 4.5:1
+// contrast ratio against white: (1 + 0.05) / (L + 0.05) >= 4.5.
+const maxLuminanceOnWhite = 1.05/4.5 - 0.05
+
+// ForLightBackground darkens a colour just enough to be readable on white,
+// returning it unchanged when it already is.
+//
+// Scaling all three channels keeps the hue, so an orange theme stays orange
+// rather than sliding toward brown or grey.
+func ForLightBackground(hex string) string {
+	r, g, b, ok := rgb(hex)
+	if !ok || luminance(hex) <= maxLuminanceOnWhite {
+		return hex
+	}
+
+	// Luminance rises monotonically with the scale factor, so bisection finds
+	// the brightest version that still clears the threshold.
+	lo, hi := 0.0, 1.0
+	for range 24 {
+		mid := (lo + hi) / 2
+		if luminance(hexOf(r*mid, g*mid, b*mid)) > maxLuminanceOnWhite {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	return hexOf(r*lo, g*lo, b*lo)
+}
+
+func rgb(hex string) (r, g, b float64, ok bool) {
+	if len(hex) != 7 || hex[0] != '#' {
+		return 0, 0, 0, false
+	}
+	v, err := strconv.ParseUint(hex[1:], 16, 32)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return float64(v >> 16 & 0xff), float64(v >> 8 & 0xff), float64(v & 0xff), true
+}
+
+func hexOf(r, g, b float64) string {
+	clamp := func(c float64) int {
+		if c < 0 {
+			return 0
+		}
+		if c > 255 {
+			return 255
+		}
+		return int(c + 0.5)
+	}
+	return fmt.Sprintf("#%02x%02x%02x", clamp(r), clamp(g), clamp(b))
 }
