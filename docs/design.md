@@ -1,12 +1,14 @@
 # MeshBBS — High-Level Design
 
-*A modern, cross-platform BBS in Go with SSH access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
+*A modern, cross-platform BBS in Go with SSH and browser access, door games, file areas, forums, and DMs — federated between independent BBS instances over Meshtastic LoRa.*
 
-**Status:** Draft v0.15 — the airtime governor
-**Date:** 2026-07-26
+**Status:** Draft v0.16 — the browser front end
+**Date:** 2026-08-06
 **All 15 open questions from v0.1 are answered. Decisions are recorded in §15 and referenced inline as `[D#]`. New questions raised *by* those decisions are in §14.**
+**The browser front end has its own document: [webui.md](webui.md), which owns §5.3 in detail and records `[D16]`–`[D18]`.**
 
 *v0.3 added account creation and registration (§5.1, §6.7) and configuration and administration (§11).*
+*v0.16 ships the browser front end and **reverses §5.3's `xterm.js`** `[D16]`. The model no longer renders ANSI directly: it emits a typed `Screen` description that an ANSI renderer and an HTML renderer both consume, so there is one menu graph rather than two and a screen cannot exist over SSH and be missing from the web. Geometry — truncation, windowing, wrapping — moves out of the model and into the renderers, which is what makes the browser version more readable rather than a screenshot of a terminal; the golden frames prove the ANSI output is byte-identical. Authentication is passkeys only `[D17]`, bootstrapped for pre-existing accounts by a single-use enrolment code minted from an authenticated SSH session `[D18]`. Two consequences are recorded rather than discovered: **there is no guest browsing on the web**, which removes the "showing the BBS off" rationale §5.3 originally gave, and **`web.origin` is a required key**, because an RP ID mismatch fails every sign-in totally instead of degrading. §2's "no web forum UI" non-goal is **narrowed, not withdrawn**. The front end therefore lands ahead of the Phase 5 slot §13 gave it.*
 *v0.15 implements §7.6 and corrects its central justification: bytes are a bad proxy for airtime not because airtime is superlinear in payload but because it is affine, which under-prices SMALL packets by an order of magnitude. Cost is charged per packet. Also records the refusal reasons a status screen needs to tell "over budget" from "the channel is busy", both of which look like silence.*
 *v0.14 records the first two-instance run over real LoRa (§7.1.2.1): discovery, broadcast and attribution all work, and two things hardware taught that no amount of simulation would. Packet IDs are part of the wire contract — Meshtastic drops duplicate `(sender, packet_id)` pairs, so a deterministically seeded node goes silent after a restart. And unicast is PKC-encrypted by firmware 2.5+, so direct packets to a peer whose Meshtastic key we have not exchanged are acknowledged by the firmware and never seen by the application; broadcast, which uses the channel PSK, is unaffected.*
 *v0.13 fills a gap this document had: nothing said how an 8-byte node ID maps to a 4-byte Meshtastic radio address (§7.1.2, `[N12]`). Resolved by a signed, self-certifying `ANNOUNCE` that binds the two, with the radio number inside the signature so a captured announcement cannot be replayed from another radio, and demand-driven `WHO_IS` discovery rather than announcing often enough to be heard — which would cost about 1% of the whole channel at fifty instances. No packet carries identity bytes.*
@@ -89,7 +91,7 @@ There is also a social constraint that matters as much as the technical one: **a
 - **User-authored ANSI art theme packs** — screen templates, layout manifests, per-menu artwork. A curated set of built-in themes, plus a simple `themes/*.toml` loader for colour and glyph overrides `[D15]` `[N5]` (§5.4)
 - **DM metadata privacy.** Content confidentiality is required; hiding who-talks-to-whom is not. `[D7]`
 - Real-time inter-BBS chat over mesh (latency is 10s of seconds to minutes; do it over IP)
-- Web forum UI. A read-only web view might come later; SSH is the product.
+- **A second, web-shaped UI.** Narrowed by `[D16]`, not withdrawn. There *is* a browser front end (§5.3, [webui.md](webui.md)), but it renders the same `Screen` descriptions the SSH front end does. What stays refused is a separate navigation model with its own screens, its own key bindings and its own place for every future feature to be implemented a second time.
 - Legacy DOS door emulation in v1 — nice-to-have, deferred to Phase 7. `[D4]`
 
 ---
@@ -99,12 +101,12 @@ There is also a social constraint that matters as much as the technical one: **a
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                          FRONT ENDS                                  │
-│   SSH (primary)   Telnet (off by default)   WebSocket+xterm.js (opt) │
+│   SSH (primary)     Telnet (off by default)     Web (browser, [D16]) │
 └───────────────────────────┬──────────────────────────────────────────┘
                             │  Session API (in-process, transport-agnostic)
 ┌───────────────────────────▼──────────────────────────────────────────┐
 │                      SESSION / UI LAYER                              │
-│   Bubble Tea models · menu graph · ANSI/CP437 renderer · themes       │
+│   Bubble Tea model · menu graph · Screen() → ANSI | HTML renderers    │
 │   terminal capability negotiation · multi-node presence               │
 └───────────────────────────┬──────────────────────────────────────────┘
                             │  Service interfaces
@@ -204,6 +206,8 @@ Wish gives a middleware chain per connection. Auth supports:
 
 This is the one place where SSH is genuinely *worse* than telnet for a BBS, and it needs an explicit answer rather than an assumption. A classic BBS lets you connect and type `NEW` at the login prompt. SSH decides accept-or-reject **before any session exists**, so there is no prompt to type `NEW` at — the client has already committed to a username and a credential. Registration therefore has to be handled at the auth layer, not in the TUI.
 
+**On the web this inverts, and the inversion is instructive.** Signup is trivial there — a page can prompt for anything — but the *credential* is the hard part: SSH hands the server a public key before the session exists, which is exactly why enrolment is free here and the next login is passwordless. Browsers cannot reach `ssh-agent`, and pasting a private key into a web page is not a design. Passkeys are the honest analogue and are what §5.3 uses `[D17]`.
+
 Three entry points, in order of how users will actually arrive:
 
 **1. The reserved `new` account (primary, documented path).**
@@ -230,9 +234,34 @@ Notably, SSH gives us **SFTP for free** as the file-transfer mechanism. No ZMODE
 
 **Off by default, with a loud warning when enabled.** Exists because (a) some ANSI terminal clients (SyncTERM, NetRunner, MagiTerm) are telnet-only and are what BBS people actually use, and (b) DOS door bridging is easier over a raw socket. When enabled, the login banner and the sysop's startup log must both state that credentials cross the wire in plaintext. Guest-only telnet is a supported middle setting and is what we should recommend.
 
-### 5.3 Web terminal (optional, later)
+### 5.3 Web — a semantic terminal `[D16]`
 
-`xterm.js` over a WebSocket, same session API. Good for casual visitors and for showing the BBS off. Low priority.
+**Reversed in v0.16.** This section previously specified `xterm.js` over a WebSocket, described it as optional and low priority, and justified it by "casual visitors and showing the BBS off". All four parts of that turned out wrong, and the full design is in **[webui.md](webui.md)**; what follows is the summary this document needs.
+
+**The shape.** An `xterm.js` terminal in a browser is a character grid rendered in a page — it inherits every constraint of an 80-column screen while adding a dependency. Instead, the model emits a typed description of what is on screen and two renderers consume it:
+
+```
+Model.Screen() → Screen
+                  ├─→ ansi.Render(Screen, Styles, w, h) → ANSI bytes   (SSH, telnet)
+                  └─→ json.Marshal(Screen)              → WebSocket    (browser)
+```
+
+**The rule that makes it better rather than a reskin: the `Screen` carries semantics, the renderer owns geometry.** Truncation, viewport windowing and line wrapping moved out of the model, because the correct answer differs — an 80-column grid wants an area name cut to 26 characters, and a browser wants the whole name and a CSS ellipsis. If they had stayed in the model, the web UI would receive a pre-truncated 80-column snapshot and be a screenshot of a terminal.
+
+**Why this seam and not a JSON API over `bbs.Service`.** That would mean a second navigation model, a second set of screens, and a second place to implement every future feature — which is what §2 declined, and it drifts the moment somebody adds a screen to one and forgets the other. Here a new screen *cannot* exist over SSH and be missing from the web: there is one `Screen()` method, and both renderers consume its output. The ANSI renderer is held to byte-identical output by the existing golden frames (§12.8), so this is a verifiable refactor rather than an aspiration.
+
+**Input is keystrokes.** Clicking the `[M]` row sends `M`; the model never learns it is talking to a browser, so `handleKey` is unchanged and there are no web-only code paths in `Update`. The one exception is text entry, which sends a whole field value — character streaming breaks under autocorrect, predictive text and IME composition, all of which revise multi-character runs.
+
+**Authentication is passkeys, and nothing else** `[D17]`. No password path, no SSH-key path. The credential is a keypair whose private half the server never holds — the same shape as SSH key auth and as the node identity in §6.1 — and discoverable credentials mean no nick is typed. Accounts predating the web bootstrap through a single-use, short-expiry enrolment code minted by an authenticated SSH session `[D18]`; it registers a credential and cannot mint a session.
+
+**Two consequences, stated rather than discovered:**
+
+- **No guest browsing on the web.** A passkey-only front door means an unauthenticated visitor sees a sign-in prompt and nothing else. This removes the "showing the BBS off" rationale this section originally gave, and it is a product decision rather than a technical detail. The SSH `guest` account is unaffected.
+- **`web.origin` is required, with no default.** Passkeys bind to an origin, and a mismatch does not degrade — it fails every sign-in with a browser error that says nothing about the cause. Validated at startup like any other config error (§11.3).
+
+**Presence is shared.** A web session calls `Presence.Join` exactly as SSH and telnet do, so it gets a node number and appears in `[W] Who's online` and the sysop status panel. One BBS, three doors — which is what makes the browser feel like part of the BBS rather than an adjacent website.
+
+The static bundle is served from the binary via `embed`, consistent with §10's single-artifact packaging: no CDN, and no asset build in the release path.
 
 ### 5.4 Terminal rendering — the fiddly bit
 
@@ -247,6 +276,7 @@ BBS aesthetics mean **CP437 + ANSI art**, but modern terminals are UTF-8. Plan:
   - **The loader reads `<datadir>/themes/*.toml` at startup** and merges each over the built-in defaults, so a sysop can retheme by editing a file. Roughly 50 lines, and it turns "I want different colours" from a feature request into a text edit.
   - **The boundary that keeps it small:** these are *style* overrides — colours, box-drawing glyphs, accent characters. They are **not** ANSI art theme packs with screen templates, layout manifests, and per-menu artwork, which is what `[D15]` declined. A malformed theme file is a startup error like any other config (§11.3), never a silent fallback.
   - Hot-reloadable (§11.3), so a sysop can iterate on a theme without dropping sessions.
+  - **The same `themes/*.toml` files style the browser** `[D16]`. The eight `Theme` colour fields map onto CSS custom properties and `Border` onto a CSS border style, so web retheming needs no second mechanism and no second file format. This is where the bullet above — colour behind a `Theme` struct rather than hardcoded at call sites — paid for itself: the claim was that it made *extending* themes cheap, and what it actually made cheap was a whole second renderer. See [webui.md §11](webui.md).
 
 ---
 
@@ -1136,7 +1166,7 @@ Grouped as the reference doc will be. Phase markers indicate when the group firs
 **Listeners — Phase 1**
 - SSH: `bind`, `port` (default 2222 unprivileged, 22 documented), `host_key_path`, `auth_methods`, `max_sessions`, `max_sessions_per_user`, `idle_timeout`, `login_grace`
 - Telnet: `enabled` (default **false**), `bind`, `port`, `guest_only` (default true when enabled), warning acknowledgement flag `[D12]`
-- Web terminal: `enabled` (default false), Phase 5
+- Web `[D16]`: `enabled` (default **false** — it needs a public origin and a TLS certificate, neither of which has a sensible default), `bind`, `port` (default 8443), **`origin` (REQUIRED when enabled, no default — passkeys bind to it and a mismatch fails totally, §5.3)**, `tls_cert`, `tls_key`, `max_sessions`, `max_sessions_per_user`, `idle_timeout_mins`, `unlocked_idle_timeout_mins` (shorter than `idle_timeout_mins` on purpose — such a session holds the mail passphrase in memory, and a closing browser tab is a far less reliable goodbye than an SSH disconnect), `session_ttl_hours`, `enrolment_code_ttl_mins`, `enrol_attempts_per_hour`, `auth_attempts_per_hour`
 
 **Users and registration — Phase 1** (§6.7)
 `registration_mode` (`open` | `approval` | `invite` | `closed`, default `open` `[N7]`), `guest_enabled`, `guest_areas`, `nick_min_len`, `nick_max_len`, `extra_reserved_nicks`, `collect_real_name`, `show_real_name`, `default_capabilities` (note: **excludes `post_federated`** `[N7]`), `new_user_post_delay`, `session_time_limit`, `dormant_after`, `dm_key_custody` (`server` | `wrapped` | `client`, default `wrapped`), `default_directory_listed` (default **true** `[N9]`), `password_min_len`, `argon2_params`. **No email key exists** `[N8]`
@@ -1353,11 +1383,13 @@ Revised per the decisions. The largest changes: the fountain codec moves **up** 
 | **2 — Federation over IP + the harness** | Record log, version vectors, anti-entropy with **digest suppression/scaling**, bundle format, zstd dictionary, `Link` abstraction, **simulated mesh harness (seeded by `dev seed`)**, **fountain codec (L1)**, **lazy `PROFILE` publication**, **`SUCCESSION` records with auto-follow**, **the deterministic simulator + property/invariant/fuzz suites (§12)**, QUIC/Noise IP link | Build and debug the sync protocol where iteration is fast — but design every byte for the mesh MTU. The codec is here, not Phase 3, because tuning small-K overhead needs the harness's controllable loss. |
 | **3 — Meshtastic link** | Serial + TCP transports, protobuf framing, **airtime governor with flood-multiplier accounting**, ham-mode safety checks (DMs *and* channel PSK), file catalog replication, **`mesh survey` (§7.8) + live R estimation** | The protocol already fits 233 bytes because Phase 2 was designed that way |
 | **4 — Doors** | Modern door API + spec **incl. the §9.1.1 capability model**, PTY/ConPTY bridging, sandboxing, 2–3 reference doors, dropfile generation, **Windows CI runner (§12.9)** | Independent of federation; parallelizable with 2–3. Now the whole of door scope. |
-| **5 — Reach** | Web terminal, inter-BBS `DOOR_EVENT`, sneakernet bundles, **`meshbbs-key` helper for client-held DM keys (tier 3)** | Genuinely optional, except tier-3 keys which are a stated preference |
+| **5 — Reach** | ~~Web terminal~~ (**shipped early — see below**), inter-BBS `DOOR_EVENT`, sneakernet bundles, **`meshbbs-key` helper for client-held DM keys (tier 3)** | Genuinely optional, except tier-3 keys which are a stated preference |
 | **6 — Interop & stabilization** | **Freeze BSMP wire format v1** + written spec + conformance vectors, **request Meshtastic portnum**, **FTN gateway** (echomail/netmail, SEEN-BY/PATH, per-echo airtime caps) | Both deliverables are public commitments and both need a format that has survived real radios. `[D10]` sequences the portnum after the freeze; §7.7 sequences the gateway after it too. |
 | **7 — Legacy DOS doors** | DOSBox-X bridge, node locking, COM-port bridging | Nice-to-have `[D4]`. May never ship, and nothing depends on it. |
 
 Phases 2 and 4 are parallelizable if there's more than one person working on it. Phase 6 is the first point at which the project makes promises to strangers, and should not be rushed toward.
+
+**The web front end shipped out of order, during Phase 3.** It is recorded here rather than renumbered, because *why* it jumped is the useful part: as `xterm.js` it was a genuine Phase 5 luxury, but `[D16]` turned it into a refactor of the session layer — splitting `Screen` from its rendering — and that refactor is cheaper the earlier it happens and touches every screen written after it. It also arrived in four independently shippable steps, the first of which (screen extraction) carried all the structural risk and landed alone, with no web server anywhere near it and no user-visible change. Federation work was not displaced: Phase 3's remaining scope is unchanged and the mesh link is still the critical path.
 
 ---
 
@@ -1420,6 +1452,16 @@ Nothing else blocks work. The remaining unknowns are ones implementation answers
 | **N9** | Directory listing default | **Listed**, with a visible per-user toggle. Publication stays lazy — listed governs what happens on first federated activity, not at signup. | §6.7, §11.5 |
 | **N11** | Door API authority | **Levels 1–3 (`session`, `state`, `announce`) always available; `act_as_user` a per-door sysop grant, off by default** — same shape as `[N7]`'s `post_federated` gating. Capabilities **intersect, never escalate**, so a door cannot federate on behalf of a user who lacks that right. Tokens are per-invocation, die with the process, and travel in the session descriptor rather than argv. `DOOR_EVENT` stays node-signed: the threat is a cheating sysop, and user-signing buys nothing against that under tier-2 key custody. | §9.1.1, §9.5, §11.5 |
 | **N-tech** | CLI framework | **`spf13/cobra`** for all binaries — commands, flags, help, completions. **Viper explicitly not used**: §11.3 requires unknown config keys to be a hard startup error, which Viper cannot express. | §4, §11.6 |
+
+### 15.3 Web front end — recorded in `webui.md`
+
+`[D16]`–`[D18]` are decided and written up in **[webui.md §15](webui.md)**, which owns them. They are indexed here because they are referenced inline in this document and because §5.3 is a reversal, and the summary below is deliberately short: duplicating the reasoning in two files is how the two drift, which is the same argument `[D16]` itself makes about navigation models.
+
+| # | Question | Decision | Sections affected |
+|---|---|---|---|
+| **D16** | What shape is the web UI? | **A semantic terminal, reversing §5.3's `xterm.js`.** The model emits a typed `Screen`; ANSI and HTML renderers both consume it. Same screens, same keys, same wording, rendered twice. Geometry moves from the model into the renderers, which is what makes the browser version better rather than a screenshot of a terminal. §2's "no web forum UI" non-goal is **narrowed, not reversed** — there is still no second navigation model. | §2, §5.3, §13 |
+| **D17** | How do people authenticate on the web? | **Passkeys / WebAuthn only.** No password path, no SSH-key path, no guest browsing. Discoverable credentials, so no nick is typed. Two consequences accepted rather than discovered: the web has **no unauthenticated front door**, and **`web.origin` becomes a required key** because an RP ID mismatch fails totally rather than degrading. | §5.1, §5.3, §11.5 |
+| **D18** | How does an account predating the web get its first passkey? | **A single-use, short-expiry, enrolment-only code minted by an authenticated SSH session.** It registers a credential and cannot mint a session. Note `webui.md` §8.1's correction: this does **not** make a stolen code harmless — whoever holds one can enrol *their own* passkey — so the properties carrying the weight are the ten-minute window and the authenticated issuance, not the endpoint shape. | §5.3, §6.7 |
 
 ---
 

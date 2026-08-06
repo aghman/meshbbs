@@ -1,8 +1,8 @@
 # meshbbs
 
-A modern, cross-platform BBS written in Go — SSH access, door games, file areas, forums, and
-direct messaging — with forums and DMs federated between independent BBS instances over
-[Meshtastic](https://meshtastic.org) LoRa mesh.
+A modern, cross-platform BBS written in Go — SSH and browser access, door games, file areas,
+forums, and direct messaging — with forums and DMs federated between independent BBS instances
+over [Meshtastic](https://meshtastic.org) LoRa mesh.
 
 Each BBS instance has its own Meshtastic node attached (USB serial or TCP) and syncs with peer
 instances over a dedicated mesh channel. A BBS with no internet connection at all is a full
@@ -16,6 +16,12 @@ message networks.
 **Status:** Phase 2 complete — a usable single-node BBS, plus the sync protocol and its simulator,
 with instances able to federate over IP. Phase 3 is in progress: the Meshtastic link itself, so
 federation over the mesh does not work yet.
+
+The **browser front end** shipped ahead of its slot in the roadmap and works today. It is not a
+terminal emulator in a web page: the session model emits a typed description of what is on screen,
+and an ANSI renderer and an HTML renderer both consume it. One menu graph, so a screen cannot exist
+over SSH and be missing from the web — and the browser wraps a post at a readable measure where SSH
+cuts an area name at column 26. See [docs/webui.md](docs/webui.md).
 
 ## Try it
 
@@ -38,6 +44,25 @@ Forums, private mail, node chat and a sysop panel. Private messages are encrypte
 your passphrase opens — subject lines included — so the sysop stores ciphertext and cannot read
 your mail.
 
+The same BBS is also reachable from a browser. That front end is off until you give it a public
+origin and a TLS certificate, because neither has a sensible default — passkeys are bound to the
+origin, and a mismatch fails every sign-in with a browser error that says nothing about the cause:
+
+```
+[web]
+enabled  = true
+origin   = "https://bbs.example.com"   # required; passkeys bind to it
+tls_cert = "/etc/meshbbs/fullchain.pem"
+tls_key  = "/etc/meshbbs/privkey.pem"
+```
+
+Sign-in is a passkey and nothing else — no password path, and discoverable credentials mean you do
+not type a nick either. An account that predates the web gets its first passkey by pressing `P` in
+an SSH session and typing the code it shows into the sign-in page; the code registers a credential,
+expires in ten minutes, and cannot mint a session. There is deliberately **no guest browsing on the
+web** — an unauthenticated visitor sees a sign-in prompt and nothing else, while `ssh guest@` is
+unaffected.
+
 `init` generates the node key — there is no address to choose, request or register, because the
 node ID is derived from the key itself. Back up the `keys/` directory: a lost node key cannot be
 recovered, and the instance would have to re-establish with its peers as a new node.
@@ -53,6 +78,8 @@ recovered, and the instance would have to re-establish with its peers as a new n
 
 - [High-Level Design](docs/design.md) — architecture, mesh sync protocol, airtime budget, roadmap,
   and the decision log.
+- [Web UI Design](docs/webui.md) — the semantic-terminal shape, the block vocabulary, passkey
+  authentication and enrolment. Owns §5.3 of the design doc in detail.
 - [Configuration reference](docs/config.md) — generated; run `meshbbs config reference` for the
   same content.
 
