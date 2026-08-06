@@ -30,9 +30,15 @@
 # It does not retry, and it does not swallow failures. A real finding writes a
 # crasher to testdata/fuzz/<Target>/ and prints the failing input; both are
 # checked for explicitly and either one fails the job. The ONLY tolerated case
-# is: non-zero exit, no crasher file, and the sole reported error being the
+# is: non-zero exit, no NEW crasher file, and the sole reported error being the
 # context deadline. Anything else — a panic, a non-canonical encoding, an
 # unexpected message — fails loudly, as it must.
+#
+# "New" matters: past findings are committed to testdata/fuzz/<Target>/ as
+# regression corpus, so that directory is often non-empty at checkout. Treating
+# it as non-empty-means-crasher reports every committed regression seed as a
+# fresh finding. We snapshot the directory before the run and compare after, so
+# only files this run produced count.
 set -uo pipefail
 
 pkg="$1"
@@ -43,7 +49,12 @@ duration="$3"
 crasher_dir="${pkg#./}/testdata/fuzz/${target}"
 
 log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+before="$(mktemp)"
+after="$(mktemp)"
+trap 'rm -f "$log" "$before" "$after"' EXIT
+
+# Committed regression corpus, i.e. everything that is NOT a finding from this run.
+ls -A "$crasher_dir" 2>/dev/null | sort > "$before"
 
 set +e
 go test "$pkg" -run XXX -fuzz "$target" -fuzztime "$duration" 2>&1 | tee "$log"
@@ -56,10 +67,13 @@ fi
 
 echo "::group::${target} exited ${status}; classifying"
 
-if [ -d "$crasher_dir" ] && [ -n "$(ls -A "$crasher_dir" 2>/dev/null)" ]; then
+ls -A "$crasher_dir" 2>/dev/null | sort > "$after"
+new_crashers="$(comm -13 "$before" "$after")"
+
+if [ -n "$new_crashers" ]; then
   echo "::endgroup::"
-  echo "::error::${target} found a real crasher. Files in ${crasher_dir}:"
-  ls -la "$crasher_dir"
+  echo "::error::${target} found a real crasher. New files in ${crasher_dir}:"
+  echo "$new_crashers"
   exit 1
 fi
 
