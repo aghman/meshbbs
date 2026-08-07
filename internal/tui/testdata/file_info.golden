@@ -1,0 +1,12 @@
+ARCHIVE.ZIP
+------------------------------------------------------------------------------
+
+ARCHIVE.ZIP
+4.0 KB  ·  4096 bytes  ·  uploaded by austin  ·  2023-11-14 22:13
+
+A compressed archive
+
+To download it:
+    sftp -P 2222 austin@this-bbs  then:  get /utils/ARCHIVE.ZIP
+
+q back

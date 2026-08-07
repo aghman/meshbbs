@@ -21,6 +21,12 @@ type (
 	mailLoadedMsg  struct{ mail []store.DM }
 	mailOpenedMsg  struct{ subject, body string }
 	peersLoadedMsg struct{ peers []Peer }
+
+	fileAreasLoadedMsg struct{ areas []store.Area }
+	filesLoadedMsg     struct {
+		area  string
+		files []store.File
+	}
 	joinedMsg      struct{ node int }
 	signupDoneMsg  struct{ nick, passphrase string }
 )
@@ -48,6 +54,31 @@ func (m Model) loadAreas() tea.Cmd {
 			return statusMsg{text: err.Error(), isErr: true}
 		}
 		return areasLoadedMsg{areas: areas}
+	}
+}
+
+// loadFileAreas fetches the file areas (§6.5).
+//
+// Separate from loadAreas because the two listings are separate: a message area
+// and a file area are the same thing to the sync engine and different things to
+// a person, and mixing them in one menu would be the second kind of confusion.
+func (m Model) loadFileAreas() tea.Cmd {
+	return func() tea.Msg {
+		areas, err := m.cfg.Store.ListFileAreas(m.ctx)
+		if err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+		return fileAreasLoadedMsg{areas: areas}
+	}
+}
+
+func (m Model) loadFiles(area string) tea.Cmd {
+	return func() tea.Msg {
+		files, err := m.cfg.Store.ListFiles(m.ctx, area)
+		if err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+		return filesLoadedMsg{area: area, files: files}
 	}
 }
 

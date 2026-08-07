@@ -370,6 +370,35 @@ func TestGoldenFrames(t *testing.T) {
 		f.login(t, "austin").typeRunes("m").golden("area_list")
 	})
 
+	t.Run("file_areas", func(t *testing.T) {
+		f := newFixture(t)
+		seedFiles(t, f)
+		f.user(t, "austin", "pw")
+		f.login(t, "austin").typeRunes("f").golden("file_areas")
+	})
+
+	t.Run("file_list", func(t *testing.T) {
+		f := newFixture(t)
+		seedFiles(t, f)
+		f.user(t, "austin", "pw")
+		// "utils" is the second area alphabetically.
+		f.login(t, "austin").typeRunes("f").typeRunes("j").enter().golden("file_list")
+	})
+
+	t.Run("file_info", func(t *testing.T) {
+		f := newFixture(t)
+		seedFiles(t, f)
+		f.user(t, "austin", "pw")
+		cfg := f.config(IntentAuthenticated, "austin")
+		cfg.SSHPort = 2222
+		u, err := f.store.GetUser(f.ctx, "austin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.User = u
+		newSession(t, cfg).typeRunes("f").typeRunes("j").enter().enter().golden("file_info")
+	})
+
 	t.Run("signup_nick", func(t *testing.T) {
 		f := newFixture(t)
 		newSession(t, f.config(IntentSignup, "")).golden("signup_nick")

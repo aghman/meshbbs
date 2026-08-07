@@ -3,6 +3,8 @@ package webd
 import (
 	"context"
 	"encoding/json"
+	"github.com/aghman/meshbbs/internal/blobstore"
+	"github.com/aghman/meshbbs/internal/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -264,4 +266,81 @@ func TestWSQuitClosesCleanly(t *testing.T) {
 func blockJSON(blocks []map[string]any) string {
 	b, _ := json.Marshal(blocks)
 	return string(b)
+}
+
+// The file browser reaches the browser too.
+//
+// This is webui.md's central claim under test for a NEW screen rather than an
+// existing one: the model emits one Screen, so a screen added for SSH cannot be
+// quietly missing from the web. Nothing in the JS or the server knows what a
+// file area is — the browser renders it because it is a table, the same way it
+// renders the message areas.
+func TestWSFileBrowser(t *testing.T) {
+	f, ts, sessionID := liveServer(t)
+	ctx := context.Background()
+
+	if _, err := f.store.CreateFileArea(f.ctx, "utils", "Utilities", false); err != nil {
+		t.Fatal(err)
+	}
+	var hash blobstore.Hash
+	hash[0] = 0x42
+	if _, err := f.store.PutFile(f.ctx, "utils", store.File{
+		Name: "ARCHIVE.ZIP", Hash: hash, Size: 4096,
+		Description: "A compressed archive", Uploader: "austin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := dialWS(t, ctx, ts, sessionID)
+	readUntil(t, ctx, conn, "the menu", func(m screenMsg) bool {
+		return m.Screen.Kind == "menu"
+	})
+
+	if err := wsjson.Write(ctx, conn, clientMsg{Key: "f"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := readUntil(t, ctx, conn, "the file areas", func(m screenMsg) bool {
+		return m.Screen.Kind == "fileareas"
+	})
+	if msg.Screen.Title != "File Areas" {
+		t.Errorf("title = %q", msg.Screen.Title)
+	}
+
+	if err := wsjson.Write(ctx, conn, clientMsg{Key: "enter"}); err != nil {
+		t.Fatal(err)
+	}
+	// Wait for the rows, not just the screen: the file load is a command, so
+	// the first frame after the keypress is the right screen with nothing in
+	// it yet.
+	msg = readUntil(t, ctx, conn, "the file list with rows", func(m screenMsg) bool {
+		if m.Screen.Kind != "filearea" {
+			return false
+		}
+		for _, b := range m.Screen.Blocks {
+			if b["kind"] == "table" {
+				rows, _ := b["rows"].([]any)
+				return len(rows) > 0
+			}
+		}
+		return false
+	})
+
+	// The rows carry whole values, not values the model cut to 80 columns: the
+	// browser is entitled to lay them out itself (webui.md §4).
+	var found bool
+	for _, b := range msg.Screen.Blocks {
+		if b["kind"] != "table" {
+			continue
+		}
+		rows, _ := b["rows"].([]any)
+		for _, r := range rows {
+			cells, _ := r.(map[string]any)["cells"].([]any)
+			if len(cells) == 4 && cells[0] == "ARCHIVE.ZIP" && cells[2] == "A compressed archive" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the file row did not arrive intact: %+v", msg.Screen.Blocks)
+	}
 }
