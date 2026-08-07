@@ -38,10 +38,14 @@ func (f File) Published() bool { return !f.Record.IsZero() }
 // ErrFileExists is returned when an area already holds that name.
 var ErrFileExists = errors.New("a file with that name already exists in this area")
 
-// MaxFileNameLen bounds a file's name. It matches the schema CHECK, and it is
-// generous next to MaxNickLen because a filename is not paid for per DM — but
-// it is still bounded, because the name travels in every FILE record.
-const MaxFileNameLen = 64
+// MaxFileNameLen bounds a file's name.
+//
+// Defined by the wire format rather than here, and re-exported so callers in
+// this package read one name. Two constants for one limit is two truths that
+// drift: the looser one wins at the database and the tighter one then refuses
+// to publish what was accepted, which surfaces as a file that exists locally
+// and silently never reaches the network.
+const MaxFileNameLen = record.MaxFileNameLen
 
 // PutFile records a file this node now holds.
 //
