@@ -9,17 +9,34 @@ import (
 	"github.com/aghman/meshbbs/internal/record"
 )
 
-// Area is a forum message base (§6.3).
+// Area is a federatable namespace: a forum message base (§6.3) or a file area
+// (§6.5).
+//
+// Both kinds share this table and this type because at the protocol layer they
+// are the same thing — an AreaTag with a version vector — and because the tag
+// namespace is global, so letting the two kinds be named independently would
+// let a message area and a file area collide into one tag. See migration 0005.
 type Area struct {
 	ID            int64
 	Name          string
 	Tag           record.AreaTag
+	Kind          AreaKind
 	Description   string
 	Federated     bool
 	ReadOnly      bool
 	RetentionDays int
 	CreatedAt     int64
 }
+
+// AreaKind says what an area holds.
+type AreaKind string
+
+const (
+	// KindMessage is a forum message base (§6.3).
+	KindMessage AreaKind = "message"
+	// KindFile is a file area (§6.5).
+	KindFile AreaKind = "file"
+)
 
 // Scope returns a human label for the area's reach.
 //
@@ -41,6 +58,20 @@ var ErrAreaExists = errors.New("an area with that name already exists")
 // IN to spending the network's airtime. At roughly ten originated packets per
 // day per node (§1.1) that default is load-bearing, not a nicety.
 func (s *Store) CreateArea(ctx context.Context, name, description string, federated bool) (Area, error) {
+	return s.createArea(ctx, name, description, federated, KindMessage)
+}
+
+// CreateFileArea creates a file area (§6.5).
+//
+// Same opt-in rule as a message area, and for a sharper reason: a file area's
+// records are the lowest priority class the governor has (§7.6), so a federated
+// one that nobody wanted is airtime spent on catalog entries at the expense of
+// everything above it.
+func (s *Store) CreateFileArea(ctx context.Context, name, description string, federated bool) (Area, error) {
+	return s.createArea(ctx, name, description, federated, KindFile)
+}
+
+func (s *Store) createArea(ctx context.Context, name, description string, federated bool, kind AreaKind) (Area, error) {
 	name = strings.TrimSpace(name)
 	if err := ValidateAreaName(name); err != nil {
 		return Area{}, err
@@ -48,17 +79,21 @@ func (s *Store) CreateArea(ctx context.Context, name, description string, federa
 	tag := record.AreaTagFor(name)
 
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO areas (name, tag, description, federated, created_at) VALUES (?, ?, ?, ?, ?)`,
-		name, tag[:], description, boolToInt(federated), s.now())
+		`INSERT INTO areas (name, tag, description, federated, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		name, tag[:], description, boolToInt(federated), string(kind), s.now())
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
+			// Deliberately does not say which KIND of area already holds the
+			// name. A file area and a message area cannot share one, because
+			// they would share an AreaTag (migration 0005), and a sysop hitting
+			// this needs to know the name is taken, not to go hunting.
 			return Area{}, fmt.Errorf("%w: %q", ErrAreaExists, name)
 		}
 		return Area{}, fmt.Errorf("create area: %w", err)
 	}
 	id, _ := res.LastInsertId()
 	return Area{
-		ID: id, Name: name, Tag: tag, Description: description,
+		ID: id, Name: name, Tag: tag, Kind: kind, Description: description,
 		Federated: federated, CreatedAt: s.now(),
 	}, nil
 }
@@ -78,31 +113,85 @@ func ValidateAreaName(name string) error {
 	return nil
 }
 
-// GetArea loads an area by name.
-func (s *Store) GetArea(ctx context.Context, name string) (Area, error) {
+// areaColumns is the projection every area scan uses, so the SELECT list and
+// scanArea cannot drift apart.
+const areaColumns = `id, name, tag, kind, description, federated, read_only, retention_days, created_at`
+
+// scanArea reads one area row from the areaColumns projection.
+func scanArea(sc interface{ Scan(...any) error }) (Area, error) {
 	var a Area
 	var tag []byte
+	var kind string
 	var fed, ro int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, tag, description, federated, read_only, retention_days, created_at
-		 FROM areas WHERE name = ?`, strings.TrimSpace(name)).
-		Scan(&a.ID, &a.Name, &tag, &a.Description, &fed, &ro, &a.RetentionDays, &a.CreatedAt)
+	if err := sc.Scan(&a.ID, &a.Name, &tag, &kind, &a.Description, &fed, &ro,
+		&a.RetentionDays, &a.CreatedAt); err != nil {
+		return Area{}, err
+	}
+	copy(a.Tag[:], tag)
+	a.Kind = AreaKind(kind)
+	a.Federated, a.ReadOnly = fed == 1, ro == 1
+	return a, nil
+}
+
+// GetArea loads a MESSAGE area by name.
+//
+// Kind-scoped rather than generic, because the callers are the forum paths and
+// a file area reaching one of them would mean posting into a catalog. Use
+// GetFileArea for the other kind, or GetAnyArea when the kind is the question.
+func (s *Store) GetArea(ctx context.Context, name string) (Area, error) {
+	a, err := s.GetAnyArea(ctx, name)
+	if err != nil {
+		return Area{}, err
+	}
+	if a.Kind != KindMessage {
+		return Area{}, fmt.Errorf("%w: %s is a file area", ErrWrongAreaKind, a.Name)
+	}
+	return a, nil
+}
+
+// GetFileArea loads a FILE area by name.
+func (s *Store) GetFileArea(ctx context.Context, name string) (Area, error) {
+	a, err := s.GetAnyArea(ctx, name)
+	if err != nil {
+		return Area{}, err
+	}
+	if a.Kind != KindFile {
+		return Area{}, fmt.Errorf("%w: %s is a message area", ErrWrongAreaKind, a.Name)
+	}
+	return a, nil
+}
+
+// ErrWrongAreaKind is returned when an area exists but holds the other kind of
+// thing. Distinct from ErrNotFound because the remedies differ: one is a typo,
+// the other is a name already spent on something else.
+var ErrWrongAreaKind = errors.New("area is of the wrong kind")
+
+// GetAnyArea loads an area of either kind.
+func (s *Store) GetAnyArea(ctx context.Context, name string) (Area, error) {
+	a, err := scanArea(s.db.QueryRowContext(ctx,
+		`SELECT `+areaColumns+` FROM areas WHERE name = ?`, strings.TrimSpace(name)))
 	if isNoRows(err) {
 		return Area{}, ErrNotFound
 	}
 	if err != nil {
 		return Area{}, fmt.Errorf("get area: %w", err)
 	}
-	copy(a.Tag[:], tag)
-	a.Federated, a.ReadOnly = fed == 1, ro == 1
 	return a, nil
 }
 
-// ListAreas returns all areas, ordered by name.
+// ListAreas returns the message areas, ordered by name.
 func (s *Store) ListAreas(ctx context.Context) ([]Area, error) {
+	return s.listAreas(ctx, KindMessage)
+}
+
+// ListFileAreas returns the file areas, ordered by name.
+func (s *Store) ListFileAreas(ctx context.Context) ([]Area, error) {
+	return s.listAreas(ctx, KindFile)
+}
+
+func (s *Store) listAreas(ctx context.Context, kind AreaKind) ([]Area, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, tag, description, federated, read_only, retention_days, created_at
-		 FROM areas ORDER BY name`)
+		`SELECT `+areaColumns+` FROM areas WHERE kind = ? ORDER BY name`, string(kind))
 	if err != nil {
 		return nil, fmt.Errorf("list areas: %w", err)
 	}
@@ -110,15 +199,10 @@ func (s *Store) ListAreas(ctx context.Context) ([]Area, error) {
 
 	var out []Area
 	for rows.Next() {
-		var a Area
-		var tag []byte
-		var fed, ro int
-		if err := rows.Scan(&a.ID, &a.Name, &tag, &a.Description, &fed, &ro,
-			&a.RetentionDays, &a.CreatedAt); err != nil {
+		a, err := scanArea(rows)
+		if err != nil {
 			return nil, err
 		}
-		copy(a.Tag[:], tag)
-		a.Federated, a.ReadOnly = fed == 1, ro == 1
 		out = append(out, a)
 	}
 	return out, rows.Err()
