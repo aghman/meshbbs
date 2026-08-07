@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/aghman/meshbbs/internal/identity"
@@ -82,6 +83,14 @@ func (g *GossipStore) Refresh() error {
 		}
 		var a record.AreaTag
 		copy(a[:], tag)
+		if a == record.DMArea {
+			// Private mail does not federate in this phase (record.DMArea), and
+			// a row claiming that tag cannot make it. ValidateAreaName refuses
+			// the name that derives it, so this is the belt to that braces: an
+			// area created before that rule, or by a direct database edit, must
+			// not be able to put mail on the air.
+			continue
+		}
 		out = append(out, a)
 	}
 	if err := rows.Err(); err != nil {
@@ -105,6 +114,52 @@ func (g *GossipStore) Refresh() error {
 // quarantined forever.
 var RosterArea = record.AreaTag{}
 
+// notReplicated are record types the gossip store never puts on the wire,
+// whatever area they were written into.
+//
+// Only DM, and only until store-and-forward mail exists (§6.4, record.DMArea).
+// Filtering by TYPE as well as by area is deliberate belt and braces, because
+// the failure this guards against already happened once: mail written with a
+// zero area tag landed in the roster — the one area that is always federated —
+// and was counted by Vector and served by Records like any public post.
+// Excluding the DM area alone would fix new mail and leave every message an
+// affected database already holds exactly where it was.
+//
+// Type and area agree for anything written by the current code, so on a healthy
+// log this filter changes nothing. On a log carrying pre-fix mail it stops at
+// the first such record rather than serving it, which costs that origin's
+// roster stream everything above the gap. That is the same trade migration 0003
+// took and for the same reason: no instance has peers yet, the wire format is
+// not frozen until Phase 6 `[D10]`, and the alternative is either leaking
+// private mail or rewriting signed history.
+//
+// When mail federates, this filter and the Areas() exclusion come out together.
+var notReplicated = []record.Type{record.TypeDM}
+
+// isNotReplicated reports whether a record type is excluded from federation.
+func isNotReplicated(t record.Type) bool {
+	for _, x := range notReplicated {
+		if t == x {
+			return true
+		}
+	}
+	return false
+}
+
+// typeFilterSQL renders notReplicated as a SQL predicate plus its arguments.
+// Built rather than inlined so the version vector and the record query cannot
+// drift apart — a vector that promises what the record query refuses to serve
+// is the permanent silent gap this protocol is built to avoid.
+func typeFilterSQL() (string, []any) {
+	var sb strings.Builder
+	args := make([]any, 0, len(notReplicated))
+	for _, t := range notReplicated {
+		sb.WriteString(" AND type != ?")
+		args = append(args, int(t))
+	}
+	return sb.String(), args
+}
+
 // Areas implements gossip.Store.
 //
 // The roster is always included, ahead of the sysop's own areas.
@@ -125,8 +180,10 @@ func (g *GossipStore) Areas() []record.AreaTag {
 // and silent, which is the worst failure mode this protocol has.
 func (g *GossipStore) Vector(area record.AreaTag) *vv.Vector {
 	v := vv.New()
+	filter, filterArgs := typeFilterSQL()
+	args := append([]any{area[:]}, filterArgs...)
 	rows, err := g.st.db.QueryContext(g.ctx,
-		`SELECT origin, seq FROM records WHERE area = ? ORDER BY origin, seq`, area[:])
+		`SELECT origin, seq FROM records WHERE area = ?`+filter+` ORDER BY origin, seq`, args...)
 	if err != nil {
 		g.onError(fmt.Errorf("read version vector for area %s: %w", area, err))
 		return v
@@ -183,11 +240,14 @@ const maxRecordsPerRange = 256
 // Records implements gossip.Store.
 func (g *GossipStore) Records(area record.AreaTag, r vv.Range) []*record.Record {
 	origin := r.Origin
+	filter, filterArgs := typeFilterSQL()
+	args := append([]any{area[:], origin[:]}, filterArgs...)
+	args = append(args, r.From, r.To, maxRecordsPerRange)
 	rows, err := g.st.db.QueryContext(g.ctx,
 		`SELECT signed, sig FROM records
-		 WHERE area = ? AND origin = ? AND seq >= ? AND seq <= ?
+		 WHERE area = ? AND origin = ?`+filter+` AND seq >= ? AND seq <= ?
 		 ORDER BY seq LIMIT ?`,
-		area[:], origin[:], r.From, r.To, maxRecordsPerRange)
+		args...)
 	if err != nil {
 		g.onError(fmt.Errorf("read records for %s: %w", area, err))
 		return nil
@@ -232,6 +292,15 @@ func (g *GossipStore) Apply(area record.AreaTag, recs []*record.Record) (int, er
 			// claiming another is either a bug or an attempt to write into an
 			// area the sender is not federating.
 			g.onError(fmt.Errorf("record %s claims area %s inside a %s bundle", r.ID(), r.Area, area))
+			continue
+		}
+		if isNotReplicated(r.Type) {
+			// The inbound half of the same rule the read path enforces: we do
+			// not serve mail over gossip, so a peer offering us some is either
+			// running code we do not have or probing. Accepting it would also
+			// park a record in an area whose vector then stops advancing at it.
+			g.onError(fmt.Errorf("refusing a %s record from %s: mail does not federate",
+				r.Type, r.Origin.Short()))
 			continue
 		}
 		// A NODE record is verified WITHOUT a prior key, because it carries the

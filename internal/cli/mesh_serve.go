@@ -135,19 +135,11 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 		return nil, err
 	}
 
-	outbox, err := bsmp.NewOutbox(bsmp.Config{
-		Self:       key.ID(),
-		Link:       ml,
-		Dictionary: dict,
-		// §8.3: read through the LINK, not from config, because ham mode is
-		// what the radio reports and a sysop can turn it on without restarting
-		// the BBS.
-		AllowEncryptedDMs: func() bool { return ml.Part97().AllowsEncryptedDMs() },
-		OnRefusedDM: func(area record.AreaTag) {
-			log.Warn("mail held back", "area", area,
-				"reason", "this node transmits under an amateur licence (FCC Part 97)")
-		},
-	})
+	// §8.3: the ham-mode gate reads through the LINK, not from config, because
+	// ham mode is what the radio reports and a sysop can turn it on without
+	// restarting the BBS.
+	outbox, err := federationOutbox(key.ID(), ml, dict,
+		func() bool { return ml.Part97().AllowsEncryptedDMs() }, log)
 	if err != nil {
 		ml.Close()
 		return nil, err
@@ -178,6 +170,56 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 	}
 	go f.run(ctx)
 	return f, nil
+}
+
+// federationOutbox builds the outbox a running node federates through.
+//
+// Separate from startFederation, which otherwise assembles everything inline,
+// because this is the one piece whose configuration is a POLICY decision rather
+// than a wiring detail: the classifier below is what makes §7.6's priority
+// order and §8.3's Part 97 refusal real on air. A test can build the genuine
+// article over a fake link and check that they are, which is exactly what was
+// missing when the classifier was left unset.
+func federationOutbox(self identity.NodeID, sender bsmp.Sender, dict *bundle.Dictionary,
+	allowEncryptedDMs func() bool, log *slog.Logger) (*bsmp.Outbox, error) {
+	return bsmp.NewOutbox(bsmp.Config{
+		Self:              self,
+		Link:              sender,
+		Dictionary:        dict,
+		Classify:          classifyArea,
+		AllowEncryptedDMs: allowEncryptedDMs,
+		OnRefusedDM: func(area record.AreaTag) {
+			log.Warn("mail held back", "area", area,
+				"reason", "this node transmits under an amateur licence (FCC Part 97)")
+		},
+	})
+}
+
+// classifyArea maps an area tag to its governor priority class (§7.6).
+//
+// This is the production policy, and it has to be set explicitly: the outbox
+// defaults to treating everything as forum traffic, which is a safe middle for
+// a test but wrong for a running node in two ways. The roster loses the
+// priority that keeps a congested mesh converging — starving digests and NODE
+// records does not save airtime, it wastes it, because peers that cannot
+// reconcile ask again. And nothing is ever classified ClassDM, which silently
+// disables §8.3's Part 97 refusal: the gate is written and tested, but a
+// default classifier means it can never fire on air.
+//
+// Mail does not federate yet (record.DMArea), so today the DM arm is a policy
+// that is in place before the traffic is, rather than dead code — it is what
+// makes the ham-mode block correct the moment mail does go on the wire.
+func classifyArea(area record.AreaTag) governor.Class {
+	switch area {
+	case store.RosterArea:
+		return governor.ClassControl
+	case record.DMArea:
+		return governor.ClassDM
+	default:
+		// Forums, and the user directory with them. There is no file-catalog
+		// arm because FILE records have no area of their own yet (§7.5).
+		return governor.ClassForum
+	}
 }
 
 // tickInterval is how often the engine gets a chance to act.

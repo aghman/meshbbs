@@ -212,6 +212,33 @@ func TestDMRoutingMetadataIsReadable(t *testing.T) {
 	}
 }
 
+// Mail belongs in record.DMArea, NOT in the zero tag.
+//
+// The zero tag is store.RosterArea, which is always federated because it is how
+// trust bootstraps (§6.1.2) — so a DM written there was private mail sitting in
+// the one area every peer syncs, with its sender and recipient in the clear
+// (§8.1, `[D7]`), spending the roster's sequence numbers on the way.
+func TestDMsAreWrittenIntoTheirOwnArea(t *testing.T) {
+	svc, st, ctx := testService(t)
+	mkUser(t, svc, st, ctx, "austin", "pw")
+	mkUser(t, svc, st, ctx, "bob", "pw")
+
+	id, err := svc.SendDM(ctx, "austin", "bob", "subject", "body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := st.GetRecord(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Area == store.RosterArea {
+		t.Fatal("a DM was written into the roster area, which every peer syncs")
+	}
+	if rec.Area != record.DMArea {
+		t.Fatalf("DM area = %v, want %v", rec.Area, record.DMArea)
+	}
+}
+
 func TestSendDMToUnknownUser(t *testing.T) {
 	svc, st, ctx := testService(t)
 	mkUser(t, svc, st, ctx, "austin", "pw")

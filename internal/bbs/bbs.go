@@ -207,7 +207,10 @@ func (s *Service) SendDM(ctx context.Context, sender, recipientRef, subject, tex
 		return record.ID{}, err
 	}
 
-	rec, err := s.newRecord(ctx, record.TypeDM, record.AreaTag{}, body)
+	// record.DMArea, not the zero tag: the zero tag is the roster, which is
+	// always federated (§6.1.2), so mail written there would have been offered
+	// to peers with its sender and recipient in the clear. See record.DMArea.
+	rec, err := s.newRecord(ctx, record.TypeDM, record.DMArea, body)
 	if err != nil {
 		return record.ID{}, err
 	}
