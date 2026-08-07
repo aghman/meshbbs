@@ -189,13 +189,16 @@ func New(cfg Config) Model {
 		m.screen = screenMenu
 		m.sysop = cfg.User.IsSysop
 	}
+	if m.screen == screenMenu {
+		m.join()
+	}
 	return m
 }
 
 // Init implements tea.Model.
 func (m Model) Init() tea.Cmd {
 	if m.screen == screenMenu {
-		return tea.Batch(m.join(), m.loadAreas())
+		return m.loadAreas()
 	}
 	return nil
 }
@@ -253,10 +256,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.peers = msg.peers
 		return m, nil
 
-	case joinedMsg:
-		m.nodeNum, m.joined = msg.node, true
-		return m, nil
-
 	case needKeySetupMsg:
 		// The account has no DM key — typically created by the CLI, which
 		// cannot know a passphrase. Offer to create one rather than dead-ending
@@ -312,7 +311,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.passphrase = msg.passphrase
 		m.screen = screenMenu
 		m.status = "Welcome to the BBS, " + msg.nick + "."
-		return m, tea.Batch(m.join(), m.loadAreas())
+		m.join()
+		return m, m.loadAreas()
 	}
 
 	return m, nil
@@ -373,6 +373,31 @@ func (m Model) View() string {
 	}
 	r := ansiRenderer{styles: m.styles, width: m.frameWidth(), height: m.height}
 	return r.render(m.Screen())
+}
+
+// join registers this session with the presence tracker and takes its node
+// number.
+//
+// It is a direct call rather than a tea.Cmd, and that is the whole point.
+// Leave and SetLocation are direct calls, so a join that lands on a command
+// goroutine can be overtaken by the departure for the same session: a browser
+// tab closed in the moments after connecting ran leave() while joined was
+// still false, skipped Presence.Leave, and then the join goroutine registered a
+// node that nothing would ever remove — a permanent ghost in who's-online.
+// Joining where the model is built keeps registration ordered before every
+// path that can unregister it, since those all run under the driver's lock.
+//
+// Presence is an in-memory registry (sshd.Presence), so there is nothing here
+// worth taking off the pump for.
+func (m *Model) join() {
+	if m.joined {
+		return
+	}
+	m.joined = true
+	m.nodeNum = 1
+	if m.cfg.Presence != nil {
+		m.nodeNum = m.cfg.Presence.Join(m.cfg.SessionID, m.nick, m.cfg.Remote, m.guest)
+	}
 }
 
 // leave tears the session down cleanly.
