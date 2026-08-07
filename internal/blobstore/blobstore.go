@@ -200,8 +200,29 @@ func (s *Store) Temp() (*os.File, error) {
 //
 // The rename is what makes this cheap: the bytes are already on the right
 // filesystem, so a 40 MB upload costs one write rather than two.
+//
+// # The file is closed BEFORE the rename, and that is not tidiness
+//
+// POSIX renames an open file happily, so a deferred Close reads fine and works
+// on Linux and macOS. Windows refuses with a sharing violation, so every upload
+// to a Windows-hosted BBS failed at the last step — and this project ships
+// Windows binaries (§4, §10).
+//
+// No test on a POSIX host can observe this ordering: both orders succeed, and a
+// test that asserts the handle is closed by the time Adopt RETURNS passes
+// either way. The Windows CI runner is the only thing that catches it, which is
+// the argument §12.9 makes for having one, demonstrated.
 func (s *Store) Adopt(f *os.File) (Hash, int64, error) {
-	defer f.Close()
+	name := f.Name()
+	closed := false
+	closeFile := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		return f.Close()
+	}
+	defer closeFile()
 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return Hash{}, 0, fmt.Errorf("blobstore: rewind staging file: %w", err)
@@ -216,6 +237,9 @@ func (s *Store) Adopt(f *os.File) (Hash, int64, error) {
 	if err := f.Sync(); err != nil {
 		return Hash{}, 0, fmt.Errorf("blobstore: sync staging file: %w", err)
 	}
+	if err := closeFile(); err != nil {
+		return Hash{}, 0, fmt.Errorf("blobstore: close staging file: %w", err)
+	}
 
 	var h Hash
 	copy(h[:], hasher.Sum(nil))
@@ -227,10 +251,10 @@ func (s *Store) Adopt(f *os.File) (Hash, int64, error) {
 	if _, err := os.Stat(dest); err == nil {
 		// Already held: the dedup case. Drop the staging copy — what is there
 		// is byte-identical by construction.
-		_ = os.Remove(f.Name())
+		_ = os.Remove(name)
 		return h, size, nil
 	}
-	if err := os.Rename(f.Name(), dest); err != nil {
+	if err := os.Rename(name, dest); err != nil {
 		return Hash{}, 0, fmt.Errorf("blobstore: place blob: %w", err)
 	}
 	return h, size, nil

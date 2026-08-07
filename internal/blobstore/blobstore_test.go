@@ -56,6 +56,38 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// countBlobs counts the files under the store root, ignoring staging.
+//
+// The staging check is RELATIVE to the root, not a substring of the absolute
+// path. Matching "/tmp/" anywhere in the path made every blob invisible on
+// Linux, where t.TempDir() itself lives under /tmp — so the dedup assertion
+// below passed on macOS and reported zero files on CI.
+func countBlobs(t *testing.T, s *Store) int {
+	t.Helper()
+	var n int
+	err := filepath.WalkDir(s.Root(), func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(s.Root(), p)
+		if err != nil {
+			return err
+		}
+		if strings.SplitN(rel, string(filepath.Separator), 2)[0] == "tmp" {
+			return nil
+		}
+		n++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 // The dedup §6.5 asks for: the same bytes uploaded to two areas are one blob.
 func TestIdenticalContentDedups(t *testing.T) {
 	s := testStore(t)
@@ -65,22 +97,21 @@ func TestIdenticalContentDedups(t *testing.T) {
 		t.Fatalf("same content produced two hashes: %s and %s", first, second)
 	}
 
-	var files int
-	err := filepath.WalkDir(s.Root(), func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		// Skip the temp directory: it holds no blobs, only work in progress.
-		if !d.IsDir() && !strings.Contains(path, string(filepath.Separator)+"tmp"+string(filepath.Separator)) {
-			files++
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+	if n := countBlobs(t, s); n != 1 {
+		t.Errorf("two uploads of identical content left %d files on disk, want 1", n)
 	}
-	if files != 1 {
-		t.Errorf("two uploads of identical content left %d files on disk, want 1", files)
+}
+
+// The counter itself has to be able to see a blob, or every assertion built on
+// it passes vacuously — which is how the bug above survived local runs.
+func TestCountBlobsSeesABlob(t *testing.T) {
+	s := testStore(t)
+	if n := countBlobs(t, s); n != 0 {
+		t.Fatalf("a fresh store already has %d blobs", n)
+	}
+	put(t, s, "one blob")
+	if n := countBlobs(t, s); n != 1 {
+		t.Fatalf("countBlobs found %d files after one upload, want 1", n)
 	}
 }
 
@@ -132,18 +163,8 @@ func TestFailedWriteLeavesNoBlob(t *testing.T) {
 		t.Fatalf("Put returned %v, want the reader's error", err)
 	}
 
-	var blobs int
-	_ = filepath.WalkDir(s.Root(), func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() && !strings.Contains(path, string(filepath.Separator)+"tmp"+string(filepath.Separator)) {
-			blobs++
-		}
-		return nil
-	})
-	if blobs != 0 {
-		t.Errorf("a failed upload left %d blob(s) on disk", blobs)
+	if n := countBlobs(t, s); n != 0 {
+		t.Errorf("a failed upload left %d blob(s) on disk", n)
 	}
 }
 
@@ -176,6 +197,112 @@ func TestRemoveIsIdempotent(t *testing.T) {
 	// Retrying a half-finished delete must not fail.
 	if err := s.Remove(h); err != nil {
 		t.Errorf("removing an absent blob returned %v, want nil", err)
+	}
+}
+
+func TestTempAndAdopt(t *testing.T) {
+	s := testStore(t)
+	f, err := s.Temp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Written out of order, the way an SFTP client is allowed to.
+	if _, err := f.WriteAt([]byte("WORLD"), 6); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("HELLO "), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	h, size, err := s.Adopt(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != 11 {
+		t.Errorf("Adopt reported %d bytes, want 11", size)
+	}
+	if got := read(t, s, h); got != "HELLO WORLD" {
+		t.Errorf("adopted blob reads back as %q", got)
+	}
+	if countBlobs(t, s) != 1 {
+		t.Error("Adopt did not leave exactly one blob")
+	}
+	// The staging file is gone, not left to accumulate.
+	if _, err := os.Stat(f.Name()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the staging file survived Adopt: %v", err)
+	}
+}
+
+// Adopt leaves no open handle behind.
+//
+// This is a NECESSARY condition for the Windows correctness Adopt documents,
+// not a sufficient one: it passes whether the close happens before the rename
+// or after it, because a deferred close still runs before Adopt returns. Only
+// the Windows runner can tell those two apart, and it did. Kept because
+// leaking a handle per upload is worth catching on its own.
+func TestAdoptLeavesNoOpenHandle(t *testing.T) {
+	s := testStore(t)
+	f, err := s.Temp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("content"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Adopt(f); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.Close(); err == nil {
+		t.Error("Adopt returned with the staging file still open")
+	}
+}
+
+func TestAdoptDedups(t *testing.T) {
+	s := testStore(t)
+	var first Hash
+	for i := 0; i < 2; i++ {
+		f, err := s.Temp()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteAt([]byte("same bytes"), 0); err != nil {
+			t.Fatal(err)
+		}
+		h, _, err := s.Adopt(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = h
+		} else if h != first {
+			t.Fatalf("identical content adopted to two hashes: %s and %s", first, h)
+		}
+	}
+	if n := countBlobs(t, s); n != 1 {
+		t.Errorf("two adoptions of identical content left %d blobs, want 1", n)
+	}
+}
+
+// Put and Adopt must agree: the same bytes get the same address whichever way
+// they arrived.
+func TestPutAndAdoptAgree(t *testing.T) {
+	s := testStore(t)
+	viaPut := put(t, s, "one set of bytes")
+
+	f, err := s.Temp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("one set of bytes"), 0); err != nil {
+		t.Fatal(err)
+	}
+	viaAdopt, _, err := s.Adopt(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaPut != viaAdopt {
+		t.Errorf("Put gave %s and Adopt gave %s for the same content", viaPut, viaAdopt)
 	}
 }
 
