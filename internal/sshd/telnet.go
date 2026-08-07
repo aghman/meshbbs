@@ -188,9 +188,17 @@ func (t *TelnetServer) handle(ctx context.Context, conn net.Conn) {
 	defer cancelConn()
 
 	sessionID := fmt.Sprintf("telnet-%p", conn)
+
+	// Leaving [W] Who's Online is part of the connection's teardown, not the
+	// TUI's quit path: a client that vanishes stops the program without the
+	// model's exit path ever running, and the session would sit in the tracker
+	// forever. A clean quit leaves twice, which is a map delete twice.
+	presence := newSessionPresence(t.opts.Presence)
+	defer presence.Leave(sessionID)
+
 	model := tui.New(tui.Config{
 		Service: t.svc, Store: t.store,
-		Presence: presenceAdapter{t.opts.Presence},
+		Presence: presence,
 		Chat:     t.opts.Chat,
 		Location: t.opts.Location,
 		Themes:   t.opts.Themes, ThemeName: t.opts.Theme,

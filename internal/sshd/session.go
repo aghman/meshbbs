@@ -3,6 +3,7 @@ package sshd
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/aghman/meshbbs/internal/term"
 	"github.com/aghman/meshbbs/internal/tui"
@@ -13,8 +14,40 @@ import (
 )
 
 // sessionMiddleware builds the per-connection handler.
+//
+// Departure from [W] Who's Online is handled HERE, around the whole session,
+// rather than only in the TUI's quit path. A client that vanishes — a dropped
+// network, a killed terminal — stops the Bubble Tea program without the model's
+// exit path ever running, so a session that leaves only on Ctrl+C stays in the
+// tracker forever. Leaving is a property of the connection ending, so it belongs
+// where the connection ends.
 func (s *Server) sessionMiddleware() wish.Middleware {
-	return bubbletea.MiddlewareWithProgramHandler(s.programHandler, termenvProfile)
+	inner := bubbletea.MiddlewareWithProgramHandler(s.programHandler, termenvProfile)
+	return func(next ssh.Handler) ssh.Handler {
+		h := inner(next)
+		return func(sess ssh.Session) {
+			// The session's view of presence is created before the program so
+			// that the teardown below can revoke it: joining happens in a Bubble
+			// Tea command goroutine, which Bubble Tea deliberately does not wait
+			// for at shutdown, and a join that lands after the connection is gone
+			// would leave the same ghost by another route.
+			sp := newSessionPresence(s.presence)
+			sess.Context().SetValue(presenceKey{}, sp)
+			defer sp.Leave(sess.Context().SessionID())
+			h(sess)
+		}
+	}
+}
+
+// presenceKey is the context key under which a session's presence view lives.
+type presenceKey struct{}
+
+// presenceFor recovers the presence view the middleware created for a session.
+func presenceFor(sess ssh.Session) tui.PresenceTracker {
+	if sp, ok := sess.Context().Value(presenceKey{}).(*sessionPresence); ok {
+		return sp
+	}
+	return nil
 }
 
 // termenvProfile is the colour profile assumed for sessions. ANSI256 is the
@@ -67,7 +100,7 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 	model := tui.New(tui.Config{
 		Service:    s.svc,
 		Store:      s.store,
-		Presence:   presenceAdapter{s.presence},
+		Presence:   presenceFor(sess),
 		Chat:       s.chat,
 		Clock:      s.opts.Clock,
 		Location:   s.opts.Location,
@@ -109,6 +142,60 @@ func (p *Presence) TUI() tui.PresenceTracker { return presenceAdapter{p} }
 // presenceAdapter adapts the server's Presence to the interface the TUI needs,
 // so the tui package does not import sshd (which would be a cycle).
 type presenceAdapter struct{ p *Presence }
+
+// sessionPresence is one connection's view of the tracker, and it is one-way:
+// once the connection has gone, it stays gone.
+//
+// The connection's teardown calls Leave, but a session joins from a Bubble Tea
+// command goroutine, and Bubble Tea does not wait for those when a program stops
+// ("we'll have to leak the goroutine until Cmd returns"). Without the latch, a
+// connection that dies in the window between the program starting and that
+// goroutine running would be registered by a join nobody is left to undo — a
+// ghost with a narrower window rather than none.
+type sessionPresence struct {
+	p *Presence
+
+	mu   sync.Mutex
+	gone bool
+}
+
+func newSessionPresence(p *Presence) *sessionPresence {
+	return &sessionPresence{p: p}
+}
+
+func (s *sessionPresence) Join(id, nick, remote string, guest bool) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gone || s.p == nil {
+		return 0
+	}
+	return s.p.Join(id, nick, remote, guest).Node
+}
+
+func (s *sessionPresence) Leave(id string) {
+	s.mu.Lock()
+	s.gone = true
+	s.mu.Unlock()
+	if s.p == nil {
+		return
+	}
+	// Leave is a map delete, so the clean-quit path calling it before this one
+	// runs costs nothing.
+	s.p.Leave(id)
+}
+
+func (s *sessionPresence) SetLocation(id, where string) {
+	if s.p != nil {
+		s.p.SetLocation(id, where)
+	}
+}
+
+func (s *sessionPresence) List() []tui.Peer {
+	if s.p == nil {
+		return nil
+	}
+	return presenceAdapter{s.p}.List()
+}
 
 func (a presenceAdapter) Join(id, nick, remote string, guest bool) int {
 	return a.p.Join(id, nick, remote, guest).Node
