@@ -44,6 +44,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleMenuKey(msg)
 	case screenAreaList:
 		return m.handleAreaListKey(msg)
+	case screenFileAreaList:
+		return m.handleFileAreaListKey(msg)
+	case screenFileArea:
+		return m.handleFileAreaKey(msg)
+	case screenFileInfo:
+		m.screen = screenFileArea
+		return m, nil
 	case screenAreaRead:
 		return m.handleAreaReadKey(msg)
 	case screenPostCompose:
@@ -78,11 +85,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch strings.ToLower(msg.String()) {
-	case "m", "f":
+	case "m":
 		m.screen = screenAreaList
 		m.areaIdx = 0
 		m.setWhere("forums")
 		return m, m.loadAreas()
+	case "f":
+		// "f" used to be an undocumented second binding for the message areas.
+		// It belongs to files, which is what anyone typing it means, and the
+		// documented "m" was always the one on screen.
+		m.screen = screenFileAreaList
+		m.fileAreaIdx = 0
+		m.setWhere("files")
+		return m, m.loadFileAreas()
 	case "e":
 		if m.guest {
 			return m, errs("Guests cannot read mail. Register with `ssh new@` for an account.")
@@ -119,6 +134,60 @@ func (m Model) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.issueWebCode()
 	case "q":
 		return m.leave()
+	}
+	return m, nil
+}
+
+func (m Model) handleFileAreaListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.fileAreaIdx > 0 {
+			m.fileAreaIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if m.fileAreaIdx < len(m.fileAreas)-1 {
+			m.fileAreaIdx++
+		}
+		return m, nil
+	case "enter":
+		if len(m.fileAreas) == 0 {
+			return m, nil
+		}
+		area := m.fileAreas[m.fileAreaIdx]
+		m.screen = screenFileArea
+		m.setWhere("files:" + area.Name)
+		return m, m.loadFiles(area.Name)
+	case "q", "esc":
+		m.screen = screenMenu
+		m.setWhere("menu")
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleFileAreaKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.fileIdx > 0 {
+			m.fileIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if m.fileIdx < len(m.files)-1 {
+			m.fileIdx++
+		}
+		return m, nil
+	case "enter":
+		if len(m.files) == 0 {
+			return m, nil
+		}
+		m.screen = screenFileInfo
+		return m, nil
+	case "q", "esc":
+		m.screen = screenFileAreaList
+		m.setWhere("files")
+		return m, m.loadFileAreas()
 	}
 	return m, nil
 }

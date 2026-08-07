@@ -113,6 +113,7 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 		Remote:     sess.RemoteAddr().String(),
 		WebEnabled: s.opts.WebEnabled,
 		WebURL:     s.opts.WebURL,
+		SSHPort:    s.opts.Port,
 		Intent:     tui.Intent(d.Intent),
 		Nick:       d.Nick,
 		User:       d.User,

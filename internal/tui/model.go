@@ -66,6 +66,9 @@ const (
 	screenChat
 	screenNodeInfo
 	screenWebEnrol
+	screenFileAreaList
+	screenFileArea
+	screenFileInfo
 	screenGoodbye
 )
 
@@ -86,7 +89,12 @@ type Config struct {
 	// nowhere is worse than no offer at all.
 	WebEnabled bool
 	// WebURL is where the code gets typed, shown alongside it.
-	WebURL    string
+	WebURL string
+	// SSHPort is the port this instance listens on, so the file browser can
+	// show a fetch command that actually works. Files move over SFTP, never
+	// through the TUI (§5.1) — so a browser that cannot say how to get a file
+	// is only half a browser.
+	SSHPort   int
 	Intent    Intent
 	Nick      string
 	User      store.User
@@ -145,9 +153,16 @@ type Model struct {
 	setupPW2    textInput
 	setupIdx    int
 	peers       []Peer
-	sysop_      sysopState
-	chatInput   textInput
-	chatLines   []ChatLine
+	fileAreas   []store.Area
+	fileAreaIdx int
+	files       []store.File
+	fileIdx     int
+	// fileArea is the area the file list belongs to, held because the list
+	// itself carries the name on every row and the title needs it once.
+	fileArea  string
+	sysop_    sysopState
+	chatInput textInput
+	chatLines []ChatLine
 	// webCode is a live passkey-enrolment code ([D18]). It is shown once and
 	// held only to keep it on screen; the store keeps nothing but its hash.
 	webCode        string
@@ -256,6 +271,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.peers = msg.peers
 		return m, nil
 
+	case fileAreasLoadedMsg:
+		m.fileAreas = msg.areas
+		if m.fileAreaIdx >= len(m.fileAreas) {
+			m.fileAreaIdx = 0
+		}
+		return m, nil
+
+	case filesLoadedMsg:
+		m.files, m.fileIdx, m.fileArea = msg.files, 0, msg.area
+		return m, nil
+
 	case needKeySetupMsg:
 		// The account has no DM key — typically created by the CLI, which
 		// cannot know a passphrase. Offer to create one rather than dead-ending
@@ -358,6 +384,12 @@ func (m Model) Screen() Screen {
 		return m.buildNodeInfo()
 	case screenWebEnrol:
 		return m.buildWebEnrol()
+	case screenFileAreaList:
+		return m.buildFileAreaList()
+	case screenFileArea:
+		return m.buildFileArea()
+	case screenFileInfo:
+		return m.buildFileInfo()
 	default:
 		return m.buildMenu()
 	}

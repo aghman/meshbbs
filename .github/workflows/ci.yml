@@ -212,6 +212,12 @@ jobs:
       # boundary.
       - name: Fuzz profile parser
         run: .github/scripts/fuzz.sh ./internal/profile FuzzUnmarshalProfileBody 20s
+      # A FILE body arrives from a stranger's instance and becomes both a line
+      # in a terminal and a filename. Its size is a varint, which is where the
+      # first run of this target found a non-canonical encoding: 80 00 and 00
+      # both mean zero, so one catalog entry had two content addresses.
+      - name: Fuzz FILE catalog parser
+        run: .github/scripts/fuzz.sh ./internal/record FuzzUnmarshalFileBody 20s
       # The serial framer sees whatever the wire produces: firmware debug text,
       # a fragment left over from a client that died mid-frame, and pure noise
       # at the wrong baud rate. Its length field is also the one place in the

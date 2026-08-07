@@ -56,8 +56,18 @@ trap 'rm -f "$log" "$before" "$after"' EXIT
 # Committed regression corpus, i.e. everything that is NOT a finding from this run.
 ls -A "$crasher_dir" 2>/dev/null | sort > "$before"
 
+# The pattern is ANCHORED. -fuzz takes a regular expression, and Go refuses to
+# run at all when it matches more than one target:
+#
+#   testing: will not fuzz, -fuzz matches more than one fuzz test:
+#           [FuzzUnmarshalFileBody FuzzUnmarshal]
+#
+# So an unanchored name silently becomes a landmine for whoever adds the next
+# target — adding FuzzUnmarshalFileBody broke the FuzzUnmarshal step, in a
+# different file, with an error that names neither the caller nor the fix. The
+# argument stays a bare name because it is also the corpus directory below.
 set +e
-go test "$pkg" -run XXX -fuzz "$target" -fuzztime "$duration" 2>&1 | tee "$log"
+go test "$pkg" -run XXX -fuzz "^${target}\$" -fuzztime "$duration" 2>&1 | tee "$log"
 status="${PIPESTATUS[0]}"
 set -e
 

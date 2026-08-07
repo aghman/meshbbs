@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aghman/meshbbs/internal/bbs"
+	"github.com/aghman/meshbbs/internal/blobstore"
 	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/aghman/meshbbs/internal/theme"
@@ -51,6 +52,7 @@ type Server struct {
 	opts     Options
 	svc      *bbs.Service
 	store    *store.Store
+	blobs    *blobstore.Store
 	authn    *Authenticator
 	log      *slog.Logger
 	wish     *ssh.Server
@@ -98,6 +100,17 @@ func NewServer(svc *bbs.Service, st *store.Store, opts Options) (*Server, error)
 		// it is a live conversation, not a message base. Anything worth
 		// keeping belongs in a forum area, where it becomes a signed record.
 		chat: tui.NewChatRoom(200),
+	}
+
+	// The blob store is where file contents live (§6.5). A BBS with no file
+	// directory configured runs fine and simply has no file areas, so this is
+	// optional rather than fatal — the SFTP handler says so when asked.
+	if opts.FilesDir != "" {
+		blobs, err := blobstore.Open(filepath.Join(opts.FilesDir, "blobs"))
+		if err != nil {
+			return nil, err
+		}
+		s.blobs = blobs
 	}
 
 	hostKey, err := ensureHostKey(opts.KeysDir)

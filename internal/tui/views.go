@@ -56,6 +56,7 @@ func (m Model) buildMenu() Screen {
 
 	items := []Choice{
 		{"M", "Message areas — read and post"},
+		{"F", "File areas — browse what is here"},
 		{"E", "Electronic mail — your private messages"},
 		{"C", "Chat with everyone online"},
 		{"W", "Who else is online"},
@@ -439,5 +440,145 @@ func (m Model) buildKeyUnknown() Screen {
 					"    ssh new@this-bbs", "\n")...),
 		},
 		Help: hints("any key", "to disconnect"),
+	}
+}
+
+// humanSize renders a byte count for a listing.
+//
+// Rounded and unit-suffixed rather than exact: a file listing is read at a
+// glance, and "4.2 MB" answers "will this fit on my machine" better than
+// 4404019 does. The detail screen shows the exact figure, because that is where
+// someone checking a transfer completed will look.
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
+}
+
+// fetchCommand is the SFTP invocation that gets a file.
+//
+// The BBS deliberately has no in-band transfer (§5.1): no ZMODEM, no XMODEM,
+// nothing to emulate. That makes the browser's job to say where a file is and
+// how to fetch it, and a browser that cannot answer the second half is only
+// half a browser — so this is shown rather than left as something the user is
+// expected to already know.
+func (m Model) fetchCommand(area, name string) string {
+	who := m.nick
+	if who == "" || m.guest {
+		who = "you"
+	}
+	port := ""
+	if m.cfg.SSHPort != 0 && m.cfg.SSHPort != 22 {
+		port = fmt.Sprintf("-P %d ", m.cfg.SSHPort)
+	}
+	return fmt.Sprintf("sftp %s%s@this-bbs  then:  get /%s/%s",
+		port, sanitizeLine(who), sanitizeLine(area), sanitizeLine(name))
+}
+
+func (m Model) buildFileAreaList() Screen {
+	rows := make([]Row, 0, len(m.fileAreas))
+	for _, a := range m.fileAreas {
+		rows = append(rows, Row{Cells: []string{a.Name, sanitizeLine(a.Description), a.Scope()}})
+	}
+
+	// A table's Empty line is rendered without wrapping, so it has to be short
+	// enough to fit any terminal. The guidance goes in prose beneath, which the
+	// renderer does wrap — and which changes with the situation, because
+	// explaining what federation costs is noise on a BBS that has no file areas
+	// to federate.
+	guidance := Prose(LevelMuted, `"Federated" means this area's file list travels the mesh, `+
+		"so other BBSes can see what is here. The files themselves never do, at any size.")
+	if len(m.fileAreas) == 0 {
+		guidance = Prose(LevelMuted,
+			"There are none yet. The sysop makes one with `meshbbs area create <name> --files`, "+
+				"and users with the upload_files capability fill it over SFTP.")
+	}
+
+	return Screen{
+		Kind: "fileareas", Title: "File Areas", Status: m.statusLine(),
+		Blocks: []Block{
+			TableBlock{
+				Columns:  []Column{{Width: 16}, {Width: 26}, {}},
+				Gap:      2,
+				Rows:     rows,
+				Selected: m.fileAreaIdx,
+				Empty:    "No file areas yet.",
+			},
+			// The same [N7] burden the message areas carry, and the same answer:
+			// say what federating costs where someone can see it. The wording
+			// differs because what travels differs — a federated file area puts
+			// the CATALOG on the mesh and never the files (§7.5).
+			guidance,
+		},
+		Help: hints("up/down", "move", "enter", "open", "q", "back"),
+	}
+}
+
+func (m Model) buildFileArea() Screen {
+	rows := make([]Row, 0, len(m.files))
+	for _, f := range m.files {
+		rows = append(rows, Row{Cells: []string{
+			f.Name,
+			humanSize(f.Size),
+			sanitizeLine(f.Description),
+			sanitizeLine(f.Uploader),
+		}})
+	}
+
+	return Screen{
+		Kind: "filearea", Title: "Files in " + sanitizeLine(m.fileArea), Status: m.statusLine(),
+		Blocks: []Block{
+			TableBlock{
+				Header:   []string{"Name", "Size", "Description", "From"},
+				Columns:  []Column{{Width: 24}, {Width: 9}, {Width: 28}, {Width: 12}},
+				Gap:      2,
+				Rows:     rows,
+				Selected: m.fileIdx,
+				Empty:    "This area has no files yet.",
+			},
+		},
+		Help: hints("up/down", "move", "enter", "details", "q", "back"),
+	}
+}
+
+func (m Model) buildFileInfo() Screen {
+	if m.fileIdx < 0 || m.fileIdx >= len(m.files) {
+		return m.buildFileArea()
+	}
+	f := m.files[m.fileIdx]
+
+	desc := sanitize(f.Description)
+	if strings.TrimSpace(desc) == "" {
+		desc = "(no description)"
+	}
+
+	meta := fmt.Sprintf("%s  ·  %d bytes  ·  uploaded by %s",
+		humanSize(f.Size), f.Size, sanitizeLine(f.Uploader))
+	if f.UploadedAt != 0 {
+		meta += "  ·  " + m.at(f.UploadedAt, "2006-01-02 15:04")
+	}
+
+	blocks := []Block{
+		ArticleBlock{
+			Heading: sanitizeLine(f.Name),
+			Meta:    meta,
+			Body:    desc,
+		},
+		Lines(LevelMuted,
+			"To download it:",
+			"    "+m.fetchCommand(m.fileArea, f.Name)),
+	}
+
+	return Screen{
+		Kind: "fileinfo", Title: sanitizeLine(f.Name), Blocks: blocks,
+		Status: m.statusLine(),
+		Help:   hints("q", "back"),
 	}
 }

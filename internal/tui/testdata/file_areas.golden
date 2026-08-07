@@ -1,0 +1,10 @@
+File Areas
+------------------------------------------------------------------------------
+
+> meshwide          Shared with peers           Federated
+  utils             Utilities and tools         Local to this BBS
+
+"Federated" means this area's file list travels the mesh, so other BBSes can see
+what is here. The files themselves never do, at any size.
+
+up/down move · enter open · q back

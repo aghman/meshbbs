@@ -216,8 +216,15 @@ func classifyArea(area record.AreaTag) governor.Class {
 	case record.DMArea:
 		return governor.ClassDM
 	default:
-		// Forums, and the user directory with them. There is no file-catalog
-		// arm because FILE records have no area of their own yet (§7.5).
+		// Forums, and the user directory with them.
+		//
+		// File areas now exist and carry their own tags, so this arm is where a
+		// federated one currently lands — as forum traffic rather than the
+		// ClassFileCatalog §7.6 assigns it. Nothing is misclassified on air yet,
+		// because a file area holds no records until FILE records exist. The arm
+		// belongs with them: classifying by tag needs to know which tags are file
+		// areas, and this function is deliberately a pure function of the tag
+		// with no store behind it.
 		return governor.ClassForum
 	}
 }
