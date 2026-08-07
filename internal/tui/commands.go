@@ -21,14 +21,13 @@ type (
 	mailLoadedMsg  struct{ mail []store.DM }
 	mailOpenedMsg  struct{ subject, body string }
 	peersLoadedMsg struct{ peers []Peer }
+	signupDoneMsg  struct{ nick, passphrase string }
 
 	fileAreasLoadedMsg struct{ areas []store.Area }
 	filesLoadedMsg     struct {
 		area  string
 		files []store.File
 	}
-	joinedMsg      struct{ node int }
-	signupDoneMsg  struct{ nick, passphrase string }
 )
 
 func okf(text string) tea.Cmd { return func() tea.Msg { return statusMsg{text: text} } }
@@ -36,16 +35,6 @@ func errf(err error) tea.Cmd {
 	return func() tea.Msg { return statusMsg{text: err.Error(), isErr: true} }
 }
 func errs(text string) tea.Cmd { return func() tea.Msg { return statusMsg{text: text, isErr: true} } }
-
-func (m Model) join() tea.Cmd {
-	return func() tea.Msg {
-		if m.cfg.Presence == nil {
-			return joinedMsg{node: 1}
-		}
-		node := m.cfg.Presence.Join(m.cfg.SessionID, m.nick, m.cfg.Remote, m.guest)
-		return joinedMsg{node: node}
-	}
-}
 
 func (m Model) loadAreas() tea.Cmd {
 	return func() tea.Msg {

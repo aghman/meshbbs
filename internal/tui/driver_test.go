@@ -45,7 +45,7 @@ func TestDriverRunsCommands(t *testing.T) {
 	d := driverFor(t, f, "austin")
 
 	// Init loads the areas asynchronously; the menu should show the account
-	// once join() has come back.
+	// once that has come back.
 	waitFor(t, "the menu to name the account", func() bool {
 		return d.Screen().Kind == "menu"
 	})
@@ -171,6 +171,34 @@ func TestDriverCloseClearsTheSession(t *testing.T) {
 	case <-d.Done():
 	default:
 		t.Error("Done() did not fire after Close()")
+	}
+}
+
+// TestDriverCloseLeavesPresenceImmediately — closing a session that has only
+// just opened must still remove it from who's-online.
+//
+// This is the ordering the flake was about. Joining used to be a tea.Cmd, so
+// it ran on a command goroutine and only reached the model when its joinedMsg
+// came back through the pump; leave() is a direct call and skipped
+// Presence.Leave whenever it ran first. A tab closed in that window — a few
+// microseconds wide, so roughly one full-suite run in twenty — left a node in
+// the tracker that nothing would ever remove, because Close cancels the
+// context and the pump then drops the in-flight joinedMsg entirely.
+//
+// Waiting for anything here would put the bug back out of reach: the point is
+// that Close needs no wait.
+func TestDriverCloseLeavesPresenceImmediately(t *testing.T) {
+	f := newFixture(t)
+	f.user(t, "austin", "pw")
+	d := driverFor(t, f, "austin")
+
+	d.Close()
+
+	if !f.presence.didJoin() {
+		t.Error("the session was never registered with Presence")
+	}
+	if !f.presence.didLeave() {
+		t.Error("a session closed immediately after opening stayed in Presence")
 	}
 }
 

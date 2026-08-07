@@ -110,6 +110,25 @@ func ValidateAreaName(name string) error {
 			return fmt.Errorf("area name contains invalid character %q; use letters, digits, - _ or .", r)
 		}
 	}
+	// The well-known tags are not a namespace a forum may join. A forum whose
+	// name derives one of them would share a sequence space with the roster,
+	// the directory or private mail, and — worse for the last of those — a
+	// federated area sharing the mail tag is exactly the leak record.DMArea
+	// exists to prevent. Compared by TAG rather than by name because the tag is
+	// what collides.
+	tag := record.AreaTagFor(name)
+	for _, reserved := range []struct {
+		tag  record.AreaTag
+		what string
+	}{
+		{RosterArea, "the node roster"},
+		{record.ProfileArea, "the user directory"},
+		{record.DMArea, "private mail"},
+	} {
+		if tag == reserved.tag {
+			return fmt.Errorf("area name %q is reserved for %s", name, reserved.what)
+		}
+	}
 	return nil
 }
 

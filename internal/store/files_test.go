@@ -107,6 +107,23 @@ func TestFileAreaCannotShareANameWithAMessageArea(t *testing.T) {
 	}
 }
 
+// The reserved well-known tags guard file areas too.
+//
+// This is an interaction between two changes that landed separately: the
+// reserved-tag rule was written for message areas, and file areas go through
+// the same constructor. It matters most for mail — a federated file area
+// sharing record.DMArea's tag would put private mail on the wire, which is the
+// exact leak the reservation exists to prevent — and nothing else asserts that
+// the rule reaches this constructor.
+func TestFileAreasCannotClaimAReservedTag(t *testing.T) {
+	s, ctx := testStore(t)
+	for _, name := range []string{"_mail", "_directory"} {
+		if _, err := s.CreateFileArea(ctx, name, "", true); err == nil {
+			t.Errorf("a file area named %q was created over a reserved tag", name)
+		}
+	}
+}
+
 // Posting into a catalog, or cataloguing into a message base, must not be
 // reachable by naming the wrong area.
 func TestAreaLookupsAreKindScoped(t *testing.T) {

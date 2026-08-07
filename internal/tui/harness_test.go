@@ -400,9 +400,10 @@ func (f *fixture) login(t *testing.T, nick string) *session {
 // fakePresence records presence calls without a server.
 //
 // It locks for the same reason the real Presence does: the Driver runs commands
-// in goroutines, as Bubble Tea does, so join() lands on a different goroutine
-// from the test reading the result. The synchronous harness never exposed that,
-// which is exactly the kind of gap `go test -race` exists to find.
+// in goroutines, as Bubble Tea does, so a SetLocation driven by a command's
+// result lands on a different goroutine from the test reading it back. The
+// synchronous harness never exposed that, which is exactly the kind of gap
+// `go test -race` exists to find.
 type fakePresence struct {
 	mu     sync.Mutex
 	peers  []Peer

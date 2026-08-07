@@ -439,3 +439,148 @@ func TestSameSequenceInDifferentAreasIsFine(t *testing.T) {
 		t.Fatal("two different records were accepted at one (origin, area, seq)")
 	}
 }
+
+// dmRecord builds a signed DM the way SendDM does, in whatever area the caller
+// names — including the roster, which is what the bug wrote.
+func dmRecord(t *testing.T, key identity.NodeKey, area record.AreaTag, seq uint64) *record.Record {
+	t.Helper()
+	body, err := MarshalDMBody(DMBody{
+		Sender: "austin", Recipient: "bob", Sealed: []byte("opaque ciphertext"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := record.New(key, record.Record{
+		Origin: key.ID(),
+		Seq:    seq,
+		TS:     uint32(1_800_000_000 + seq),
+		Type:   record.TypeDM,
+		Area:   area,
+		Body:   body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// Private mail is never served to a peer, and the roster is where that matters
+// most: it is the one area that is ALWAYS federated (§6.1.2), and mail written
+// with a zero area tag landed in it. The sealed body is unreadable (§8.2), but
+// the DM body's sender and recipient are cleartext by decision `[D7]`, so
+// serving one publishes who mails whom on this BBS to every sysop on the
+// channel (§8.1).
+//
+// Both halves are asserted, because a vector that promises what the record
+// query refuses to serve is the permanent silent gap §7.3 is built to avoid.
+func TestDMsAreNeverServedFromTheRosterArea(t *testing.T) {
+	st, g, ctx, _ := gossipFixture(t)
+	key := trustedKey(t, st, ctx, 1)
+
+	// Exactly what the old SendDM produced: TypeDM at the zero area tag.
+	dm := dmRecord(t, key, RosterArea, 1)
+	if dm.Area != RosterArea {
+		t.Fatalf("fixture is wrong: DM area = %v", dm.Area)
+	}
+	if err := st.PutRecord(ctx, dm); err != nil {
+		t.Fatal(err)
+	}
+
+	recs := g.Records(RosterArea, vv.Range{Origin: key.ID(), From: 1, To: 100})
+	for _, r := range recs {
+		if r.Type == record.TypeDM {
+			t.Fatalf("private mail %s was served to a peer from the roster area", r.ID())
+		}
+	}
+	if got := g.Vector(RosterArea).Get(key.ID()); got != 0 {
+		t.Errorf("roster vector = %d, want 0 — a DM was counted as replicable state", got)
+	}
+
+	// A NODE record in the same area is still served: the roster has to keep
+	// working, this is not a blanket refusal.
+	nodeRec, err := record.NewNodeRecord(key, 2, 1_800_000_100, "peer", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutRecord(ctx, nodeRec); err != nil {
+		t.Fatal(err)
+	}
+	recs = g.Records(RosterArea, vv.Range{Origin: key.ID(), From: 1, To: 100})
+	if len(recs) != 1 || recs[0].Type != record.TypeNode {
+		t.Fatalf("roster served %d records, want just the NODE record", len(recs))
+	}
+}
+
+// Mail has its own area now, and that area does not federate in this phase
+// (record.DMArea): SendDM refuses off-node delivery, so there is nothing to
+// gain from putting it on the air and a metadata leak to lose.
+func TestDMAreaIsNeverOfferedToPeers(t *testing.T) {
+	st, g, ctx, _ := gossipFixture(t)
+	key := trustedKey(t, st, ctx, 1)
+
+	for _, a := range g.Areas() {
+		if a == record.DMArea {
+			t.Fatal("the DM area was offered in a digest")
+		}
+	}
+
+	// Even a federated area row carrying the mail tag cannot put it there.
+	// ValidateAreaName refuses the name, so the row is written directly — a
+	// database edited by hand, or created before that rule existed.
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO areas (name, tag, description, federated, created_at) VALUES (?, ?, ?, 1, 0)`,
+		"smuggled", record.DMArea[:], "a forum wearing the mail tag"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range g.Areas() {
+		if a == record.DMArea {
+			t.Fatal("a federated area row put the DM area on the air")
+		}
+	}
+
+	// And the records themselves stay put even if something asks by tag.
+	if err := st.PutRecord(ctx, dmRecord(t, key, record.DMArea, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if recs := g.Records(record.DMArea, vv.Range{Origin: key.ID(), From: 1, To: 100}); len(recs) != 0 {
+		t.Errorf("the DM area served %d records", len(recs))
+	}
+	if got := g.Vector(record.DMArea).Get(key.ID()); got != 0 {
+		t.Errorf("DM area vector = %d, want 0", got)
+	}
+}
+
+// The inbound half of the same rule: a peer offering us mail is running code we
+// do not have, and accepting it would park a record in an area whose vector
+// then stops advancing at it.
+func TestInboundDMsAreRefused(t *testing.T) {
+	st, g, ctx, area := gossipFixture(t)
+	key := trustedKey(t, st, ctx, 1)
+
+	added, err := g.Apply(area, []*record.Record{dmRecord(t, key, area, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 0 {
+		t.Fatalf("added = %d — a peer's DM was written into a forum area", added)
+	}
+}
+
+// A forum must not be able to wear a well-known tag: sharing the mail tag is
+// how a federated area would carry private mail onto the air.
+func TestWellKnownAreaNamesAreReserved(t *testing.T) {
+	st, _, ctx, _ := gossipFixture(t)
+
+	for _, name := range []string{"_mail", "_directory"} {
+		if _, err := st.CreateArea(ctx, name, "", true); err == nil {
+			t.Errorf("creating an area named %q was allowed", name)
+		}
+	}
+	// Ordinary names are unaffected.
+	if _, err := st.CreateArea(ctx, "mail", "not the reserved tag", true); err != nil {
+		t.Errorf("an ordinary area name was refused: %v", err)
+	}
+}
