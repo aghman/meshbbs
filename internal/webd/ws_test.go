@@ -3,14 +3,14 @@ package webd
 import (
 	"context"
 	"encoding/json"
-	"github.com/aghman/meshbbs/internal/blobstore"
-	"github.com/aghman/meshbbs/internal/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aghman/meshbbs/internal/blobstore"
+	"github.com/aghman/meshbbs/internal/store"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 )
@@ -299,8 +299,15 @@ func TestWSFileBrowser(t *testing.T) {
 	if err := wsjson.Write(ctx, conn, clientMsg{Key: "f"}); err != nil {
 		t.Fatal(err)
 	}
-	msg := readUntil(t, ctx, conn, "the file areas", func(m screenMsg) bool {
-		return m.Screen.Kind == "fileareas"
+	// Wait for the ROWS, not just the screen. The area load is a command, so
+	// the first frame after the keypress is the right screen with an empty
+	// table — and pressing enter on an empty list is a no-op, which would leave
+	// the read below waiting for a frame that is never sent.
+	msg := readUntil(t, ctx, conn, "the file areas with rows", func(m screenMsg) bool {
+		if m.Screen.Kind != "fileareas" {
+			return false
+		}
+		return tableHasRows(m)
 	})
 	if msg.Screen.Title != "File Areas" {
 		t.Errorf("title = %q", msg.Screen.Title)
@@ -309,20 +316,8 @@ func TestWSFileBrowser(t *testing.T) {
 	if err := wsjson.Write(ctx, conn, clientMsg{Key: "enter"}); err != nil {
 		t.Fatal(err)
 	}
-	// Wait for the rows, not just the screen: the file load is a command, so
-	// the first frame after the keypress is the right screen with nothing in
-	// it yet.
 	msg = readUntil(t, ctx, conn, "the file list with rows", func(m screenMsg) bool {
-		if m.Screen.Kind != "filearea" {
-			return false
-		}
-		for _, b := range m.Screen.Blocks {
-			if b["kind"] == "table" {
-				rows, _ := b["rows"].([]any)
-				return len(rows) > 0
-			}
-		}
-		return false
+		return m.Screen.Kind == "filearea" && tableHasRows(m)
 	})
 
 	// The rows carry whole values, not values the model cut to 80 columns: the
@@ -343,4 +338,20 @@ func TestWSFileBrowser(t *testing.T) {
 	if !found {
 		t.Errorf("the file row did not arrive intact: %+v", msg.Screen.Blocks)
 	}
+}
+
+// tableHasRows reports whether a screen's table block has landed its contents.
+//
+// Every screen backed by a store query arrives twice: once when the keypress
+// changes the screen, and again when the load command returns. A test that
+// acts on the first frame is racing the second, and loses on a slow enough
+// machine — which is what the race detector effectively makes every machine.
+func tableHasRows(m screenMsg) bool {
+	for _, b := range m.Screen.Blocks {
+		if b["kind"] == "table" {
+			rows, _ := b["rows"].([]any)
+			return len(rows) > 0
+		}
+	}
+	return false
 }
