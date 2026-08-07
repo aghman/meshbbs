@@ -110,11 +110,11 @@ func (s *Store) path(h Hash) string {
 // corruption a content-addressed store must never have: every later reader
 // trusts the name instead of re-hashing.
 func (s *Store) Put(r io.Reader) (Hash, int64, error) {
-	tmpDir := filepath.Join(s.root, "tmp")
-	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
-		return Hash{}, 0, fmt.Errorf("blobstore: create %s: %w", tmpDir, err)
+	dir, err := s.tmpDir()
+	if err != nil {
+		return Hash{}, 0, err
 	}
-	tmp, err := os.CreateTemp(tmpDir, "incoming-*")
+	tmp, err := os.CreateTemp(dir, "incoming-*")
 	if err != nil {
 		return Hash{}, 0, fmt.Errorf("blobstore: create temp file: %w", err)
 	}
@@ -152,6 +152,85 @@ func (s *Store) Put(r io.Reader) (Hash, int64, error) {
 		return h, size, nil
 	}
 	if err := os.Rename(tmpName, dest); err != nil {
+		return Hash{}, 0, fmt.Errorf("blobstore: place blob: %w", err)
+	}
+	return h, size, nil
+}
+
+// tmpDir returns the staging directory, creating it if needed.
+//
+// Staging lives inside the store's own root so that finishing an upload is a
+// rename rather than a copy. os.Rename cannot cross a filesystem boundary, and
+// on a BBS host where the file areas are a mounted disk and /tmp is a ramdisk,
+// staging anywhere else would silently turn every upload into a second full
+// write of content that can be tens of megabytes (§10).
+func (s *Store) tmpDir() (string, error) {
+	dir := filepath.Join(s.root, "tmp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("blobstore: create %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// Temp creates a staging file for content whose hash is not yet known.
+//
+// This exists for SFTP. The protocol hands us an io.WriterAt, not an io.Writer:
+// a client may write byte ranges in any order, so the content cannot be hashed
+// as it arrives the way Put does it. The caller writes to the returned file at
+// whatever offsets it likes, then calls Adopt.
+//
+// The caller owns the file until Adopt succeeds — including removing it if the
+// transfer is abandoned.
+func (s *Store) Temp() (*os.File, error) {
+	dir, err := s.tmpDir()
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.CreateTemp(dir, "staging-*")
+	if err != nil {
+		return nil, fmt.Errorf("blobstore: create staging file: %w", err)
+	}
+	return f, nil
+}
+
+// Adopt hashes a staging file from Temp and moves it into the store.
+//
+// It closes f whatever happens, and on success f's path no longer exists. On
+// failure the caller still owns the file and should remove it.
+//
+// The rename is what makes this cheap: the bytes are already on the right
+// filesystem, so a 40 MB upload costs one write rather than two.
+func (s *Store) Adopt(f *os.File) (Hash, int64, error) {
+	defer f.Close()
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return Hash{}, 0, fmt.Errorf("blobstore: rewind staging file: %w", err)
+	}
+	hasher := blake3.New(HashLen, nil)
+	size, err := io.Copy(hasher, f)
+	if err != nil {
+		return Hash{}, 0, fmt.Errorf("blobstore: hash staging file: %w", err)
+	}
+	// Sync before the rename publishes the name, for the same reason Put does:
+	// a name that asserts its contents must not become visible before them.
+	if err := f.Sync(); err != nil {
+		return Hash{}, 0, fmt.Errorf("blobstore: sync staging file: %w", err)
+	}
+
+	var h Hash
+	copy(h[:], hasher.Sum(nil))
+
+	dest := s.path(h)
+	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+		return Hash{}, 0, fmt.Errorf("blobstore: create bucket: %w", err)
+	}
+	if _, err := os.Stat(dest); err == nil {
+		// Already held: the dedup case. Drop the staging copy — what is there
+		// is byte-identical by construction.
+		_ = os.Remove(f.Name())
+		return h, size, nil
+	}
+	if err := os.Rename(f.Name(), dest); err != nil {
 		return Hash{}, 0, fmt.Errorf("blobstore: place blob: %w", err)
 	}
 	return h, size, nil

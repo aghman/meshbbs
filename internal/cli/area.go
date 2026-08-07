@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"sort"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -17,7 +18,7 @@ import (
 func newAreaCmd(e *env) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "area",
-		Short: "Inspect and federate message areas",
+		Short: "Inspect and federate message and file areas",
 	}
 	cmd.AddCommand(newAreaListCmd(e), newAreaCreateCmd(e), newAreaFederateCmd(e))
 	return cmd
@@ -26,7 +27,7 @@ func newAreaCmd(e *env) *cobra.Command {
 func newAreaListCmd(e *env) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List message areas and whether they federate",
+		Short: "List areas and whether they federate",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -40,13 +41,22 @@ func newAreaListCmd(e *env) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Both kinds share one tag namespace (migration 0005), so they
+			// belong in one listing: a sysop deciding on a name needs to see
+			// every name already spent, not half of them.
+			fileAreas, err := st.ListFileAreas(ctx)
+			if err != nil {
+				return err
+			}
+			areas = append(areas, fileAreas...)
 			if len(areas) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "No areas yet. They are created when the BBS first runs.")
 				return nil
 			}
+			sort.Slice(areas, func(i, j int) bool { return areas[i].Name < areas[j].Name })
 
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "AREA\tTAG\tFEDERATED\tDESCRIPTION")
+			fmt.Fprintln(w, "AREA\tKIND\tTAG\tFEDERATED\tDESCRIPTION")
 			for _, a := range areas {
 				fed := "local only"
 				if a.Federated {
@@ -58,7 +68,7 @@ func newAreaListCmd(e *env) *cobra.Command {
 				// Hex, not the raw bytes: a tag is four arbitrary bytes of a
 				// hash, and printing them as text produces mojibake in the one
 				// column whose whole purpose is matching a log line to a name.
-				fmt.Fprintf(w, "%s\t%x\t%s\t%s\n", a.Name, a.Tag[:], fed, a.Description)
+				fmt.Fprintf(w, "%s\t%s\t%x\t%s\t%s\n", a.Name, a.Kind, a.Tag[:], fed, a.Description)
 			}
 			return w.Flush()
 		},
@@ -68,11 +78,12 @@ func newAreaListCmd(e *env) *cobra.Command {
 func newAreaCreateCmd(e *env) *cobra.Command {
 	var description string
 	var federated bool
+	var files bool
 
 	cmd := &cobra.Command{
 		Use:   "create <name>",
-		Short: "Create a message area",
-		Long: `Create a message area.
+		Short: "Create a message area, or a file area with --files",
+		Long: `Create an area.
 
 The area's wire tag is derived from its name, so two instances that create the
 same name get the same tag and federate into the same conversation. That is the
@@ -80,7 +91,15 @@ whole coordination mechanism: there is no registry of area names and no
 authority to ask, exactly as there is none for node IDs (§6.1.1).
 
 It also means a typo makes a different area, silently. Check the tag against
-your peers if a federated area does not seem to be reaching them.`,
+your peers if a federated area does not seem to be reaching them.
+
+With --files the area holds files rather than messages (§6.5), and appears as a
+directory over SFTP. A name can only be spent once across both kinds, because
+both derive the same kind of tag from it.
+
+A federated FILE area replicates the catalog only — names, sizes and hashes.
+File contents never travel over the mesh, at any size, and that is a property of
+the link rather than a setting (§7.5).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -90,16 +109,25 @@ your peers if a federated area does not seem to be reaching them.`,
 			}
 			defer st.Close()
 
-			area, err := st.CreateArea(ctx, args[0], description, federated)
+			create := st.CreateArea
+			kind := "message area"
+			if files {
+				create = st.CreateFileArea
+				kind = "file area"
+			}
+			area, err := create(ctx, args[0], description, federated)
 			if err != nil {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Created %s (tag %x)\n", area.Name, area.Tag[:])
+			fmt.Fprintf(out, "Created %s, a %s (tag %x)\n", area.Name, kind, area.Tag[:])
 			if federated {
 				fmt.Fprintf(out, "It federates. Peers need an area with the same name to receive it.\n")
 			} else {
 				fmt.Fprintf(out, "It is local only. Run \"meshbbs area federate %s\" to put it on the mesh.\n", area.Name)
+			}
+			if files {
+				fmt.Fprintf(out, "Users with the upload_files capability can put files in it over SFTP.\n")
 			}
 			return nil
 		},
@@ -107,6 +135,7 @@ your peers if a federated area does not seem to be reaching them.`,
 
 	cmd.Flags().StringVar(&description, "description", "", "what the area is for")
 	cmd.Flags().BoolVar(&federated, "federated", false, "put it on the mesh immediately")
+	cmd.Flags().BoolVar(&files, "files", false, "make a file area rather than a message area")
 	return cmd
 }
 
@@ -134,8 +163,10 @@ is no unsend on a broadcast medium.`,
 			}
 			defer st.Close()
 
+			// Either kind: a file area's catalog federates too (§6.5), and it
+			// is the same flag on the same row that decides.
 			name := args[0]
-			if _, err := st.GetArea(ctx, name); err != nil {
+			if _, err := st.GetAnyArea(ctx, name); err != nil {
 				return fmt.Errorf("no area named %q: %w", name, err)
 			}
 			if err := st.SetAreaFederated(ctx, name, !off, "cli"); err != nil {

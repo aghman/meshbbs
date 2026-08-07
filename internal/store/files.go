@@ -208,6 +208,41 @@ func (s *Store) GetFile(ctx context.Context, areaName, name string) (File, error
 	return f, nil
 }
 
+// RenameFile moves a catalog entry, possibly into another area.
+//
+// The bytes do not move: the blob is addressed by content, and a rename changes
+// nothing about the content. This is the clearest payoff of content addressing
+// in the whole design — moving a 40 MB file between areas is an UPDATE.
+//
+// A renamed file loses its FILE record. The record announced a name in an area,
+// and both may have just changed; re-announcing is the publisher's job, not
+// something to fake by leaving a stale record attached.
+func (s *Store) RenameFile(ctx context.Context, fromArea, fromName, toArea, toName string) error {
+	src, err := s.GetFile(ctx, fromArea, fromName)
+	if err != nil {
+		return err
+	}
+	dst, err := s.GetFileArea(ctx, toArea)
+	if err != nil {
+		return err
+	}
+	toName = strings.TrimSpace(toName)
+	if err := ValidateFileName(toName); err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE files SET area_id = ?, name = ?, record_id = NULL WHERE id = ?`,
+		dst.ID, toName, src.ID)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return fmt.Errorf("%w: %s in %s", ErrFileExists, toName, dst.Name)
+		}
+		return fmt.Errorf("rename file: %w", err)
+	}
+	return nil
+}
+
 // HoldsBlob reports whether any file area holds this content.
 //
 // This is the question the network-wide catalog asks once per row: a FILE
