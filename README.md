@@ -13,9 +13,15 @@ and no address authority — and sysops give peers short local names (`austin@pn
 name hosts in an SSH config. A gateway can bridge selected echo areas to existing FidoNet-style
 message networks.
 
-**Status:** Phase 2 complete — a usable single-node BBS, plus the sync protocol and its simulator,
-with instances able to federate over IP. Phase 3 is in progress: the Meshtastic link itself, so
-federation over the mesh does not work yet.
+**Status:** Phase 3 is code-complete — a usable single-node BBS, the sync protocol and its
+simulator, federation over IP, and the Meshtastic link with its airtime governor, ham-mode safety
+checks, `mesh survey`, and file catalog replication.
+
+Two honest caveats. What has been demonstrated on real radios is the *link*: two instances
+discovering each other, broadcasting and attributing packets over LoRa. A full record sync between
+two instances over the air has not been recorded yet. And the airtime governor still runs on a
+guessed flood multiplier of 4 — every airtime figure in the design scales linearly with it, and
+`mesh survey` exists to measure the real number but nobody has yet.
 
 The **browser front end** shipped ahead of its slot in the roadmap and works today. It is not a
 terminal emulator in a web page: the session model emits a typed description of what is on screen,
@@ -40,9 +46,16 @@ ssh guest@localhost -p 2222    browse read-only
 sftp -P 2222 yournick@localhost   file areas
 ```
 
-Forums, private mail, node chat and a sysop panel. Private messages are encrypted with a key only
-your passphrase opens — subject lines included — so the sysop stores ciphertext and cannot read
-your mail.
+Forums, file areas, private mail, node chat and a sysop panel. Private messages are encrypted with
+a key only your passphrase opens — subject lines included — so the sysop stores ciphertext and
+cannot read your mail.
+
+**File areas replicate their catalog, never their contents.** A federated file area puts its
+listing on the mesh, so every BBS on the network can see what exists and which instance holds it —
+but the files themselves never travel over LoRa at any size. That is a property of the record
+format rather than a setting: every field of a catalog entry is bounded, so the largest one has a
+211-byte body against the 8 KiB a record may carry — there is nowhere in one to put a file. Browse with `F` from the main menu, and move files with an ordinary SFTP client. A file
+held by another BBS says so, and says which one, instead of offering a download that could not work.
 
 The same BBS is also reachable from a browser. That front end is off until you give it a public
 origin and a TLS certificate, because neither has a sensible default — passkeys are bound to the
@@ -68,10 +81,11 @@ node ID is derived from the key itself. Back up the `keys/` directory: a lost no
 recovered, and the instance would have to re-establish with its peers as a new node.
 
 ```
-./meshbbs user add bob              # new accounts cannot post to federated areas by default
+./meshbbs user add bob                    # new accounts cannot post to federated areas by default
 ./meshbbs user grant bob post_federated
-./meshbbs peer alias pnw <node-id>  # local petname; never travels on the wire
-./meshbbs config reference          # every setting, generated from the source
+./meshbbs area create utils --files       # a file area; add --federated to put its catalog on the mesh
+./meshbbs peer alias pnw <node-id>        # local petname; never travels on the wire
+./meshbbs config reference                # every setting, generated from the source
 ```
 
 ## Documentation

@@ -407,9 +407,17 @@
     <div class="col prose">
       <h2>Status and roadmap</h2>
       <p>
-        Phase 2 is complete: a usable single-node BBS, the sync protocol and its simulator, and
-        instances able to federate over IP. Phase 3 is in progress — the Meshtastic link itself, so
-        <strong>federation over the mesh does not work yet</strong>.
+        Phase 3 is code-complete: a usable single-node BBS, the sync protocol and its simulator,
+        federation over IP, and the Meshtastic link with its airtime governor, ham-mode safety
+        checks, <code>mesh survey</code>, and file catalog replication — file areas whose listing
+        travels the mesh while the files themselves never do, at any size.
+      </p>
+      <p>
+        Two things "code-complete" should not be read to include. What has run on real radios is
+        the <strong>link</strong>; a full record sync between two instances over the air has not
+        been recorded yet. And the airtime governor still runs on a guessed flood multiplier of 4 —
+        every airtime figure in the design scales linearly with it, and <code>mesh survey</code>
+        exists to measure the real number but nobody has yet.
       </p>
       <p>
         The first two-radio bring-up has run: two Heltec V3s on a <code>bbsnet</code> channel, with
