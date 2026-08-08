@@ -77,6 +77,7 @@ no registry and no address authority. Run "meshbbs id" to see this node's ID.`,
 		newUserCmd(e),
 		newPeerCmd(e),
 		newAreaCmd(e),
+		newFileCmd(e),
 		newMeshCmd(e),
 		newDevCmd(e),
 	)

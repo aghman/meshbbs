@@ -2,10 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/aghman/meshbbs/internal/blobstore"
+	"github.com/aghman/meshbbs/internal/clock"
+	"github.com/aghman/meshbbs/internal/record"
+	"github.com/aghman/meshbbs/internal/store"
 )
 
 // run executes the root command with args, returning stdout+stderr.
@@ -28,6 +34,112 @@ func initInstance(t *testing.T, extra ...string) string {
 		t.Fatalf("init: %v", err)
 	}
 	return dir
+}
+
+// seedFile puts one file in a new file area, the way an SFTP upload would:
+// with an empty description, because SFTP has no field to carry one.
+func seedFile(t *testing.T, dir, area, name string) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(dir, "bbs.db"), clock.NewReal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if _, err := st.CreateFileArea(ctx, area, "", false); err != nil {
+		t.Fatal(err)
+	}
+	var h blobstore.Hash
+	for i := range h {
+		h[i] = 0x11
+	}
+	if _, err := st.PutFile(ctx, area, store.File{
+		Name: name, Hash: h, Size: 4096, Uploader: "austin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func fileDescription(t *testing.T, dir, area, name string) string {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(dir, "bbs.db"), clock.NewReal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	f, err := st.GetFile(ctx, area, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f.Description
+}
+
+func TestFileDescribeSetsAndClears(t *testing.T) {
+	dir := initInstance(t)
+	seedFile(t, dir, "utils", "ARCHIVE.ZIP")
+
+	if got := fileDescription(t, dir, "utils", "ARCHIVE.ZIP"); got != "" {
+		t.Fatalf("a seeded upload has description %q; this test cannot show the gap", got)
+	}
+
+	out, err := run(t, "--data-dir", dir, "file", "describe", "utils", "ARCHIVE.ZIP",
+		"Tools for the repeater")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Tools for the repeater") {
+		t.Errorf("describe did not echo the new description:\n%s", out)
+	}
+	if got := fileDescription(t, dir, "utils", "ARCHIVE.ZIP"); got != "Tools for the repeater" {
+		t.Errorf("stored description = %q, want the text just set", got)
+	}
+
+	// It shows up in the listing, which is the point of setting it.
+	out, err = run(t, "--data-dir", dir, "file", "list", "utils")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Tools for the repeater") {
+		t.Errorf("file list does not show the description:\n%s", out)
+	}
+
+	// An empty string clears it rather than erroring.
+	if _, err := run(t, "--data-dir", dir, "file", "describe", "utils", "ARCHIVE.ZIP", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := fileDescription(t, dir, "utils", "ARCHIVE.ZIP"); got != "" {
+		t.Errorf("description = %q after clearing, want empty", got)
+	}
+}
+
+// The limit belongs to the wire (§6.5). Accepting more here would create a file
+// that exists locally and silently never publishes.
+func TestFileDescribeRefusesOverlongText(t *testing.T) {
+	dir := initInstance(t)
+	seedFile(t, dir, "utils", "ARCHIVE.ZIP")
+
+	long := strings.Repeat("x", record.MaxFileDescLen+1)
+	if _, err := run(t, "--data-dir", dir, "file", "describe", "utils", "ARCHIVE.ZIP", long); err == nil {
+		t.Error("describe accepted a description longer than a FILE record can carry")
+	}
+	if got := fileDescription(t, dir, "utils", "ARCHIVE.ZIP"); got != "" {
+		t.Errorf("description = %q after a refused set, want it unchanged", got)
+	}
+}
+
+func TestFileDescribeUnknownFile(t *testing.T) {
+	dir := initInstance(t)
+	seedFile(t, dir, "utils", "ARCHIVE.ZIP")
+
+	if _, err := run(t, "--data-dir", dir, "file", "describe", "utils", "ABSENT.TXT", "x"); err == nil {
+		t.Error("describe succeeded for a file that does not exist")
+	}
+	if _, err := run(t, "--data-dir", dir, "file", "describe", "nosucharea", "ARCHIVE.ZIP", "x"); err == nil {
+		t.Error("describe succeeded for an area that does not exist")
+	}
 }
 
 func TestInitCreatesEverything(t *testing.T) {

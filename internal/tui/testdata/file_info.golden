@@ -9,4 +9,4 @@ A compressed archive
 To download it:
     sftp -P 2222 austin@this-bbs  then:  get /utils/ARCHIVE.ZIP
 
-q back
+d describe · q back

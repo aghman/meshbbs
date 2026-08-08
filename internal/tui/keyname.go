@@ -159,6 +159,11 @@ func (m Model) setField(name, value string) Model {
 			m.chatInput.setValue(value)
 		}
 
+	case screenFileDescribe:
+		if name == "description" {
+			m.descInput.setValue(value)
+		}
+
 	case screenSignup:
 		switch name {
 		case "nick":

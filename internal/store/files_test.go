@@ -365,3 +365,161 @@ func TestCountFiles(t *testing.T) {
 		t.Errorf("CountFiles = %d, want 3", n)
 	}
 }
+
+func TestSetFileDescription(t *testing.T) {
+	s, ctx := testStore(t)
+	if _, err := s.CreateFileArea(ctx, "utils", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutFile(ctx, "utils", File{
+		Name: "A.TXT", Hash: hashOf(0x11), Size: 10, Uploader: "austin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An SFTP upload arrives with no description — that is the whole reason
+	// this method exists.
+	f, err := s.GetFile(ctx, "utils", "A.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Description != "" {
+		t.Fatalf("a fresh upload has description %q, want empty", f.Description)
+	}
+
+	if err := s.SetFileDescription(ctx, "utils", "A.TXT", "  Notes on the thing  ", "austin"); err != nil {
+		t.Fatal(err)
+	}
+	f, err = s.GetFile(ctx, "utils", "A.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Description != "Notes on the thing" {
+		t.Errorf("description = %q, want it trimmed to %q", f.Description, "Notes on the thing")
+	}
+
+	// Clearing is setting it to nothing, not a separate operation.
+	if err := s.SetFileDescription(ctx, "utils", "A.TXT", "", "austin"); err != nil {
+		t.Fatal(err)
+	}
+	f, err = s.GetFile(ctx, "utils", "A.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Description != "" {
+		t.Errorf("description = %q after clearing, want empty", f.Description)
+	}
+}
+
+// A description longer than the wire allows must be refused where it is typed.
+// Accepting it here would produce a file that exists locally and silently never
+// publishes, because MarshalFileBody would reject it much later.
+func TestSetFileDescriptionRefusesUnwireableText(t *testing.T) {
+	s, ctx := testStore(t)
+	if _, err := s.CreateFileArea(ctx, "utils", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutFile(ctx, "utils", File{Name: "A.TXT", Hash: hashOf(0x11), Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bad := range []string{
+		strings.Repeat("x", MaxFileDescLen+1),
+		"a control\x00character",
+		"a line\nbreak",
+	} {
+		if err := s.SetFileDescription(ctx, "utils", "A.TXT", bad, "cli"); err == nil {
+			t.Errorf("SetFileDescription(%q) accepted it", bad)
+		}
+	}
+
+	// The limit is the wire's, not one of this package's own invention.
+	ok := strings.Repeat("x", MaxFileDescLen)
+	if err := s.SetFileDescription(ctx, "utils", "A.TXT", ok, "cli"); err != nil {
+		t.Errorf("SetFileDescription at exactly the limit failed: %v", err)
+	}
+	if err := record.ValidateFileDescription(ok); err != nil {
+		t.Errorf("the store accepted a description the wire refuses: %v", err)
+	}
+}
+
+// A published file whose description changes has to be re-announced: the FILE
+// record carries the description, so the one peers hold is now stale.
+func TestSetFileDescriptionDetachesTheRecord(t *testing.T) {
+	s, ctx := testStore(t)
+	if _, err := s.CreateFileArea(ctx, "utils", "", true); err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(t, 7)
+	if err := s.PutNode(ctx, Node{ID: key.ID(), PublicKey: key.Public, IsSelf: true}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.PutFile(ctx, "utils", File{Name: "A.TXT", Hash: hashOf(0x11), Size: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seq, err := s.NextSeq(ctx, record.AreaTagFor("utils"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.New(key, record.Record{
+		Origin: key.ID(), Seq: seq, TS: 1, Type: record.TypeFile,
+		Area: record.AreaTagFor("utils"), Body: []byte("body"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFileRecord(ctx, f.ID, rec.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetFile(ctx, "utils", "A.TXT"); err != nil {
+		t.Fatal(err)
+	} else if !got.Published() {
+		t.Fatal("the file is not published after SetFileRecord; this test cannot detect a detach")
+	}
+
+	if err := s.SetFileDescription(ctx, "utils", "A.TXT", "now described", "austin"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetFile(ctx, "utils", "A.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Published() {
+		t.Error("the file is still marked published after its description changed, " +
+			"so the stale FILE record on peers would never be superseded")
+	}
+}
+
+func TestMayDescribe(t *testing.T) {
+	own := File{Uploader: "austin"}
+	unowned := File{Uploader: ""}
+
+	cases := []struct {
+		name  string
+		f     File
+		nick  string
+		sysop bool
+		want  bool
+	}{
+		{"the uploader", own, "austin", false, true},
+		{"the uploader in another case", own, "AUSTIN", false, true},
+		{"someone else", own, "bob", false, false},
+		{"a sysop, on someone else's file", own, "bob", true, true},
+		{"a guest", own, "guest", false, false},
+		// An empty uploader is a file with nobody to own it, not a wildcard.
+		{"an empty nick against an unowned file", unowned, "", false, false},
+		{"a named user against an unowned file", unowned, "austin", false, false},
+		{"a sysop against an unowned file", unowned, "austin", true, true},
+	}
+	for _, tc := range cases {
+		if got := tc.f.MayDescribe(tc.nick, tc.sysop); got != tc.want {
+			t.Errorf("%s: MayDescribe(%q, sysop=%v) = %v, want %v",
+				tc.name, tc.nick, tc.sysop, got, tc.want)
+		}
+	}
+}

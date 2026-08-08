@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/aghman/meshbbs/internal/auth"
@@ -27,6 +28,21 @@ type (
 	filesLoadedMsg     struct {
 		area  string
 		files []store.File
+	}
+
+	// fileDescribedMsg carries a write and the reload that follows it as ONE
+	// result, rather than as two commands with an ordering requirement.
+	//
+	// tea.Sequence looks like the way to express "write, then reload" and is
+	// what the posting path uses, but this Driver dispatches a sequence's
+	// commands concurrently (driver.go), so the reload can and does read the
+	// catalog before the write has committed — leaving the user looking at
+	// their own edit missing. Doing both inside one command removes the
+	// ordering question instead of relying on an answer to it.
+	fileDescribedMsg struct {
+		area   string
+		files  []store.File
+		status statusMsg
 	}
 )
 
@@ -68,6 +84,42 @@ func (m Model) loadFiles(area string) tea.Cmd {
 			return statusMsg{text: err.Error(), isErr: true}
 		}
 		return filesLoadedMsg{area: area, files: files}
+	}
+}
+
+// describeFile writes a file's description (§6.5).
+//
+// The permission check is repeated here, at the point of the write, rather than
+// trusted from the screen that got us here. A tea.Cmd runs asynchronously and
+// the model it captured is a copy: between "d" and this running, nothing stops
+// a frame arriving that changes the selection. Re-reading the file by name and
+// re-checking is cheap next to a user editing somebody else's description.
+func (m Model) describeFile(area, name, text string) tea.Cmd {
+	nick, sysop := m.nick, m.sysop
+	return func() tea.Msg {
+		f, err := m.cfg.Store.GetFile(m.ctx, area, name)
+		if err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+		if !f.MayDescribe(nick, sysop) {
+			return statusMsg{text: "You can only describe files you uploaded.", isErr: true}
+		}
+		if err := m.cfg.Store.SetFileDescription(m.ctx, area, name, text, nick); err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+
+		status := statusMsg{text: "Described " + name + "."}
+		if strings.TrimSpace(text) == "" {
+			status = statusMsg{text: "Cleared the description of " + name + "."}
+		}
+
+		// Re-read here, in the same command, so the listing the user lands on
+		// cannot predate the write.
+		files, err := m.cfg.Store.ListFiles(m.ctx, area)
+		if err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+		return fileDescribedMsg{area: area, files: files, status: status}
 	}
 }
 
