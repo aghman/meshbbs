@@ -112,7 +112,7 @@
     <span class="b">[F]</span> Forums          <span class="d">12 new in 4 areas</span>
     <span class="b">[M]</span> Mail            <span class="c">2 unread</span>
     <span class="b">[D]</span> Doors           <span class="d">3 available</span>
-    <span class="b">[A]</span> File areas      <span class="d">1,204 files network-wide</span>
+    <span class="b">[F]</span> File areas      <span class="d">1,204 files network-wide</span>
     <span class="b">[C]</span> Node chat       <span class="d">nobody around</span>
     <span class="b">[S]</span> Settings        <span class="d">theme, encoding, keys</span>
 
@@ -124,7 +124,7 @@
 <span class="d">  Browse the forums, see what's here, decide later.</span>
 
     <span class="b">[F]</span> Forums          <span class="d">read-only</span>
-    <span class="b">[A]</span> File areas      <span class="d">read-only</span>
+    <span class="b">[F]</span> File areas      <span class="d">read-only</span>
     <span class="d">[M] Mail            requires an account</span>
 
   <span class="p">Command:</span> <span class="c">_</span>
@@ -305,17 +305,23 @@
       <div class="term-body">
 <pre><span class="p">$</span> <span class="c">sftp -P 2222 austin@bbs.example.com</span>
 
-<span class="p">sftp&gt;</span> <span class="c">cd /areas/utils</span>
-<span class="p">sftp&gt;</span> <span class="c">put mesh-survey.tar.gz</span>
+<span class="p">sftp&gt;</span> <span class="c">put mesh-survey.tar.gz /utils/MESH-SURVEY.TGZ</span>
 <span class="d">Uploading mesh-survey.tar.gz  100%  84KB  84.0KB/s</span>
 
 <span class="d">─────────────────────────────────────────────────────────</span>
-<span class="d">In the file browser, a file held elsewhere is honest</span>
-<span class="d">about it rather than spinning forever:</span>
+<span class="d">In the file browser, a file held elsewhere says so</span>
+<span class="d">rather than spinning forever:</span>
 
-  <span class="b">ansiart-pack-92.zip</span>   <span class="d">1.2 MB</span>
-  <span class="d">held by</span> <span class="c">pnw</span> <span class="d">(K7QM4X2P…) — no IP route from here</span>
-  <span class="g">queued for next exchange; you'll be notified</span></pre>
+  <span class="b">DOOM-SRC.TAR.GZ</span>   <span class="d">8.0 MB</span>   <span class="d">held by</span> <span class="c">pnw</span>
+
+  <span class="c">Held by pnw (SKX2DBX4)</span>
+
+  <span class="d">This BBS does not have the file, only its listing.</span>
+  <span class="d">File contents never travel the mesh, at any size, so</span>
+  <span class="d">there is nothing to download here.</span>
+
+  <span class="d">That BBS's sysop:</span>
+  <span class="g">    sysop@pnw.example</span></pre>
       </div>
     </div>
 
@@ -323,10 +329,12 @@
 
     <div class="col prose">
       <p>
-        The two fetch paths are a direct IP connection to a holding BBS, or the sneakernet queue —
-        your request is recorded and satisfied at the next bundle exchange, which might be someone
-        walking a USB stick between two sites. There is no third path, and no size threshold below
-        which the mesh will carry bytes.
+        The design's two fetch paths are a direct IP connection to a holding BBS, or the sneakernet
+        queue — a request recorded and satisfied at the next bundle exchange, which might be someone
+        walking a USB stick between two sites. Neither is built yet: both are later phases, so today
+        the browser names the holding BBS and its sysop and leaves it there, rather than promising a
+        queue nothing would service. What is already true is the part that will not change — there
+        is no third path, and no size threshold below which the mesh will carry bytes.
       </p>
     </div>
   </section>

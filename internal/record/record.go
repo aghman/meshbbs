@@ -209,6 +209,11 @@ func New(key identity.NodeKey, r Record) (*Record, error) {
 	if err != nil {
 		return nil, err
 	}
+	// §7.5: a FILE record carries a catalog entry and nothing else. Checked
+	// here so no caller can mint one carrying file content, at any size.
+	if err := checkNoFileContent(&r); err != nil {
+		return nil, err
+	}
 	out := r
 	out.Body = append([]byte(nil), r.Body...) // defensive copy: records are immutable
 	out.signed = canonical

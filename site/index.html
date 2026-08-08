@@ -29,7 +29,7 @@
       <div>
         <div class="status-line">
           <span class="dot"></span>
-          Phase 2 complete · Phase 3 in progress · mesh federation not yet live
+          Phase 3 code-complete · mesh link running on real radios · record sync over the air not yet proven
         </div>
 
         <h1>A BBS that fits in <em>233 bytes</em></h1>
@@ -157,15 +157,14 @@
     <span class="b">[F]</span> Forums          <span class="d">12 new in 4 areas</span>
     <span class="b">[M]</span> Mail            <span class="c">2 unread</span>
     <span class="b">[D]</span> Doors           <span class="d">3 available</span>
-    <span class="b">[A]</span> File areas      <span class="d">1,204 files network-wide</span>
+    <span class="b">[F]</span> File areas      <span class="d">1,204 files network-wide</span>
     <span class="b">[C]</span> Node chat       <span class="d">nobody around</span>
 
   <span class="p">Command:</span> <span class="c">_</span></pre>
 
 <pre data-panel="files" hidden><span class="p">$</span> <span class="c">sftp -P 2222 austin@bbs.example.com</span>
 
-<span class="p">sftp&gt;</span> <span class="c">cd /areas/utils</span>
-<span class="p">sftp&gt;</span> <span class="c">put mesh-survey.tar.gz</span>
+<span class="p">sftp&gt;</span> <span class="c">put mesh-survey.tar.gz /utils/MESH-SURVEY.TGZ</span>
 <span class="d">Uploading mesh-survey.tar.gz  100%  84KB  84.0KB/s</span>
 
 <span class="d">  Files never cross the mesh — only their catalogs do.</span>
@@ -178,7 +177,7 @@
 <span class="d">  Browse the forums, see what's here, decide later.</span>
 
     <span class="b">[F]</span> Forums          <span class="d">read-only</span>
-    <span class="b">[A]</span> File areas      <span class="d">read-only</span>
+    <span class="b">[F]</span> File areas      <span class="d">read-only</span>
     <span class="d">[M] Mail            requires an account</span>
 
   <span class="p">Command:</span> <span class="c">_</span></pre>

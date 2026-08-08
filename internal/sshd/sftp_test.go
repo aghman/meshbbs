@@ -11,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/blobstore"
 	"github.com/aghman/meshbbs/internal/clock"
+	"github.com/aghman/meshbbs/internal/identity"
+	"github.com/aghman/meshbbs/internal/rng"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/pkg/sftp"
 )
@@ -35,8 +38,29 @@ func testAreaFS(t *testing.T, areas ...string) *areaFS {
 			t.Fatal(err)
 		}
 	}
+
+	// A real service, because an upload is not finished until it is catalogued
+	// and — in a federated area — announced. A fake here would test the half of
+	// the path that was already working.
+	key, err := identity.GenerateNodeKey(rng.TestSecret(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := clock.NewVirtual(time.Unix(1_700_000_000, 0))
+	if err := st.PutNode(ctx, store.Node{
+		ID: key.ID(), PublicKey: key.Public, DisplayName: "test-bbs", IsSelf: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, store.CreateUserOptions{
+		Nick: "austin", CanLogin: true,
+		Capabilities: append([]string(nil), store.DefaultCapabilities...),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	return &areaFS{
-		ctx: ctx, store: st, blobs: blobs, nick: "austin",
+		ctx: ctx, store: st, svc: bbs.New(st, key, clk), blobs: blobs, nick: "austin",
 		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }

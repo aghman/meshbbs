@@ -523,20 +523,68 @@ func (m Model) buildFileAreaList() Screen {
 	}
 }
 
+// holderLabel names the BBS holding a file, as short as is still unambiguous.
+//
+// [D9] makes the sysop's petname the human-facing surface, so it wins when
+// there is one; a node's own display name is the next best; and the short ID is
+// the fallback that always exists. "here" for our own files, because "held by
+// the BBS you are typing into" is noise in every row.
+func holderLabel(e store.CatalogEntry) string {
+	if e.Local {
+		return "here"
+	}
+	if e.Holder != "" {
+		return sanitizeLine(e.Holder)
+	}
+	if !e.Origin.IsZero() {
+		return e.Origin.Short()
+	}
+	return "elsewhere"
+}
+
 func (m Model) buildFileArea() Screen {
+	var elsewhere int
 	rows := make([]Row, 0, len(m.files))
 	for _, f := range m.files {
+		if !f.Held {
+			elsewhere++
+		}
 		rows = append(rows, Row{Cells: []string{
 			f.Name,
 			humanSize(f.Size),
 			sanitizeLine(f.Description),
-			sanitizeLine(f.Uploader),
+			holderLabel(f),
 		}})
+	}
+
+	blocks := []Block{
+		TableBlock{
+			// "Held by" rather than "From": a FILE record carries no uploader,
+			// so what the network knows about a peer's file is which BBS has it
+			// (§6.5). Naming the column for the weaker fact would invite reading
+			// a node name as a person.
+			Header:   []string{"Name", "Size", "Description", "Held by"},
+			Columns:  []Column{{Width: 24}, {Width: 9}, {Width: 24}, {Width: 14}},
+			Gap:      2,
+			Rows:     rows,
+			Selected: m.fileIdx,
+			Empty:    "This area has no files yet.",
+		},
+	}
+	if elsewhere > 0 {
+		// Said once, here, rather than repeated per row: the constraint is a
+		// property of the mesh, not of any particular file (§7.5).
+		blocks = append(blocks, Prose(LevelMuted, fmt.Sprintf(
+			"%s held by another BBS. File listings travel the mesh; the files "+
+				"themselves never do, so those are not downloadable from here.",
+			plural(elsewhere, "file is", "files are"))))
 	}
 
 	// Advertise "d" only on a row the user can actually edit. A hint for a key
 	// that answers "you can only describe files you uploaded" is worse than no
-	// hint: it reads as a bug rather than as a rule.
+	// hint: it reads as a bug rather than as a rule. A peer's file is never
+	// editable by anyone here, sysop included — its description lives in their
+	// record, signed by their node.
 	help := hints("up/down", "move", "enter", "details", "q", "back")
 	if m.fileIdx >= 0 && m.fileIdx < len(m.files) &&
 		m.files[m.fileIdx].MayDescribe(m.nick, m.sysop) {
@@ -545,18 +593,17 @@ func (m Model) buildFileArea() Screen {
 
 	return Screen{
 		Kind: "filearea", Title: "Files in " + sanitizeLine(m.fileArea), Status: m.statusLine(),
-		Blocks: []Block{
-			TableBlock{
-				Header:   []string{"Name", "Size", "Description", "From"},
-				Columns:  []Column{{Width: 24}, {Width: 9}, {Width: 28}, {Width: 12}},
-				Gap:      2,
-				Rows:     rows,
-				Selected: m.fileIdx,
-				Empty:    "This area has no files yet.",
-			},
-		},
-		Help: help,
+		Blocks: blocks,
+		Help:   help,
 	}
+}
+
+// plural renders a count with the right verb form.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 func (m Model) buildFileInfo() Screen {
@@ -570,10 +617,12 @@ func (m Model) buildFileInfo() Screen {
 		desc = "(no description)"
 	}
 
-	meta := fmt.Sprintf("%s  ·  %d bytes  ·  uploaded by %s",
-		humanSize(f.Size), f.Size, sanitizeLine(f.Uploader))
-	if f.UploadedAt != 0 {
-		meta += "  ·  " + m.at(f.UploadedAt, "2006-01-02 15:04")
+	meta := fmt.Sprintf("%s  ·  %d bytes", humanSize(f.Size), f.Size)
+	if f.Uploader != "" {
+		meta += "  ·  uploaded by " + sanitizeLine(f.Uploader)
+	}
+	if f.TS != 0 {
+		meta += "  ·  " + m.at(f.TS, "2006-01-02 15:04")
 	}
 
 	blocks := []Block{
@@ -582,10 +631,8 @@ func (m Model) buildFileInfo() Screen {
 			Meta:    meta,
 			Body:    desc,
 		},
-		Lines(LevelMuted,
-			"To download it:",
-			"    "+m.fetchCommand(m.fileArea, f.Name)),
 	}
+	blocks = append(blocks, m.fileAvailability(f)...)
 
 	help := hints("q", "back")
 	if f.MayDescribe(m.nick, m.sysop) {
@@ -635,4 +682,49 @@ func (m Model) buildFileDescribe() Screen {
 		},
 		Help: hints("enter", "save", "esc", "cancel"),
 	}
+}
+
+// fileAvailability says whether a file can be had, and how.
+//
+// # Why this does not promise a queue
+//
+// Design §6.5 and §7.5 both sketch this line as "queued for next exchange",
+// with the request satisfied at the next sneakernet bundle. That queue is a
+// Phase 5 deliverable and does not exist: nothing records a request and nothing
+// would satisfy one. Printing it would be exactly the dishonesty those two
+// sections are about — a promise the software has no intention of keeping is
+// worse than the spinner they warn against, because it does not even look like
+// it is still working.
+//
+// So this says what is true today: which BBS holds it, and that the mesh will
+// never bring the bytes. The sysop's contact is the one actionable thing we
+// have, so it is offered when the holding node published one.
+func (m Model) fileAvailability(f store.CatalogEntry) []Block {
+	if f.Held {
+		return []Block{
+			Lines(LevelMuted,
+				"To download it:",
+				"    "+m.fetchCommand(m.fileArea, f.Name)),
+		}
+	}
+
+	who := holderLabel(f)
+	line := "Held by " + who
+	if !f.Origin.IsZero() && who != f.Origin.Short() {
+		line += " (" + f.Origin.Short() + ")"
+	}
+
+	blocks := []Block{Say(LevelAccent, line)}
+	blocks = append(blocks, Prose(LevelMuted,
+		"This BBS does not have the file, only its listing. File contents never "+
+			"travel the mesh, at any size, so there is nothing to download here."))
+	if f.HolderContact != "" {
+		blocks = append(blocks, Lines(LevelMuted,
+			"That BBS's sysop:",
+			"    "+sanitizeLine(f.HolderContact)))
+	} else {
+		blocks = append(blocks, Prose(LevelMuted,
+			"Ask your sysop if you need it — they can reach the other BBS directly."))
+	}
+	return blocks
 }

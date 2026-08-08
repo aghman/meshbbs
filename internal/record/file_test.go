@@ -1,6 +1,7 @@
 package record
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -417,4 +418,159 @@ func FuzzUnmarshalFileBody(f *testing.F) {
 			t.Fatalf("%q survived as a file name", body.Name)
 		}
 	})
+}
+
+// §7.5, the rule the design says will be tempting to violate: no record type
+// carries file content, at any size, on any link.
+//
+// These are the guard. They are written so that the tempting change — a new
+// record type for file data, or a size threshold below which content is
+// "fine" — fails here, next to the reasoning, rather than shipping.
+func TestNoRecordTypeCarriesFileContent(t *testing.T) {
+	key, err := identity.GenerateNodeKey(rng.TestSecret(21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	area := AreaTagFor("utils")
+
+	t.Run("the record type set is closed", func(t *testing.T) {
+		// Adding a type is a decision, and this is where it gets made
+		// deliberately. If a FILE_DATA arrives here one day, §7.5 says it does
+		// not — read that section before changing this list.
+		want := map[Type]string{
+			TypePost: "POST", TypeDM: "DM", TypeProfile: "PROFILE", TypeNode: "NODE",
+			TypeSuccession: "SUCCESSION", TypeArea: "AREA", TypeFile: "FILE",
+			TypeTombstone: "TOMBSTONE", TypeVote: "VOTE", TypeDoorEvent: "DOOR_EVENT",
+		}
+		if len(typeNames) != len(want) {
+			t.Fatalf("there are %d record types, expected %d — a new one needs a "+
+				"decision, and §7.5 forbids one that carries file content",
+				len(typeNames), len(want))
+		}
+		for typ, name := range want {
+			if typeNames[typ] != name {
+				t.Errorf("type %d is %q, want %q", uint8(typ), typeNames[typ], name)
+			}
+		}
+		for name := range typeNames {
+			if _, ok := want[name]; !ok {
+				t.Errorf("unexpected record type %d (%s)", uint8(name), typeNames[name])
+			}
+		}
+	})
+
+	t.Run("a FILE record cannot be built around content", func(t *testing.T) {
+		// The generic path allows a body up to MaxBodyLen, which is 8 KiB — and
+		// 8 KiB is a small file. This is the hole §7.5 is about.
+		for _, size := range []int{512, 4 << 10, MaxBodyLen} {
+			_, err := New(key, Record{
+				Origin: key.ID(), Seq: 1, TS: 1, Type: TypeFile, Area: area,
+				Body: bytes.Repeat([]byte{0xFF}, size),
+			})
+			if err == nil {
+				t.Errorf("a %d-byte FILE body was accepted", size)
+			}
+		}
+	})
+
+	t.Run("no size is small enough", func(t *testing.T) {
+		// §7.5: "no size threshold below which it's allowed". A tiny payload is
+		// refused for the same reason a large one is — it is not a catalog
+		// entry.
+		for _, size := range []int{1, 8, 24, 64} {
+			_, err := New(key, Record{
+				Origin: key.ID(), Seq: 1, TS: 1, Type: TypeFile, Area: area,
+				Body: bytes.Repeat([]byte{0x41}, size),
+			})
+			if err == nil {
+				t.Errorf("a %d-byte FILE body was accepted", size)
+			}
+		}
+	})
+
+	t.Run("content cannot be smuggled through a valid-looking entry", func(t *testing.T) {
+		// The fields are each bounded, so there is nowhere to put bytes: the
+		// name, the description and the tags all have caps, and the hash is
+		// fixed width. Appending content to a well-formed entry fails the
+		// canonical-encoding check.
+		good, err := MarshalFileBody(sampleFile())
+		if err != nil {
+			t.Fatal(err)
+		}
+		smuggled := append(append([]byte{}, good...), bytes.Repeat([]byte{0xEE}, 2048)...)
+		if _, err := New(key, Record{
+			Origin: key.ID(), Seq: 1, TS: 1, Type: TypeFile, Area: area, Body: smuggled,
+		}); err == nil {
+			t.Error("a catalog entry with 2 KB appended was accepted")
+		}
+	})
+
+	t.Run("a peer cannot deliver one either", func(t *testing.T) {
+		// Building is refused, so a hostile record has to be assembled by hand
+		// to test the DECODE side. This takes a legitimate FILE record's wire
+		// bytes and rewrites the body in place, which is exactly what a
+		// modified peer would do.
+		legit, err := NewFileRecord(key, 1, 1, area, sampleFile())
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire := legit.Marshal()
+		body, err := MarshalFileBody(sampleFile())
+		if err != nil {
+			t.Fatal(err)
+		}
+		i := bytes.Index(wire, body)
+		if i < 0 {
+			t.Fatal("could not find the body in the marshalled record")
+		}
+		// Same length, so the framing still parses: only the content changes.
+		copy(wire[i:], bytes.Repeat([]byte{0xEE}, len(body)))
+
+		if _, err := Unmarshal(wire); err == nil {
+			t.Error("a FILE record whose body is not a catalog entry was accepted from the wire")
+		}
+	})
+
+	t.Run("a real catalog entry still works", func(t *testing.T) {
+		// The guard must not have made the legitimate path unusable, which is
+		// the way a rule like this usually fails.
+		rec, err := NewFileRecord(key, 1, 1, area, sampleFile())
+		if err != nil {
+			t.Fatal(err)
+		}
+		back, err := Unmarshal(rec.Marshal())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyFileRecord(back, key.Public); err != nil {
+			t.Errorf("a legitimate catalog entry was rejected: %v", err)
+		}
+	})
+}
+
+// The arithmetic behind the rule: a catalog entry is bounded far below anything
+// that could be a file, so "reject content" and "accept entries" cannot overlap.
+func TestCatalogEntryIsTooSmallToBeAFile(t *testing.T) {
+	tag := strings.Repeat("t", MaxFileTagLen)
+	tags := make([]string, MaxFileTags)
+	for i := range tags {
+		tags[i] = tag
+	}
+	worst := FileBody{
+		Name:        strings.Repeat("n", MaxFileNameLen),
+		Size:        1 << 62,
+		Hash:        testHash(1),
+		Description: strings.Repeat("d", MaxFileDescLen),
+		Tags:        tags,
+	}
+	body := FileBodyLen(worst)
+
+	// MaxBodyLen is what the generic record path allows. The gap between that
+	// and the largest possible catalog entry is the room a file would need.
+	if body*8 > MaxBodyLen {
+		t.Errorf("the largest catalog entry is %d bytes against a %d-byte record "+
+			"limit — close enough that a FILE record could plausibly carry content",
+			body, MaxBodyLen)
+	}
+	t.Logf("largest catalog entry: %d bytes; generic record body limit: %d", body, MaxBodyLen)
 }

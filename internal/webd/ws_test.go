@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/aghman/meshbbs/internal/blobstore"
+	"github.com/aghman/meshbbs/internal/identity"
+	"github.com/aghman/meshbbs/internal/record"
+	"github.com/aghman/meshbbs/internal/rng"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -528,4 +531,84 @@ func tableHasRows(m screenMsg) bool {
 		}
 	}
 	return false
+}
+
+// A peer's file reaches the browser with its holder intact.
+//
+// The browser is where "held by" matters most: an SSH user reading a listing
+// can be told once in prose, but a web client renders the table itself and has
+// to receive the holder as DATA rather than as a sentence. The model emits one
+// Screen, so this is the same row the terminal draws.
+func TestWSCatalogCarriesTheHolder(t *testing.T) {
+	f, ts, sessionID := liveServer(t)
+	ctx := context.Background()
+
+	area, err := f.store.CreateFileArea(f.ctx, "meshwide", "Shared", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := identity.GenerateNodeKey(rng.TestSecret(9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.PutNode(f.ctx, store.Node{
+		ID: peer.ID(), PublicKey: peer.Public, DisplayName: "Pacific NW",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SetAlias(f.ctx, "pnw", peer.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	var full blobstore.Hash
+	full[0] = 0x77
+	wire, err := record.TruncateFileHash(full[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewFileRecord(peer, 1, 1_700_000_000, area.Tag, record.FileBody{
+		Name: "REMOTE.ZIP", Size: 900_000, Hash: wire, Description: "Over there",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.PutRecord(f.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := dialWS(t, ctx, ts, sessionID)
+	readUntil(t, ctx, conn, "the menu", func(m screenMsg) bool {
+		return m.Screen.Kind == "menu"
+	})
+	if err := wsjson.Write(ctx, conn, clientMsg{Key: "f"}); err != nil {
+		t.Fatal(err)
+	}
+	readUntil(t, ctx, conn, "the file areas with rows", func(m screenMsg) bool {
+		return m.Screen.Kind == "fileareas" && tableHasRows(m)
+	})
+	if err := wsjson.Write(ctx, conn, clientMsg{Key: "enter"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := readUntil(t, ctx, conn, "the file list with rows", func(m screenMsg) bool {
+		return m.Screen.Kind == "filearea" && tableHasRows(m)
+	})
+
+	var found bool
+	for _, b := range msg.Screen.Blocks {
+		if b["kind"] != "table" {
+			continue
+		}
+		rows, _ := b["rows"].([]any)
+		for _, r := range rows {
+			cells, _ := r.(map[string]any)["cells"].([]any)
+			// The holder is the last cell, and it is the sysop's petname —
+			// [D9]'s human-facing surface, not a raw node ID.
+			if len(cells) == 4 && cells[0] == "REMOTE.ZIP" && cells[3] == "pnw" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the peer's row did not arrive with its holder: %+v", msg.Screen.Blocks)
+	}
 }

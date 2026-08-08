@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/blobstore"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/charmbracelet/ssh"
@@ -49,7 +50,7 @@ func (s *Server) sftpHandler(sess ssh.Session) {
 		return
 	}
 
-	if s.blobs == nil {
+	if s.blobs == nil || s.svc == nil {
 		s.log.Error("sftp unavailable", "err", "no file area directory configured")
 		fmt.Fprintln(sess.Stderr(), "file areas are not configured on this BBS")
 		_ = sess.Exit(1)
@@ -67,6 +68,7 @@ func (s *Server) sftpHandler(sess ssh.Session) {
 	fsys := &areaFS{
 		ctx:      ctx,
 		store:    s.store,
+		svc:      s.svc,
 		blobs:    s.blobs,
 		nick:     d.Nick,
 		readOnly: !allowed,
@@ -88,8 +90,12 @@ func (s *Server) sftpHandler(sess ssh.Session) {
 
 // areaFS projects the file catalog as a virtual filesystem.
 type areaFS struct {
-	ctx      context.Context
-	store    *store.Store
+	ctx   context.Context
+	store *store.Store
+	// svc catalogues an upload and announces it where the area federates. The
+	// store alone would only do the first half, and a file that never reaches
+	// the network is the failure §6.5 exists to prevent.
+	svc      *bbs.Service
 	blobs    *blobstore.Store
 	nick     string
 	readOnly bool
@@ -183,8 +189,11 @@ func (a *areaFS) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 	if err != nil {
 		return nil, translate("open", r.Filepath, err)
 	}
-	if area.ReadOnly {
-		return nil, fmt.Errorf("permission denied: %s is read-only", area.Name)
+	// Every reason this upload could be refused, checked before a byte moves:
+	// the area's own read-only flag, the [N7] capability gate on a federated
+	// area, and a name already taken.
+	if err := a.svc.CanUploadTo(a.ctx, area.Name, a.nick); err != nil {
+		return nil, fmt.Errorf("permission denied: %w", err)
 	}
 	if _, err := a.store.GetFile(a.ctx, v.area, v.name); err == nil {
 		return nil, fmt.Errorf("%s already exists in %s", v.name, area.Name)
@@ -264,16 +273,17 @@ func (u *upload) Close() error {
 	// The bytes are in the store before the row exists. If this fails, what is
 	// left behind is an unreferenced blob a maintenance pass can collect —
 	// never a row promising content that was never written.
-	if _, err := u.fs.store.PutFile(u.fs.ctx, u.area, store.File{
+	saved, err := u.fs.svc.AddFile(u.fs.ctx, u.area, store.File{
 		Name:     u.name,
 		Hash:     hash,
 		Size:     size,
 		Uploader: u.fs.nick,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	u.fs.log.Info("file uploaded", "user", u.fs.nick, "area", u.area,
-		"file", u.name, "bytes", size)
+		"file", u.name, "bytes", size, "announced", saved.Published())
 	return nil
 }
 

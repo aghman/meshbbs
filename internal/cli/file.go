@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"text/tabwriter"
 
+	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/record"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/spf13/cobra"
@@ -72,10 +73,10 @@ short on purpose: at roughly ten originated packets per node per day, a
 description that doubles the size of a catalog entry is one fewer file this
 node can announce at all.
 
-Changing a description detaches the file from its published FILE record, so the
-next publish re-announces it. Peers keep what they already hold until then —
-records are signed and replicated, and there is no unsend on a broadcast
-medium.`, record.MaxFileDescLen),
+In a federated area this announces the change: the description travels inside
+the FILE record, so a new one is written and replicated. Peers keep what they
+already hold until it reaches them — records are signed and replicated, and
+there is no unsend on a broadcast medium.`, record.MaxFileDescLen),
 		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			area, name, text := args[0], args[1], args[2]
@@ -85,7 +86,16 @@ medium.`, record.MaxFileDescLen),
 				// is strictly more authority than any capability grants — a
 				// permission check here would be theatre, and the audit log
 				// already records who ran it.
-				if err := st.SetFileDescription(ctx, area, name, text, "cli"); err != nil {
+				//
+				// Through the service so a federated area gets a new FILE
+				// record: the description travels in one, so editing it here
+				// and stopping would leave every peer holding the old text.
+				key, err := e.nodeKey()
+				if err != nil {
+					return err
+				}
+				svc := bbs.New(st, key, e.clock)
+				if err := svc.DescribeFile(ctx, area, name, text, "cli"); err != nil {
 					return err
 				}
 

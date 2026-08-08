@@ -44,6 +44,10 @@ type GossipStore struct {
 	keys map[identity.NodeID][]byte
 	// areas caches the federated area list, refreshed by Refresh.
 	areas []record.AreaTag
+	// fileAreas is the subset of those that hold files rather than messages.
+	// The governor prices the two differently (§7.6), and the tag alone does
+	// not say which is which — the tag is a hash of a name.
+	fileAreas map[record.AreaTag]bool
 }
 
 // NewGossipStore builds the adapter. The context bounds every query it makes,
@@ -52,7 +56,11 @@ func NewGossipStore(ctx context.Context, st *Store, onError func(error)) (*Gossi
 	if onError == nil {
 		onError = func(error) {}
 	}
-	g := &GossipStore{st: st, ctx: ctx, onError: onError, keys: map[identity.NodeID][]byte{}}
+	g := &GossipStore{
+		st: st, ctx: ctx, onError: onError,
+		keys:      map[identity.NodeID][]byte{},
+		fileAreas: map[record.AreaTag]bool{},
+	}
 	if err := g.Refresh(); err != nil {
 		return nil, err
 	}
@@ -66,16 +74,18 @@ func NewGossipStore(ctx context.Context, st *Store, onError func(error)) (*Gossi
 // Areas() is on the digest path and runs every beat.
 func (g *GossipStore) Refresh() error {
 	rows, err := g.st.db.QueryContext(g.ctx,
-		`SELECT tag FROM areas WHERE federated = 1 ORDER BY tag`)
+		`SELECT tag, kind FROM areas WHERE federated = 1 ORDER BY tag`)
 	if err != nil {
 		return fmt.Errorf("list federated areas: %w", err)
 	}
 	defer rows.Close()
 
 	var out []record.AreaTag
+	files := map[record.AreaTag]bool{}
 	for rows.Next() {
 		var tag []byte
-		if err := rows.Scan(&tag); err != nil {
+		var kind string
+		if err := rows.Scan(&tag, &kind); err != nil {
 			return fmt.Errorf("scan area tag: %w", err)
 		}
 		if len(tag) != 4 {
@@ -92,6 +102,9 @@ func (g *GossipStore) Refresh() error {
 			continue
 		}
 		out = append(out, a)
+		if AreaKind(kind) == KindFile {
+			files[a] = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -99,8 +112,23 @@ func (g *GossipStore) Refresh() error {
 
 	g.mu.Lock()
 	g.areas = out
+	g.fileAreas = files
 	g.mu.Unlock()
 	return nil
+}
+
+// IsFileArea reports whether a federated area holds files rather than messages.
+//
+// This exists for the governor. §7.6 puts the file catalog at the bottom of the
+// priority order, below forum posts, and an area tag is a hash of a name — it
+// carries no hint of what it holds, so the classifier has to ask something that
+// knows. Asking THIS is deliberate: it is already refreshed whenever the area
+// list changes, so a file area created while the node is running is priced
+// correctly without a restart.
+func (g *GossipStore) IsFileArea(tag record.AreaTag) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.fileAreas[tag]
 }
 
 // RosterArea is the area NODE and SUCCESSION records live in.

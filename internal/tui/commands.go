@@ -27,7 +27,7 @@ type (
 	fileAreasLoadedMsg struct{ areas []store.Area }
 	filesLoadedMsg     struct {
 		area  string
-		files []store.File
+		files []store.CatalogEntry
 	}
 
 	// fileDescribedMsg carries a write and the reload that follows it as ONE
@@ -41,7 +41,7 @@ type (
 	// ordering question instead of relying on an answer to it.
 	fileDescribedMsg struct {
 		area   string
-		files  []store.File
+		files  []store.CatalogEntry
 		status statusMsg
 	}
 )
@@ -77,9 +77,11 @@ func (m Model) loadFileAreas() tea.Cmd {
 	}
 }
 
+// loadFiles reads what the whole NETWORK has in an area, not just what this
+// node holds — that is the point of a replicating catalog (§6.5).
 func (m Model) loadFiles(area string) tea.Cmd {
 	return func() tea.Msg {
-		files, err := m.cfg.Store.ListFiles(m.ctx, area)
+		files, err := m.cfg.Store.ListAreaContents(m.ctx, area)
 		if err != nil {
 			return statusMsg{text: err.Error(), isErr: true}
 		}
@@ -104,7 +106,10 @@ func (m Model) describeFile(area, name, text string) tea.Cmd {
 		if !f.MayDescribe(nick, sysop) {
 			return statusMsg{text: "You can only describe files you uploaded.", isErr: true}
 		}
-		if err := m.cfg.Store.SetFileDescription(m.ctx, area, name, text, nick); err != nil {
+		// Through the service, not the store: in a federated area the
+		// description travels in a FILE record, so changing it has to mint a
+		// new one or peers keep the old text forever.
+		if err := m.cfg.Service.DescribeFile(m.ctx, area, name, text, nick); err != nil {
 			return statusMsg{text: err.Error(), isErr: true}
 		}
 
@@ -114,8 +119,9 @@ func (m Model) describeFile(area, name, text string) tea.Cmd {
 		}
 
 		// Re-read here, in the same command, so the listing the user lands on
-		// cannot predate the write.
-		files, err := m.cfg.Store.ListFiles(m.ctx, area)
+		// cannot predate the write. ListAreaContents, not ListFiles, because
+		// that is the listing the user is looking at — the network-wide one.
+		files, err := m.cfg.Store.ListAreaContents(m.ctx, area)
 		if err != nil {
 			return statusMsg{text: err.Error(), isErr: true}
 		}

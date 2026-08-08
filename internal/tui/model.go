@@ -156,7 +156,7 @@ type Model struct {
 	peers       []Peer
 	fileAreas   []store.Area
 	fileAreaIdx int
-	files       []store.File
+	files       []store.CatalogEntry
 	fileIdx     int
 	// fileArea is the area the file list belongs to, held because the list
 	// itself carries the name on every row and the title needs it once.
