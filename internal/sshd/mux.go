@@ -108,6 +108,15 @@ type connMux struct {
 // double keypress, and neither wants to be served eventually.
 var errMuxBusy = errors.New("the connection is already lent to another program")
 
+// errBorrowEnded releases a reader that outlived the borrow it belonged to.
+//
+// A door bridge copies the user's keystrokes into the door, and that copy is
+// parked in a read when the door exits — there is nothing to interrupt it with,
+// because the bytes it is waiting for have not arrived. Leaving it parked would
+// leak a goroutine per door launch and, worse, leave something that still
+// believes it is entitled to the user's input. Ending the borrow releases it.
+var errBorrowEnded = errors.New("the program that borrowed this connection has finished")
+
 // port is one consumer's view of the connection. Identity is the pointer.
 type port struct{ m *connMux }
 
@@ -243,6 +252,12 @@ func (p *port) Read(b []byte) (int, error) {
 		}
 		if m.closed {
 			return 0, io.EOF
+		}
+		// A port that is neither active nor the TUI's is a finished borrow:
+		// nothing can make it active again, so waiting for a turn would be
+		// waiting forever. Only the TUI's port gets to park between turns.
+		if !mine && p != m.tui {
+			return 0, errBorrowEnded
 		}
 		m.ready.Wait()
 	}

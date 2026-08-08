@@ -678,3 +678,49 @@ func awaitScreen(t *testing.T, out *syncBuffer, want string, timeout time.Durati
 }
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][A-Za-z0-9]`)
+
+// A door bridge's keystroke copier is parked in a read when the door exits, and
+// nothing can interrupt it — the bytes it waits for have not arrived. Ending
+// the borrow is what releases it, and it must do so promptly: otherwise every
+// door launch leaks a goroutine that still believes it is owed the user's input.
+func TestMuxReleasesABorrowersReaderWhenTheBorrowEnds(t *testing.T) {
+	m, _, _ := newTestMux(t)
+
+	parked := make(chan error, 1)
+	release := make(chan struct{})
+
+	err := m.Borrow(func(rw io.ReadWriter) error {
+		go func() {
+			buf := make([]byte, 16)
+			_, err := rw.Read(buf)
+			parked <- err
+		}()
+		// Let the copier reach its blocking read before the borrow ends.
+		time.Sleep(20 * time.Millisecond)
+		select {
+		case err := <-parked:
+			t.Errorf("the read returned %v while the borrow was still live", err)
+		default:
+		}
+		close(release)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("borrow: %v", err)
+	}
+	<-release
+
+	select {
+	case err := <-parked:
+		if !errors.Is(err, errBorrowEnded) {
+			t.Errorf("the parked read returned %v, want %v", err, errBorrowEnded)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the borrower's reader is still parked after the borrow ended")
+	}
+
+	// And the TUI has its input back.
+	if err := m.Borrow(func(io.ReadWriter) error { return nil }); err != nil {
+		t.Errorf("borrow after release: %v", err)
+	}
+}
