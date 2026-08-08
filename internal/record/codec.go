@@ -68,6 +68,13 @@ func Unmarshal(b []byte) (*Record, error) {
 	if !bytes.Equal(reencoded, canonical) {
 		return nil, errors.New("non-canonical record encoding: the same record has another wire form")
 	}
+
+	// §7.5: a FILE record arriving from a peer carries a catalog entry, not a
+	// file. Rejected here rather than skipped later, so content that should
+	// never have been sent cannot enter the log and be relayed onward.
+	if err := checkNoFileContent(r); err != nil {
+		return nil, err
+	}
 	// Retain the exact bytes rather than re-encoding. This is what makes an
 	// encoder change unable to invalidate stored history.
 	r.signed = append([]byte(nil), canonical...)

@@ -360,3 +360,41 @@ func FileSize(f FileBody) int {
 	// Record framing plus the body; the signature dominates, as everywhere.
 	return 64 + 8 + 8 + 4 + 1 + 4 + FileBodyLen(f)
 }
+
+// checkNoFileContent enforces §7.5 at the type level.
+//
+// # The rule
+//
+// "The mesh Link implementation rejects file payloads. This is a type-level
+// constraint, not a config option: FILE_DATA is not in the set of record types
+// the mesh link will serialize. There is no sysop flag to turn it on and no
+// size threshold below which it's allowed."
+//
+// # Why it lives here rather than in the link
+//
+// A link moves opaque datagrams; by the time bytes reach one, nothing knows
+// they were a record. The place a file's content could actually get onto the
+// air is a FILE record with a body far larger than a catalog entry — the
+// generic path allows a body up to MaxBodyLen, which is 8 KiB, and 8 KiB is a
+// small file.
+//
+// So the constraint is enforced where a FILE record is BUILT and where one is
+// DECODED: a FILE body must parse as a catalog entry, and a catalog entry's
+// fields are each bounded. A FILE record therefore cannot be large enough to
+// carry content, on any link, by construction rather than by inspection. That
+// also makes it link-independent, which is right — a catalog entry stuffed with
+// file bytes is wrong over IP too, and §7.5's fetch path 1 is a direct transfer
+// between BBSes, not a record.
+//
+// This is what closes the "it will be tempting to violate" door §7.5 names: the
+// tempting change is a size threshold, and there is nowhere to put one.
+func checkNoFileContent(r *Record) error {
+	if r.Type != TypeFile {
+		return nil
+	}
+	if _, err := UnmarshalFileBody(r.Body); err != nil {
+		return fmt.Errorf("FILE record body is not a catalog entry (§7.5 forbids "+
+			"file content in a record, at any size): %w", err)
+	}
+	return nil
+}

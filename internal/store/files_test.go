@@ -292,9 +292,12 @@ func TestSetFileRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, err := record.New(key, record.Record{
-		Origin: key.ID(), Seq: seq, TS: 1, Type: record.TypeFile,
-		Area: record.AreaTagFor("utils"), Body: []byte("body"),
+	wire, err := record.TruncateFileHash(saved.Hash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewFileRecord(key, seq, 1, record.AreaTagFor("utils"), record.FileBody{
+		Name: "PUB.TXT", Size: 2, Hash: wire,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -590,14 +593,28 @@ func TestCatalogSkipsAnUnparseableEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	junk, err := record.New(self, record.Record{
-		Origin: self.ID(), Seq: 1, TS: 1_700_000_000, Type: record.TypeFile,
-		Area: area.Tag, Body: []byte("not a FILE body"),
+	// A record with an unparseable FILE body can no longer be BUILT — §7.5 is
+	// enforced in record.New and on decode. So this writes one straight into
+	// the table, standing in for a row that predates that rule or arrives in
+	// some future format. The skip below is the last line of defence, and it
+	// still has to hold.
+	junkHash := fileHashOf(0x99)
+	junkWire, err := record.TruncateFileHash(junkHash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	junk, err := record.NewFileRecord(self, 1, 1_700_000_000, area.Tag, record.FileBody{
+		Name: "JUNK.ZIP", Size: 1, Hash: junkWire,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := local.PutRecord(ctx, junk); err != nil {
+		t.Fatal(err)
+	}
+	id := junk.ID()
+	if _, err := local.db.ExecContext(ctx,
+		`UPDATE records SET body = ? WHERE id = ?`, []byte("not a FILE body"), id[:]); err != nil {
 		t.Fatal(err)
 	}
 
