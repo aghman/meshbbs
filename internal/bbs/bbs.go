@@ -157,6 +157,116 @@ func (s *Service) Post(ctx context.Context, author, areaName, subject, text stri
 	return rec.ID(), nil
 }
 
+// AddFile catalogues a file and, in a federated area, announces it (§6.5).
+//
+// The caller writes the BYTES first, through the blob store, and passes the
+// hash it got back. Same ordering rule as the SFTP path it serves: a failure
+// here leaves an unreferenced blob a maintenance pass can collect, where the
+// other order would leave a catalog row promising content nobody wrote.
+//
+// What travels is the catalog entry, never the file. That is not enforced here
+// but one layer down, in the set of record types the mesh link will serialize
+// (§7.5) — a rule this function could not weaken if it tried.
+func (s *Service) AddFile(ctx context.Context, areaName string, f store.File) (store.File, error) {
+	area, err := s.store.GetFileArea(ctx, areaName)
+	if err != nil {
+		return store.File{}, err
+	}
+	if area.ReadOnly {
+		return store.File{}, fmt.Errorf("%w: %s is read-only", ErrNotPermitted, area.Name)
+	}
+	if err := s.checkFederatedUpload(ctx, area, f.Uploader); err != nil {
+		return store.File{}, err
+	}
+
+	saved, err := s.store.PutFile(ctx, area.Name, f)
+	if err != nil {
+		return store.File{}, err
+	}
+	if !area.Federated {
+		return saved, nil
+	}
+
+	// From here on, nothing may fail the upload. The file is catalogued and it
+	// is the user's; announcing it is how OTHER instances find out, and §7.3
+	// repairs a missed announcement by anti-entropy rather than by making the
+	// user upload again.
+	rec, err := s.newFileRecord(ctx, area, saved)
+	if err != nil {
+		OnPublishError(fmt.Errorf("building the catalog entry for %s: %w", saved.Name, err))
+		return saved, nil
+	}
+	if err := s.store.PutRecord(ctx, rec); err != nil {
+		OnPublishError(fmt.Errorf("storing the catalog entry for %s: %w", saved.Name, err))
+		return saved, nil
+	}
+	if err := s.store.SetFileRecord(ctx, saved.ID, rec.ID()); err != nil {
+		OnPublishError(fmt.Errorf("linking the catalog entry for %s: %w", saved.Name, err))
+		return saved, nil
+	}
+	saved.Record = rec.ID()
+	s.publish(area.Tag, rec)
+	return saved, nil
+}
+
+// checkFederatedUpload applies the [N7] gate to a file area.
+//
+// Same capability as posting, and deliberately not a fifth one: the grant is
+// named for what it protects, which is the network's shared airtime, and a file
+// area on the mesh spends exactly that. A separate cap here would be a role
+// ladder describing one abuse vector twice.
+func (s *Service) checkFederatedUpload(ctx context.Context, area store.Area, uploader string) error {
+	if !area.Federated || uploader == "" {
+		return nil
+	}
+	ok, err := s.store.HasCapability(ctx, uploader, store.CapPostFederated)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf(
+			"%w: %s is a federated file area, and listing a file there spends the mesh "+
+				"network's shared airtime. Ask the sysop for the %s capability",
+			ErrNotPermitted, area.Name, store.CapPostFederated)
+	}
+	return nil
+}
+
+// CanUploadTo reports whether a user may add files to an area.
+//
+// Exposed so the SFTP layer can refuse before a byte is transferred. A client
+// that spends four minutes pushing a file over a slow link and is then told it
+// lacked a capability has been told too late.
+func (s *Service) CanUploadTo(ctx context.Context, areaName, uploader string) error {
+	area, err := s.store.GetFileArea(ctx, areaName)
+	if err != nil {
+		return err
+	}
+	if area.ReadOnly {
+		return fmt.Errorf("%w: %s is read-only", ErrNotPermitted, area.Name)
+	}
+	return s.checkFederatedUpload(ctx, area, uploader)
+}
+
+// newFileRecord builds the signed catalog entry for a stored file.
+func (s *Service) newFileRecord(ctx context.Context, area store.Area, f store.File) (*record.Record, error) {
+	hash, err := record.TruncateFileHash(f.Hash[:])
+	if err != nil {
+		return nil, err
+	}
+	body := record.FileBody{
+		Name:        f.Name,
+		Size:        uint64(f.Size),
+		Hash:        hash,
+		Description: f.Description,
+	}
+	seq, err := s.store.NextSeq(ctx, area.Tag)
+	if err != nil {
+		return nil, err
+	}
+	return record.NewFileRecord(s.key, seq, uint32(s.clock.Now().Unix()), area.Tag, body)
+}
+
 // SendDM composes and stores an encrypted direct message.
 //
 // Note what this does NOT need: the sender's private key. Sealing requires

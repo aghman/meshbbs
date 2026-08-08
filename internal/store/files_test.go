@@ -9,7 +9,7 @@ import (
 	"github.com/aghman/meshbbs/internal/record"
 )
 
-func hashOf(b byte) blobstore.Hash {
+func fileHashOf(b byte) blobstore.Hash {
 	var h blobstore.Hash
 	for i := range h {
 		h[i] = b
@@ -24,7 +24,7 @@ func TestPutAndListFiles(t *testing.T) {
 	}
 
 	saved, err := s.PutFile(ctx, "utils", File{
-		Name: "ARCHIVE.ZIP", Hash: hashOf(0x11), Size: 4096,
+		Name: "ARCHIVE.ZIP", Hash: fileHashOf(0x11), Size: 4096,
 		Description: "an archive", Uploader: "austin",
 	})
 	if err != nil {
@@ -51,7 +51,7 @@ func TestPutAndListFiles(t *testing.T) {
 	if got.Name != "ARCHIVE.ZIP" || got.Size != 4096 || got.Uploader != "austin" {
 		t.Errorf("round trip lost data: %+v", got)
 	}
-	if got.Hash != hashOf(0x11) {
+	if got.Hash != fileHashOf(0x11) {
 		t.Errorf("hash came back as %s", got.Hash)
 	}
 }
@@ -65,7 +65,7 @@ func TestSameContentInTwoAreasSharesOneBlob(t *testing.T) {
 		}
 	}
 
-	h := hashOf(0x22)
+	h := fileHashOf(0x22)
 	for _, area := range []string{"utils", "games"} {
 		if _, err := s.PutFile(ctx, area, File{Name: "SHARED.DAT", Hash: h, Size: 12}); err != nil {
 			t.Fatalf("put in %s: %v", area, err)
@@ -86,10 +86,10 @@ func TestDuplicateNameInAreaIsRefused(t *testing.T) {
 	if _, err := s.CreateFileArea(ctx, "utils", "", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.PutFile(ctx, "utils", File{Name: "DUP.TXT", Hash: hashOf(1), Size: 1}); err != nil {
+	if _, err := s.PutFile(ctx, "utils", File{Name: "DUP.TXT", Hash: fileHashOf(1), Size: 1}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.PutFile(ctx, "utils", File{Name: "DUP.TXT", Hash: hashOf(2), Size: 1})
+	_, err := s.PutFile(ctx, "utils", File{Name: "DUP.TXT", Hash: fileHashOf(2), Size: 1})
 	if !errors.Is(err, ErrFileExists) {
 		t.Errorf("second upload under the same name returned %v, want ErrFileExists", err)
 	}
@@ -207,7 +207,7 @@ func TestRemoveFileReportsOrphanedBlob(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	h := hashOf(0x33)
+	h := fileHashOf(0x33)
 	for _, area := range []string{"utils", "games"} {
 		if _, err := s.PutFile(ctx, area, File{Name: "SHARED.DAT", Hash: h, Size: 8}); err != nil {
 			t.Fatal(err)
@@ -249,7 +249,7 @@ func TestHoldsBlobMatchesTruncatedWireHash(t *testing.T) {
 	if _, err := s.CreateFileArea(ctx, "utils", "", false); err != nil {
 		t.Fatal(err)
 	}
-	h := hashOf(0x44)
+	h := fileHashOf(0x44)
 	if _, err := s.PutFile(ctx, "utils", File{Name: "HELD.BIN", Hash: h, Size: 3}); err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestHoldsBlobMatchesTruncatedWireHash(t *testing.T) {
 		t.Error("HoldsBlob said no for content we hold, matched on the wire prefix")
 	}
 
-	absent := hashOf(0x99)
+	absent := fileHashOf(0x99)
 	held, err = s.HoldsBlob(ctx, absent[:16])
 	if err != nil {
 		t.Fatal(err)
@@ -283,7 +283,7 @@ func TestSetFileRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	saved, err := s.PutFile(ctx, "utils", File{Name: "PUB.TXT", Hash: hashOf(0x55), Size: 2})
+	saved, err := s.PutFile(ctx, "utils", File{Name: "PUB.TXT", Hash: fileHashOf(0x55), Size: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestCountFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"A.TXT", "B.TXT", "C.TXT"} {
-		if _, err := s.PutFile(ctx, "utils", File{Name: name, Hash: hashOf(byte(len(name))), Size: 1}); err != nil {
+		if _, err := s.PutFile(ctx, "utils", File{Name: name, Hash: fileHashOf(byte(len(name))), Size: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -363,5 +363,264 @@ func TestCountFiles(t *testing.T) {
 	}
 	if n != 3 {
 		t.Errorf("CountFiles = %d, want 3", n)
+	}
+}
+
+// A catalog entry arriving from a PEER, through the real ingest path.
+//
+// This is the half of §6.5 that nothing else covers: emission is tested where
+// records are minted, but the receiving side has to verify a stranger's
+// signature, store the record, and then surface a file it does not hold. Two
+// real stores, and the record crosses between them as bytes.
+func TestCatalogEntryFromAPeer(t *testing.T) {
+	local, ctx := testStore(t)
+	area, err := local.CreateFileArea(ctx, "meshwide", "shared", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Us, and a peer whose NODE record we hold — without it the record is
+	// quarantined, which is §6.1.2 working rather than a failure.
+	self := testKey(t, 1)
+	if err := local.PutNode(ctx, Node{ID: self.ID(), PublicKey: self.Public, IsSelf: true}); err != nil {
+		t.Fatal(err)
+	}
+	peer := trustedKey(t, local, ctx, 2)
+
+	g, err := NewGossipStore(ctx, local, func(err error) { t.Logf("gossipstore: %v", err) })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	peerHash := fileHashOf(0xEE)
+	wire, err := record.TruncateFileHash(peerHash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewFileRecord(peer, 1, 1_700_000_500, area.Tag, record.FileBody{
+		Name: "PEER.ZIP", Size: 512_000, Hash: wire, Description: "Held over there",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Cross the wire as bytes, so the signature is checked against what was
+	// actually transmitted rather than an in-process struct.
+	arrived, err := record.Unmarshal(rec.Marshal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, err := g.Apply(area.Tag, []*record.Record{arrived})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 1 {
+		t.Fatalf("Apply took %d records, want 1", added)
+	}
+
+	entries, err := local.ListCatalog(ctx, "meshwide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("catalog has %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Name != "PEER.ZIP" || e.Size != 512_000 || e.Description != "Held over there" {
+		t.Errorf("entry is %+v", e)
+	}
+	if e.Origin != peer.ID() {
+		t.Error("the entry is not attributed to the peer that announced it")
+	}
+	if e.Local {
+		t.Error("a peer's entry is marked local")
+	}
+	// The whole point of the catalog: we know about it and we do not have it.
+	if e.Held {
+		t.Error("we claim to hold content that never crossed the mesh")
+	}
+}
+
+// Our own files and a peer's appear in one listing, each labelled.
+func TestCatalogMixesLocalAndRemote(t *testing.T) {
+	local, ctx := testStore(t)
+	area, err := local.CreateFileArea(ctx, "meshwide", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := testKey(t, 1)
+	if err := local.PutNode(ctx, Node{ID: self.ID(), PublicKey: self.Public, IsSelf: true}); err != nil {
+		t.Fatal(err)
+	}
+	peer := trustedKey(t, local, ctx, 2)
+	g, err := NewGossipStore(ctx, local, func(err error) { t.Logf("gossipstore: %v", err) })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ours: catalogued locally AND announced, so we hold the content.
+	ourHash := fileHashOf(0x11)
+	if _, err := local.PutFile(ctx, "meshwide", File{
+		Name: "OURS.ZIP", Hash: ourHash, Size: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ourWire, err := record.TruncateFileHash(ourHash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	ourSeq, err := local.NextSeq(ctx, area.Tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ourRec, err := record.NewFileRecord(self, ourSeq, 1_700_000_100, area.Tag, record.FileBody{
+		Name: "OURS.ZIP", Size: 100, Hash: ourWire,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.PutRecord(ctx, ourRec); err != nil {
+		t.Fatal(err)
+	}
+
+	// Theirs: announced only.
+	theirHash := fileHashOf(0x22)
+	theirWire, err := record.TruncateFileHash(theirHash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirRec, err := record.NewFileRecord(peer, 1, 1_700_000_200, area.Tag, record.FileBody{
+		Name: "THEIRS.ZIP", Size: 200, Hash: theirWire,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Apply(area.Tag, []*record.Record{theirRec}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := local.ListCatalog(ctx, "meshwide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("catalog has %d entries, want 2", len(entries))
+	}
+	byName := map[string]CatalogEntry{}
+	for _, e := range entries {
+		byName[e.Name] = e
+	}
+	if ours := byName["OURS.ZIP"]; !ours.Local || !ours.Held {
+		t.Errorf("our own file is %+v, want local and held", ours)
+	}
+	if theirs := byName["THEIRS.ZIP"]; theirs.Local || theirs.Held {
+		t.Errorf("the peer's file is %+v, want neither local nor held", theirs)
+	}
+}
+
+// Content addressing means a peer announcing a file we ALREADY have is
+// recognised as such, without either side asking. That is what makes "held by"
+// answerable at all (§6.5).
+func TestCatalogRecognisesContentWeAlreadyHold(t *testing.T) {
+	local, ctx := testStore(t)
+	area, err := local.CreateFileArea(ctx, "meshwide", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := testKey(t, 1)
+	if err := local.PutNode(ctx, Node{ID: self.ID(), PublicKey: self.Public, IsSelf: true}); err != nil {
+		t.Fatal(err)
+	}
+	peer := trustedKey(t, local, ctx, 2)
+	g, err := NewGossipStore(ctx, local, func(err error) { t.Logf("gossipstore: %v", err) })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// We hold this content, under our own name for it.
+	shared := fileHashOf(0x33)
+	if _, err := local.PutFile(ctx, "meshwide", File{
+		Name: "MY-NAME-FOR-IT.ZIP", Hash: shared, Size: 4096,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The peer announces the same bytes under a different name.
+	wire, err := record.TruncateFileHash(shared[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewFileRecord(peer, 1, 1_700_000_300, area.Tag, record.FileBody{
+		Name: "THEIR-NAME.ZIP", Size: 4096, Hash: wire,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Apply(area.Tag, []*record.Record{rec}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := local.ListCatalog(ctx, "meshwide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var theirs CatalogEntry
+	for _, e := range entries {
+		if e.Name == "THEIR-NAME.ZIP" {
+			theirs = e
+		}
+	}
+	if theirs.Name == "" {
+		t.Fatal("the peer's entry is missing")
+	}
+	if !theirs.Held {
+		t.Error("we hold these exact bytes but the catalog says we do not")
+	}
+}
+
+// One unparseable entry from one peer must not blank the listing.
+func TestCatalogSkipsAnUnparseableEntry(t *testing.T) {
+	local, ctx := testStore(t)
+	area, err := local.CreateFileArea(ctx, "meshwide", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := testKey(t, 1)
+	if err := local.PutNode(ctx, Node{ID: self.ID(), PublicKey: self.Public, IsSelf: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	junk, err := record.New(self, record.Record{
+		Origin: self.ID(), Seq: 1, TS: 1_700_000_000, Type: record.TypeFile,
+		Area: area.Tag, Body: []byte("not a FILE body"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.PutRecord(ctx, junk); err != nil {
+		t.Fatal(err)
+	}
+
+	hash := fileHashOf(0x44)
+	wire, err := record.TruncateFileHash(hash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	good, err := record.NewFileRecord(self, 2, 1_700_000_001, area.Tag, record.FileBody{
+		Name: "GOOD.ZIP", Size: 1, Hash: wire,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.PutRecord(ctx, good); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := local.ListCatalog(ctx, "meshwide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "GOOD.ZIP" {
+		t.Errorf("catalog is %+v, want just the parseable entry", entries)
 	}
 }

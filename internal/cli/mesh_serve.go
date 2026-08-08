@@ -139,6 +139,7 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 	// ham mode is what the radio reports and a sysop can turn it on without
 	// restarting the BBS.
 	outbox, err := federationOutbox(key.ID(), ml, dict,
+		gstore.IsFileArea,
 		func() bool { return ml.Part97().AllowsEncryptedDMs() }, log)
 	if err != nil {
 		ml.Close()
@@ -181,12 +182,13 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 // article over a fake link and check that they are, which is exactly what was
 // missing when the classifier was left unset.
 func federationOutbox(self identity.NodeID, sender bsmp.Sender, dict *bundle.Dictionary,
+	isFileArea func(record.AreaTag) bool,
 	allowEncryptedDMs func() bool, log *slog.Logger) (*bsmp.Outbox, error) {
 	return bsmp.NewOutbox(bsmp.Config{
 		Self:              self,
 		Link:              sender,
 		Dictionary:        dict,
-		Classify:          classifyArea,
+		Classify:          classifierFor(isFileArea),
 		AllowEncryptedDMs: allowEncryptedDMs,
 		OnRefusedDM: func(area record.AreaTag) {
 			log.Warn("mail held back", "area", area,
@@ -209,22 +211,32 @@ func federationOutbox(self identity.NodeID, sender bsmp.Sender, dict *bundle.Dic
 // Mail does not federate yet (record.DMArea), so today the DM arm is a policy
 // that is in place before the traffic is, rather than dead code — it is what
 // makes the ham-mode block correct the moment mail does go on the wire.
-func classifyArea(area record.AreaTag) governor.Class {
-	switch area {
-	case store.RosterArea:
-		return governor.ClassControl
-	case record.DMArea:
-		return governor.ClassDM
-	default:
+// classifierFor builds the production classifier over a file-area lookup.
+//
+// An area tag is a hash of a name and says nothing about what the area holds,
+// so the file-catalog arm cannot be a pure function of the tag — it has to ask
+// something that tracks the areas. The lookup is the gossip store's, which is
+// already refreshed whenever the area list changes, so a file area created
+// while the node is running gets the right price without a restart.
+//
+// A nil lookup means "no file areas", which is what a caller with no store
+// wants and never silently misprices anything else.
+func classifierFor(isFileArea func(record.AreaTag) bool) bsmp.Classifier {
+	return func(area record.AreaTag) governor.Class {
+		switch area {
+		case store.RosterArea:
+			return governor.ClassControl
+		case record.DMArea:
+			return governor.ClassDM
+		}
+		// §7.5: a file area's records are catalog entries, and §7.6 puts them at
+		// the bottom of the priority order — below forum posts, because a file
+		// listing that arrives an hour late costs nobody anything, and under
+		// backpressure the classes are dropped from the bottom.
+		if isFileArea != nil && isFileArea(area) {
+			return governor.ClassFileCatalog
+		}
 		// Forums, and the user directory with them.
-		//
-		// File areas now exist and carry their own tags, so this arm is where a
-		// federated one currently lands — as forum traffic rather than the
-		// ClassFileCatalog §7.6 assigns it. Nothing is misclassified on air yet,
-		// because a file area holds no records until FILE records exist. The arm
-		// belongs with them: classifying by tag needs to know which tags are file
-		// areas, and this function is deliberately a pure function of the tag
-		// with no store behind it.
 		return governor.ClassForum
 	}
 }

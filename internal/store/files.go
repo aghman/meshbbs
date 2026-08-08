@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/aghman/meshbbs/internal/blobstore"
+	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/record"
 )
 
@@ -329,4 +330,98 @@ func (s *Store) CountFiles(ctx context.Context, areaName string) (int, error) {
 		return 0, fmt.Errorf("count files: %w", err)
 	}
 	return n, nil
+}
+
+// CatalogEntry is one file known to the network (§6.5).
+//
+// It comes from the RECORD LOG, not the files table: the log is what peers
+// replicate, so a file held by another BBS appears here and nowhere else. The
+// same relationship ListPosts has to POST records — the log is the catalog, and
+// the local tables say only what this node happens to hold.
+type CatalogEntry struct {
+	Name        string
+	Size        int64
+	Description string
+
+	// Origin is the BBS that announced the file, which is also the BBS holding
+	// it. There is no separate "held by" field on the wire because this IS it.
+	Origin identity.NodeID
+
+	// Local reports whether this node announced the entry.
+	Local bool
+
+	// Held reports whether this node has the content, matched on the truncated
+	// wire hash. False is the ordinary case for a peer's file, not an error:
+	// mesh replicates catalogs and never bytes (§7.5).
+	Held bool
+
+	TS int64
+}
+
+// ListCatalog returns everything the network has announced in a file area.
+func (s *Store) ListCatalog(ctx context.Context, areaName string) ([]CatalogEntry, error) {
+	area, err := s.GetFileArea(ctx, areaName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Resolve our own ID BEFORE opening the result set: the pool is capped at
+	// one connection, so a query issued while rows are open waits for a
+	// connection only closing those rows can release. See ListPosts.
+	self, selfErr := s.SelfNode(ctx)
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.origin, r.ts, r.body
+		FROM records r
+		WHERE r.area = ? AND r.type = ?
+		ORDER BY r.ts, r.seq`, area.Tag[:], uint8(record.TypeFile))
+	if err != nil {
+		return nil, fmt.Errorf("list catalog: %w", err)
+	}
+
+	type pending struct {
+		entry CatalogEntry
+		hash  []byte
+	}
+	var found []pending
+	for rows.Next() {
+		var origin, body []byte
+		var ts int64
+		if err := rows.Scan(&origin, &ts, &body); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		// A body we cannot parse is skipped rather than fatal, the same way
+		// ListPosts treats a post: one malformed record from one peer must not
+		// blank the whole listing.
+		fb, err := record.UnmarshalFileBody(body)
+		if err != nil {
+			continue
+		}
+		e := CatalogEntry{
+			Name: fb.Name, Size: int64(fb.Size), Description: fb.Description, TS: ts,
+		}
+		if len(origin) == identity.NodeIDLen {
+			copy(e.Origin[:], origin)
+			e.Local = selfErr == nil && e.Origin == self.ID
+		}
+		found = append(found, pending{entry: e, hash: append([]byte(nil), fb.Hash[:]...)})
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	// Now the connection is free, ask what we hold.
+	out := make([]CatalogEntry, 0, len(found))
+	for _, p := range found {
+		held, err := s.HoldsBlob(ctx, p.hash)
+		if err != nil {
+			return nil, err
+		}
+		p.entry.Held = held
+		out = append(out, p.entry)
+	}
+	return out, nil
 }
