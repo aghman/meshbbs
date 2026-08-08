@@ -30,6 +30,10 @@ import (
 // speaks. (The test harness in harness_test.go drives Update synchronously
 // instead, which is why it needs timeouts and a cascade budget; that is a
 // deliberately different trade for determinism, not duplication to merge.)
+//
+// A tea.Sequence is the exception, and honouring it is not optional: its whole
+// contract is that each command finishes before the next begins. Callers reach
+// for it precisely where a reload must not race the write it is meant to show.
 type Driver struct {
 	mu     sync.Mutex
 	model  Model
@@ -195,39 +199,100 @@ func (d *Driver) markDirty() {
 
 // dispatch runs a command off the pump, feeding its result back in.
 func (d *Driver) dispatch(cmd tea.Cmd) {
-	if cmd == nil {
+	if cmd == nil || !d.live() {
 		return
 	}
-	select {
-	case <-d.ctx.Done():
-		return
-	default:
-	}
-
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-
-		msg := cmd()
-		if msg == nil {
-			return
-		}
-		// tea.Batch returns an exported BatchMsg, but tea.Sequence returns an
-		// UNEXPORTED sequenceMsg, and both are really just []tea.Cmd. Handling
-		// only the exported one silently drops every sequenced command.
-		if cmds, ok := asCommandSlice(msg); ok {
-			for _, c := range cmds {
-				d.dispatch(c)
-			}
-			return
-		}
-
-		select {
-		case <-d.ctx.Done():
-		default:
-			d.Send(msg)
-		}
+		d.exec(cmd)
 	}()
+}
+
+// exec runs one command on the CALLING goroutine and feeds its result back in.
+//
+// Running here rather than spawning is the whole point: it is what lets a
+// sequence hold the goroutine while it works through its members in order.
+func (d *Driver) exec(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	msg := cmd()
+	if msg == nil {
+		return
+	}
+
+	// tea.Batch returns an exported BatchMsg, but tea.Sequence returns an
+	// UNEXPORTED sequenceMsg, and both are really just []tea.Cmd. Handling only
+	// the exported one silently drops every sequenced command — and treating
+	// them alike silently defeats Sequence, whose entire contract is ordering.
+	if cmds, ok := asCommandSlice(msg); ok {
+		if isBatch(msg) {
+			d.execBatch(cmds)
+			return
+		}
+		// A sequence: each command runs to completion, and its result is fed
+		// back through Update, before the next one starts. That is what makes
+		// "post, then reload the area" show the author their own post instead
+		// of racing the write it depends on.
+		for _, c := range cmds {
+			if !d.live() {
+				return
+			}
+			d.exec(c)
+		}
+		return
+	}
+
+	select {
+	case <-d.ctx.Done():
+	default:
+		d.Send(msg)
+	}
+}
+
+// execBatch runs commands concurrently and waits for them.
+//
+// Concurrency is Batch's contract — some of its members block indefinitely by
+// design, and the chat poller must not hold up its sibling refresh. The wait
+// matters only for a batch nested inside a sequence, where the step after it is
+// entitled to see everything the batch did.
+func (d *Driver) execBatch(cmds []tea.Cmd) {
+	var wg sync.WaitGroup
+	for _, c := range cmds {
+		if c == nil || !d.live() {
+			continue
+		}
+		wg.Add(1)
+		d.wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer d.wg.Done()
+			d.exec(c)
+		}()
+	}
+	wg.Wait()
+}
+
+// live reports whether the session is still running.
+func (d *Driver) live() bool {
+	select {
+	case <-d.ctx.Done():
+		return false
+	default:
+		return true
+	}
+}
+
+// isBatch distinguishes a concurrent batch from an ordered sequence.
+//
+// tea.BatchMsg is exported so it can be named; sequenceMsg is not, and the only
+// other []tea.Cmd message Bubble Tea produces IS that sequence. Erring towards
+// "sequence" is the safe way round: running a batch in order would only cost
+// concurrency, while running a sequence concurrently costs correctness.
+func isBatch(msg tea.Msg) bool {
+	_, ok := msg.(tea.BatchMsg)
+	return ok
 }
 
 // asCommandSlice reports whether msg is a slice of tea.Cmd, whatever its
