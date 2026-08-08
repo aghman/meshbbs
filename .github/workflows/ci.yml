@@ -230,6 +230,14 @@ jobs:
       # inbound traffic.
       - name: Fuzz mesh announcement parser
         run: .github/scripts/fuzz.sh ./internal/meshlink FuzzDecodeAnnounce 30s
+      # The door API's request parser. Unlike every target above it, what is on
+      # the other end is not a stranger on the mesh but a third-party binary the
+      # sysop installed, running with the server's privileges (§9.4) — no
+      # channel PSK to get past first, and a million malformed requests a second
+      # if it likes. The property is that a door cannot take the BBS down by
+      # talking nonsense to it.
+      - name: Fuzz door API request parser
+        run: .github/scripts/fuzz.sh ./internal/door FuzzAPIRequest 30s
 
   golden:
     name: Golden frames are stable

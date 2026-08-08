@@ -185,7 +185,7 @@ func newHarness(t *testing.T, clk clock.Clock, mode, arg string) *harness {
 
 	scr := &screen{}
 	return &harness{
-		mgr: New(clk, slog.New(slog.NewTextHandler(io.Discard, nil))),
+		mgr: New(clk, discardLogger()),
 		spec: Spec{
 			Name: "testdoor",
 			Path: self,
@@ -272,6 +272,11 @@ func (h *harness) sameDoorAs(other *harness) {
 }
 
 func realClock() clock.Clock { return clock.NewReal() }
+
+// discardLogger keeps test output about the work rather than about the door.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // ---------------------------------------------------------------------------
 // tests

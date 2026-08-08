@@ -54,6 +54,11 @@ type Spec struct {
 	// baseEnv. It REPLACES the server's environment rather than adding to it —
 	// see environ.
 	Env []string
+	// Grant is what the sysop allowed this door through the API (§9.1.1). It is
+	// ignored when the Manager has no Host, which is the case for a BBS that
+	// runs doors without offering them an API at all — §9.1 calls the socket
+	// optional and means it.
+	Grant Grant
 
 	// MaxConcurrent caps simultaneous instances of this door. Zero means no cap.
 	MaxConcurrent int
@@ -81,6 +86,19 @@ type Session struct {
 	Node int
 	// Resize carries later window sizes, and may be nil.
 	Resize <-chan Size
+
+	// Nick is the account playing, empty for a guest. A door API call that
+	// needs an account refuses when this is empty rather than inventing one.
+	Nick string
+	// RealName is shown to doors that ask; it is whatever the user chose to
+	// give, and may be empty (§6.7's collect_real_name).
+	RealName string
+	// ANSI and Encoding are the level-1 terminal capability hints.
+	ANSI     bool
+	Encoding string
+	// TimeRemaining reports how long this session has left. Nil means no
+	// limit, which a door is told explicitly rather than by a zero.
+	TimeRemaining func() time.Duration
 }
 
 // Size is a terminal window size.
@@ -148,9 +166,15 @@ type Manager struct {
 	clock clock.Clock
 	log   *slog.Logger
 
+	host Host
+
 	mu      sync.Mutex
 	running map[string]int
 	nodes   map[nodeKey]bool
+	// announces holds recent announce times per door, for the level-3 rate
+	// limit. Per door rather than per invocation: a limit that reset on every
+	// relaunch would be no limit at all for a door that announces on startup.
+	announces map[string][]time.Time
 }
 
 type nodeKey struct {
@@ -167,12 +191,22 @@ func New(clk clock.Clock, log *slog.Logger) *Manager {
 		log = slog.Default()
 	}
 	return &Manager{
-		clock:   clk,
-		log:     log,
-		running: map[string]int{},
-		nodes:   map[nodeKey]bool{},
+		clock:     clk,
+		log:       log,
+		running:   map[string]int{},
+		nodes:     map[nodeKey]bool{},
+		announces: map[string][]time.Time{},
 	}
 }
+
+// SetHost gives the Manager its way into the BBS, which is what turns the door
+// API on. Call it once at startup, before any door runs.
+//
+// A Manager with no Host still runs doors; they simply get no socket and no
+// descriptor. That is not a degraded mode — §9.1 calls the API optional, and a
+// board with one legacy binary installed should not have to configure an API
+// that binary will never call.
+func (m *Manager) SetHost(h Host) { m.host = h }
 
 // Running reports how many instances of a door are live.
 func (m *Manager) Running(name string) int {
@@ -195,6 +229,19 @@ func (m *Manager) Run(ctx context.Context, spec Spec, sess Session) (Result, err
 		return Result{}, err
 	}
 	defer release()
+
+	// The API socket, the descriptor and the token all live and die with this
+	// ONE invocation (§9.1.1): the directory is created here, the token is
+	// minted here, and both are gone before Run returns. A door that restarts
+	// gets a new token, and there is no stale-credential case to reason about
+	// because there is no credential left to go stale.
+	api, err := m.startAPI(&spec, sess)
+	if err != nil {
+		return Result{}, err
+	}
+	if api != nil {
+		defer api.close(m)
+	}
 
 	term, err := startTerminal(spec, sess)
 	if err != nil {

@@ -76,6 +76,48 @@ const (
 	DropfileDorinfo1 = "dorinfo1.def"
 )
 
+// DoorAuthorPrefix marks a post as having been written by a door rather than a
+// person (§9.1.1).
+//
+// # Why a marker and not the rendering
+//
+// §9.1.1 says a door's announcement is "Rendered as TRADEWARS (door@K7QM4X2P…)".
+// That is twenty-six characters and a post's author field is SIXTEEN bytes,
+// fixed by §6.2's byte budget and travelling on a 233-byte mesh MTU. The
+// rendering cannot be the stored value.
+//
+// So the store keeps the marker and the door's name, and rendering the rest is
+// the front end's job — which is where it belonged anyway, for the same reason
+// §8.4 gives about display names: the node ID half of that string is a fact
+// about which BBS you are reading, not a fact about the post, and a post that
+// carried its own attribution would keep claiming it after being relayed.
+//
+// '!' is safe as the marker because a nick must start with a letter and may
+// contain only letters, digits, underscore and hyphen (§6.7). No account can
+// ever be spelled this way, so a door cannot be mistaken for a person and a
+// person cannot impersonate a door.
+const DoorAuthorPrefix = "!"
+
+// MaxAnnounceDoorNameLen is the longest name a door that announces may have:
+// the author field's sixteen bytes, less the marker.
+//
+// Checked when the door is saved rather than when it announces, so that a name
+// nobody can post under is a configuration error the sysop sees immediately
+// instead of a failure at two in the morning in a log they are not reading.
+const MaxAnnounceDoorNameLen = 15
+
+// DoorAuthor is the author string a door posts under.
+func DoorAuthor(name string) string { return DoorAuthorPrefix + name }
+
+// DoorNameFromAuthor reports whether an author is a door, and which one.
+func DoorNameFromAuthor(author string) (string, bool) {
+	name, ok := strings.CutPrefix(author, DoorAuthorPrefix)
+	if !ok || name == "" {
+		return "", false
+	}
+	return name, true
+}
+
 // ErrNoDoor is returned when no door has that name.
 var ErrNoDoor = errors.New("no door by that name")
 
@@ -291,6 +333,13 @@ func (d Door) validate() error {
 	case DropfileNone, DropfileDoorSys, DropfileDoor32, DropfileDorinfo1:
 	default:
 		return fmt.Errorf("unknown dropfile type %q", d.DropfileType)
+	}
+	if d.MayAnnounce() && len(d.Name) > MaxAnnounceDoorNameLen {
+		return fmt.Errorf(
+			"door %s: a door that announces needs a name of at most %d characters, "+
+				"because a post's author field is %d bytes and one is spent on the "+
+				"marker that says a door wrote it",
+			d.Name, MaxAnnounceDoorNameLen, MaxAnnounceDoorNameLen+1)
 	}
 	if d.RequiredCapability != "" && !isKnownCapability(d.RequiredCapability) {
 		return fmt.Errorf("unknown capability %q (known: %s)",
