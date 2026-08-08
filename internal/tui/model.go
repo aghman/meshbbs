@@ -69,6 +69,7 @@ const (
 	screenFileAreaList
 	screenFileArea
 	screenFileInfo
+	screenFileDescribe
 	screenGoodbye
 )
 
@@ -159,7 +160,11 @@ type Model struct {
 	fileIdx     int
 	// fileArea is the area the file list belongs to, held because the list
 	// itself carries the name on every row and the title needs it once.
-	fileArea  string
+	fileArea string
+	// descInput is an in-progress file description. It holds the file's
+	// current text when the screen opens, so "d" is an edit rather than a
+	// retype — most uses of this are fixing a word, not writing from scratch.
+	descInput textInput
 	sysop_    sysopState
 	chatInput textInput
 	chatLines []ChatLine
@@ -282,6 +287,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files, m.fileIdx, m.fileArea = msg.files, 0, msg.area
 		return m, nil
 
+	case fileDescribedMsg:
+		// Unlike a plain load, this keeps the cursor on the file rather than
+		// resetting to the top. The user is looking at the detail screen for
+		// the file they just described, and moving the selection out from under
+		// them would redraw it as a different file.
+		name := ""
+		if m.fileIdx >= 0 && m.fileIdx < len(m.files) {
+			name = m.files[m.fileIdx].Name
+		}
+		m.files, m.fileArea = msg.files, msg.area
+		m.fileIdx = 0
+		for i, f := range msg.files {
+			if f.Name == name {
+				m.fileIdx = i
+				break
+			}
+		}
+		m.status, m.statusErr = msg.status.text, msg.status.isErr
+		return m, nil
+
 	case needKeySetupMsg:
 		// The account has no DM key — typically created by the CLI, which
 		// cannot know a passphrase. Offer to create one rather than dead-ending
@@ -390,6 +415,8 @@ func (m Model) Screen() Screen {
 		return m.buildFileArea()
 	case screenFileInfo:
 		return m.buildFileInfo()
+	case screenFileDescribe:
+		return m.buildFileDescribe()
 	default:
 		return m.buildMenu()
 	}

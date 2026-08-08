@@ -312,3 +312,152 @@ func TestCatalogEntrySurvivesTheWire(t *testing.T) {
 		t.Errorf("the entry came back as %+v", body)
 	}
 }
+
+// Changing a description in a federated area has to announce the change.
+//
+// This is the seam between two features built in parallel. SetFileDescription
+// detaches the file from its published record — correctly, because what was
+// announced no longer matches — and its comment says that "puts the file back
+// in the state the publisher looks for". A publisher has to actually look, or
+// the local row reads "unannounced" forever while every peer holds the old
+// text, with nothing on either side saying so.
+func TestDescribingAFileReAnnouncesIt(t *testing.T) {
+	svc, st, ctx := testService(t)
+	mkUser(t, svc, st, ctx, "austin", "pw", store.CapPostFederated)
+	if _, err := st.CreateFileArea(ctx, "meshwide", "", true); err != nil {
+		t.Fatal(err)
+	}
+	pub := &recordingPublisher{}
+	svc.SetPublisher(pub)
+
+	saved, err := svc.AddFile(ctx, "meshwide", store.File{
+		Name: "DESC.ZIP", Hash: fileHash(0xB1), Size: 42, Uploader: "austin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := saved.Record
+
+	if err := svc.DescribeFile(ctx, "meshwide", "DESC.ZIP", "now with words", "austin"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(pub.recs) != 2 {
+		t.Fatalf("%d records published, want 2 (the upload and the description)", len(pub.recs))
+	}
+	body, err := record.UnmarshalFileBody(pub.recs[1].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.Description != "now with words" {
+		t.Errorf("the re-announcement says %q", body.Description)
+	}
+	if body.Name != "DESC.ZIP" || body.Size != 42 {
+		t.Errorf("the re-announcement changed something else: %+v", body)
+	}
+
+	// The row points at the NEW record, so the file reads as published again
+	// rather than being left detached.
+	got, err := st.GetFile(ctx, "meshwide", "DESC.ZIP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Published() {
+		t.Fatal("the file is still detached from its record after being described")
+	}
+	if got.Record == first {
+		t.Error("the file still points at the record carrying the old description")
+	}
+	if got.Record != pub.recs[1].ID() {
+		t.Error("the file does not point at the record that was just published")
+	}
+}
+
+// A local-only area has nothing to announce, so describing a file there mints
+// no record and spends no airtime.
+func TestDescribingALocalFileAnnouncesNothing(t *testing.T) {
+	svc, st, ctx := testService(t)
+	mkUser(t, svc, st, ctx, "austin", "pw")
+	if _, err := st.CreateFileArea(ctx, "utils", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AddFile(ctx, "utils", store.File{
+		Name: "LOCAL.ZIP", Hash: fileHash(0xB2), Size: 1, Uploader: "austin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pub := &recordingPublisher{}
+	svc.SetPublisher(pub)
+
+	if err := svc.DescribeFile(ctx, "utils", "LOCAL.ZIP", "just for us", "austin"); err != nil {
+		t.Fatal(err)
+	}
+	if len(pub.recs) != 0 {
+		t.Errorf("%d records published for a local-only area", len(pub.recs))
+	}
+	got, err := st.GetFile(ctx, "utils", "LOCAL.ZIP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != "just for us" {
+		t.Errorf("the description did not stick: %q", got.Description)
+	}
+}
+
+// A radio failure must not lose the edit, for the same reason it must not lose
+// an upload.
+func TestDescribeSurvivesAPublishFailure(t *testing.T) {
+	svc, st, ctx := testService(t)
+	mkUser(t, svc, st, ctx, "austin", "pw", store.CapPostFederated)
+	if _, err := st.CreateFileArea(ctx, "meshwide", "", true); err != nil {
+		t.Fatal(err)
+	}
+	svc.SetPublisher(&recordingPublisher{})
+	if _, err := svc.AddFile(ctx, "meshwide", store.File{
+		Name: "FAIL.ZIP", Hash: fileHash(0xB3), Size: 1, Uploader: "austin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var reported error
+	OnPublishError = func(err error) { reported = err }
+	t.Cleanup(func() { OnPublishError = func(error) {} })
+	svc.SetPublisher(&recordingPublisher{err: errors.New("radio is on fire")})
+
+	if err := svc.DescribeFile(ctx, "meshwide", "FAIL.ZIP", "described anyway", "austin"); err != nil {
+		t.Fatalf("a radio failure failed the edit: %v", err)
+	}
+	got, err := st.GetFile(ctx, "meshwide", "FAIL.ZIP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != "described anyway" {
+		t.Errorf("the description was lost: %q", got.Description)
+	}
+	if reported == nil {
+		t.Error("the transmit failure was not reported to the sysop")
+	}
+}
+
+// A peer's entry is not ours to describe, sysop included: the description is
+// in their record, signed by their node.
+func TestPeerEntriesAreNotDescribable(t *testing.T) {
+	e := store.CatalogEntry{Name: "THEIRS.ZIP", Local: false, Uploader: ""}
+	if e.MayDescribe("austin", false) {
+		t.Error("a user may describe a peer's file")
+	}
+	if e.MayDescribe("austin", true) {
+		t.Error("a sysop may describe a peer's file")
+	}
+
+	ours := store.CatalogEntry{Name: "OURS.ZIP", Local: true, Uploader: "austin"}
+	if !ours.MayDescribe("austin", false) {
+		t.Error("the uploader may not describe their own file")
+	}
+	if !ours.MayDescribe("someone-else", true) {
+		t.Error("the sysop may not describe a local file")
+	}
+	if ours.MayDescribe("someone-else", false) {
+		t.Error("a stranger may describe someone else's file")
+	}
+}

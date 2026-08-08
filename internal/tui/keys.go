@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 
+	"github.com/aghman/meshbbs/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -49,8 +50,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenFileArea:
 		return m.handleFileAreaKey(msg)
 	case screenFileInfo:
-		m.screen = screenFileArea
-		return m, nil
+		return m.handleFileInfoKey(msg)
+	case screenFileDescribe:
+		return m.handleFileDescribeKey(msg)
 	case screenAreaRead:
 		return m.handleAreaReadKey(msg)
 	case screenPostCompose:
@@ -184,11 +186,73 @@ func (m Model) handleFileAreaKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.screen = screenFileInfo
 		return m, nil
+	case "d":
+		return m.startDescribe()
 	case "q", "esc":
 		m.screen = screenFileAreaList
 		m.setWhere("files")
 		return m, m.loadFileAreas()
 	}
+	return m, nil
+}
+
+// handleFileInfoKey handles the file detail screen.
+//
+// Any key used to return to the listing. That was fine while the screen was
+// purely a display, and it is why "d" needs a real handler here rather than
+// another arm of the dispatch: without one, pressing "d" on the screen showing
+// "(no description)" would navigate away, which is the opposite of what the
+// person pressing it wants.
+func (m Model) handleFileInfoKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if strings.ToLower(msg.String()) == "d" {
+		return m.startDescribe()
+	}
+	m.screen = screenFileArea
+	return m, nil
+}
+
+// startDescribe opens the description editor for the selected file.
+//
+// The permission check is here rather than only in the view, because a hidden
+// hint is not a permission check: the browser front end sends the same key
+// names an SSH user can type (webui.md §5), so "d" arrives whether or not a
+// hint advertised it.
+func (m Model) startDescribe() (tea.Model, tea.Cmd) {
+	if m.fileIdx < 0 || m.fileIdx >= len(m.files) {
+		return m, nil
+	}
+	f := m.files[m.fileIdx]
+	if !f.MayDescribe(m.nick, m.sysop) {
+		if m.guest {
+			return m, errs("Guests cannot describe files. Register with `ssh new@` for an account.")
+		}
+		return m, errs("You can only describe files you uploaded. Ask the sysop for anything else.")
+	}
+
+	m.descInput = newInput("Description: ", store.MaxFileDescLen, false)
+	m.descInput.setValue(f.Description)
+	m.screen = screenFileDescribe
+	return m, nil
+}
+
+func (m Model) handleFileDescribeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = screenFileInfo
+		return m, nil
+	case tea.KeyEnter:
+		if m.fileIdx < 0 || m.fileIdx >= len(m.files) {
+			m.screen = screenFileArea
+			return m, nil
+		}
+		f := m.files[m.fileIdx]
+		area, text := m.fileArea, m.descInput.String()
+		m.screen = screenFileInfo
+		// One command, not a sequence — see fileDescribedMsg on why the
+		// write and the reload cannot be two.
+		return m, m.describeFile(area, f.Name, text)
+	}
+	m.descInput, _ = m.descInput.Update(msg)
 	return m, nil
 }
 

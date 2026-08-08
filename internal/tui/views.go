@@ -580,10 +580,21 @@ func (m Model) buildFileArea() Screen {
 			plural(elsewhere, "file is", "files are"))))
 	}
 
+	// Advertise "d" only on a row the user can actually edit. A hint for a key
+	// that answers "you can only describe files you uploaded" is worse than no
+	// hint: it reads as a bug rather than as a rule. A peer's file is never
+	// editable by anyone here, sysop included — its description lives in their
+	// record, signed by their node.
+	help := hints("up/down", "move", "enter", "details", "q", "back")
+	if m.fileIdx >= 0 && m.fileIdx < len(m.files) &&
+		m.files[m.fileIdx].MayDescribe(m.nick, m.sysop) {
+		help = hints("up/down", "move", "enter", "details", "d", "describe", "q", "back")
+	}
+
 	return Screen{
 		Kind: "filearea", Title: "Files in " + sanitizeLine(m.fileArea), Status: m.statusLine(),
 		Blocks: blocks,
-		Help:   hints("up/down", "move", "enter", "details", "q", "back"),
+		Help:   help,
 	}
 }
 
@@ -623,10 +634,53 @@ func (m Model) buildFileInfo() Screen {
 	}
 	blocks = append(blocks, m.fileAvailability(f)...)
 
+	help := hints("q", "back")
+	if f.MayDescribe(m.nick, m.sysop) {
+		help = hints("d", "describe", "q", "back")
+	}
+
 	return Screen{
 		Kind: "fileinfo", Title: sanitizeLine(f.Name), Blocks: blocks,
 		Status: m.statusLine(),
-		Help:   hints("q", "back"),
+		Help:   help,
+	}
+}
+
+// buildFileDescribe is the description editor (§6.5).
+//
+// It is a screen rather than an inline edit on the detail view because the
+// description is the one field here that is not derived from the bytes: name,
+// size, hash and uploader are all facts about the upload, and this is the only
+// thing a person writes. Giving it its own screen is also what lets the browser
+// drive it, since the web front end works in whole field values (webui.md §5.1)
+// and needs somewhere to put one.
+func (m Model) buildFileDescribe() Screen {
+	if m.fileIdx < 0 || m.fileIdx >= len(m.files) {
+		return m.buildFileArea()
+	}
+	f := m.files[m.fileIdx]
+
+	return Screen{
+		Kind: "filedescribe", Title: "Describe " + sanitizeLine(f.Name),
+		Status: m.statusLine(),
+		Blocks: []Block{
+			TextBlock{Lines: []Line{
+				{{Text: "Say what this file is, for people browsing the catalog.", Level: LevelBody}},
+			}},
+			FormBlock{Fields: []Field{
+				{Name: "description", Label: m.descInput.prompt, Value: m.descInput.String(),
+					Active: true,
+					Hint: fmt.Sprintf("Up to %d characters. Leave it empty to clear.",
+						store.MaxFileDescLen)},
+			}},
+			// Worth saying where it goes. A description on a federated area is
+			// not a private note — it travels to every BBS that syncs the
+			// catalog, and unlike the files themselves it really does go on the
+			// air (§6.5, §7.5).
+			Prose(LevelMuted, "If this area federates, the description travels the mesh "+
+				"with the rest of the catalog entry. The file itself never does."),
+		},
+		Help: hints("enter", "save", "esc", "cancel"),
 	}
 }
 

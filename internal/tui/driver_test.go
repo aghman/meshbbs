@@ -2,8 +2,12 @@ package tui
 
 import (
 	"encoding/json"
+	"slices"
+	"sync"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // The Driver is what a browser session runs on. These tests are about the pump
@@ -149,6 +153,91 @@ func TestDriverSetFieldRespectsLimits(t *testing.T) {
 			if fld.Name == "subject" && len([]rune(fld.Value)) > 72 {
 				t.Errorf("subject accepted %d runes, past its 72 limit", len([]rune(fld.Value)))
 			}
+		}
+	}
+}
+
+// TestDriverRunsASequenceInOrder pins tea.Sequence's contract on the pump.
+//
+// The pump used to flatten a sequence and dispatch each member on its own
+// goroutine, which is Batch's behaviour under Sequence's name. Every caller
+// reaching for Sequence is doing so because the second command reads what the
+// first one wrote — post then reload, send then reload — so running them
+// concurrently silently hands the user a screen missing their own work.
+func TestDriverRunsASequenceInOrder(t *testing.T) {
+	f := newFixture(t)
+	f.user(t, "austin", "pw")
+	d := driverFor(t, f, "austin")
+
+	var mu sync.Mutex
+	var order []string
+	note := func(what string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, what)
+	}
+
+	done := make(chan struct{})
+	first := func() tea.Msg {
+		note("first-start")
+		// Stand in for a write that takes a moment to commit: without the
+		// pause a concurrent second command could still finish after this one
+		// by luck, and the test would pass over the bug it exists to catch.
+		time.Sleep(20 * time.Millisecond)
+		note("first-end")
+		return nil
+	}
+	second := func() tea.Msg {
+		note("second-start")
+		close(done)
+		return nil
+	}
+
+	d.dispatch(tea.Sequence(first, second))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sequence never reached its second command")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"first-start", "first-end", "second-start"}
+	if !slices.Equal(order, want) {
+		t.Errorf("sequence ran %v, want %v", order, want)
+	}
+}
+
+// TestDriverRunsABatchConcurrently is the other half of the same claim: Batch
+// must NOT be serialised. Some commands park by design — the chat watcher waits
+// until somebody speaks — so running a batch in order would wedge its siblings
+// behind one that never returns.
+//
+// The two commands rendezvous, which only completes if they overlap.
+func TestDriverRunsABatchConcurrently(t *testing.T) {
+	f := newFixture(t)
+	f.user(t, "austin", "pw")
+	d := driverFor(t, f, "austin")
+
+	left, right := make(chan struct{}), make(chan struct{})
+	met := make(chan bool, 2)
+	rendezvous := func(mine, theirs chan struct{}) tea.Cmd {
+		return func() tea.Msg {
+			close(mine)
+			select {
+			case <-theirs:
+				met <- true
+			case <-time.After(5 * time.Second):
+				met <- false
+			}
+			return nil
+		}
+	}
+
+	d.dispatch(tea.Batch(rendezvous(left, right), rendezvous(right, left)))
+	for range 2 {
+		if !<-met {
+			t.Fatal("a batch's commands did not overlap; they were serialised")
 		}
 	}
 }

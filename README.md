@@ -83,9 +83,10 @@ recovered, and the instance would have to re-establish with its peers as a new n
 ```
 ./meshbbs user add bob                    # new accounts cannot post to federated areas by default
 ./meshbbs user grant bob post_federated
-./meshbbs area create utils --files       # a file area; add --federated to put its catalog on the mesh
-./meshbbs peer alias pnw <node-id>        # local petname; never travels on the wire
-./meshbbs config reference                # every setting, generated from the source
+./meshbbs area create utils --files   # a file area; --federated puts its catalog on the mesh
+./meshbbs file describe utils NOTES.TXT "Repeater notes"   # SFTP cannot carry one
+./meshbbs peer alias pnw <node-id>    # local petname; never travels on the wire
+./meshbbs config reference            # every setting, generated from the source
 ```
 
 ## Documentation

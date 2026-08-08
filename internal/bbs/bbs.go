@@ -209,6 +209,56 @@ func (s *Service) AddFile(ctx context.Context, areaName string, f store.File) (s
 	return saved, nil
 }
 
+// DescribeFile sets a file's description and re-announces it if it federates.
+//
+// # Why this is not just the store call
+//
+// SetFileDescription clears the file's record_id, because the FILE record
+// announced a description that has just changed and leaving it attached would
+// mark the file as published when what is published no longer matches. That
+// puts the file back in the state a publisher looks for — and a publisher has
+// to actually look, or the local row says "unannounced" forever while every
+// peer holds the old text with nothing on either side saying so.
+//
+// So this mints a new record. Peers see one file with a later sequence number,
+// which anti-entropy carries the same way it carries any other record.
+func (s *Service) DescribeFile(ctx context.Context, areaName, name, text, actor string) error {
+	area, err := s.store.GetFileArea(ctx, areaName)
+	if err != nil {
+		return err
+	}
+	if err := s.store.SetFileDescription(ctx, area.Name, name, text, actor); err != nil {
+		return err
+	}
+	if !area.Federated {
+		return nil
+	}
+
+	// Past here, nothing may fail the edit: the description is written and it
+	// is the user's. Re-announcing is how other instances find out, and a
+	// missed announcement is what anti-entropy is for (§7.3).
+	f, err := s.store.GetFile(ctx, area.Name, name)
+	if err != nil {
+		OnPublishError(fmt.Errorf("re-reading %s to announce its description: %w", name, err))
+		return nil
+	}
+	rec, err := s.newFileRecord(ctx, area, f)
+	if err != nil {
+		OnPublishError(fmt.Errorf("building the catalog entry for %s: %w", name, err))
+		return nil
+	}
+	if err := s.store.PutRecord(ctx, rec); err != nil {
+		OnPublishError(fmt.Errorf("storing the catalog entry for %s: %w", name, err))
+		return nil
+	}
+	if err := s.store.SetFileRecord(ctx, f.ID, rec.ID()); err != nil {
+		OnPublishError(fmt.Errorf("linking the catalog entry for %s: %w", name, err))
+		return nil
+	}
+	s.publish(area.Tag, rec)
+	return nil
+}
+
 // checkFederatedUpload applies the [N7] gate to a file area.
 //
 // Same capability as posting, and deliberately not a fifth one: the grant is
