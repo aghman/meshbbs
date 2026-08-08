@@ -340,6 +340,75 @@ func TestWSFileBrowser(t *testing.T) {
 	}
 }
 
+// Describing a file works from the browser too.
+//
+// The permission check for "d" lives in the model rather than in the view that
+// draws the hint, and this is what holds that line: the browser sends the same
+// key names an SSH user types (webui.md §5), so a check that only hid a hint
+// would be no check at all. Here it is the allowed case — austin describing
+// austin's upload — proving the browser reaches the same screen and that its
+// whole-value field edit lands.
+func TestWSDescribeFile(t *testing.T) {
+	f, ts, sessionID := liveServer(t)
+	ctx := context.Background()
+
+	if _, err := f.store.CreateFileArea(f.ctx, "utils", "Utilities", false); err != nil {
+		t.Fatal(err)
+	}
+	var hash blobstore.Hash
+	hash[0] = 0x42
+	if _, err := f.store.PutFile(f.ctx, "utils", store.File{
+		Name: "ARCHIVE.ZIP", Hash: hash, Size: 4096, Uploader: "austin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := dialWS(t, ctx, ts, sessionID)
+	readUntil(t, ctx, conn, "the menu", func(m screenMsg) bool {
+		return m.Screen.Kind == "menu"
+	})
+
+	_ = wsjson.Write(ctx, conn, clientMsg{Key: "f"})
+	readUntil(t, ctx, conn, "the file areas with rows", func(m screenMsg) bool {
+		return m.Screen.Kind == "fileareas" && tableHasRows(m)
+	})
+	_ = wsjson.Write(ctx, conn, clientMsg{Key: "enter"})
+	readUntil(t, ctx, conn, "the file list with rows", func(m screenMsg) bool {
+		return m.Screen.Kind == "filearea" && tableHasRows(m)
+	})
+
+	_ = wsjson.Write(ctx, conn, clientMsg{Key: "d"})
+	readUntil(t, ctx, conn, "the describe screen", func(m screenMsg) bool {
+		return m.Screen.Kind == "filedescribe"
+	})
+
+	// The browser sets whole field values rather than streaming keystrokes
+	// (webui.md §5.1), so this is the path a real client takes.
+	_ = wsjson.Write(ctx, conn, clientMsg{Field: "description", Value: "Set from a browser"})
+	readUntil(t, ctx, conn, "the field to echo back", func(m screenMsg) bool {
+		return strings.Contains(blockJSON(m.Screen.Blocks), "Set from a browser")
+	})
+
+	// The saved description has to reach the screen the user lands on. It did
+	// not, at first: the write and the reload were a tea.Sequence, and this
+	// Driver dispatches sequenced commands concurrently, so the reload read the
+	// catalog before the write committed and the user's own edit came back
+	// missing. This assertion is what caught that.
+	_ = wsjson.Write(ctx, conn, clientMsg{Key: "enter"})
+	readUntil(t, ctx, conn, "the saved description on screen", func(m screenMsg) bool {
+		return m.Screen.Kind != "filedescribe" &&
+			strings.Contains(blockJSON(m.Screen.Blocks), "Set from a browser")
+	})
+
+	got, err := f.store.GetFile(f.ctx, "utils", "ARCHIVE.ZIP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != "Set from a browser" {
+		t.Errorf("stored description = %q, want the text the browser sent", got.Description)
+	}
+}
+
 // tableHasRows reports whether a screen's table block has landed its contents.
 //
 // Every screen backed by a store query arrives twice: once when the keypress

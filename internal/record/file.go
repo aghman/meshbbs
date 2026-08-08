@@ -25,6 +25,18 @@ const MaxFileNameLen = 64
 // cost of a catalog entry is one fewer entry.
 const MaxFileDescLen = 80
 
+// ValidateFileDescription applies the wire's rules for a description.
+//
+// Exported because the catalog has to reject an over-long description at the
+// point someone TYPES it, not at the point a FILE record is minted. The store
+// is where a description is written and the record is where it is spent, and if
+// those two disagree the failure surfaces later, on the publishing path, about
+// a file whose description was accepted hours earlier. One rule, owned here,
+// because the wire is the tighter constraint.
+func ValidateFileDescription(s string) error {
+	return validateLabel("file description", s, MaxFileDescLen)
+}
+
 // MaxFileTags and MaxFileTagLen bound the tag list.
 //
 // Small because nothing populates tags yet and the budget is the budget. They
@@ -134,7 +146,7 @@ func MarshalFileBody(f FileBody) ([]byte, error) {
 	if f.Name == "." || f.Name == ".." {
 		return nil, fmt.Errorf("%q is not a file name", f.Name)
 	}
-	if err := validateLabel("file description", f.Description, MaxFileDescLen); err != nil {
+	if err := ValidateFileDescription(f.Description); err != nil {
 		return nil, err
 	}
 	if f.Hash == ([FileHashLen]byte{}) {
@@ -262,7 +274,7 @@ func UnmarshalFileBody(b []byte) (FileBody, error) {
 	if f.Name == "." || f.Name == ".." {
 		return FileBody{}, fmt.Errorf("%q is not a file name", f.Name)
 	}
-	if err := validateLabel("file description", f.Description, MaxFileDescLen); err != nil {
+	if err := ValidateFileDescription(f.Description); err != nil {
 		return FileBody{}, err
 	}
 	if f.Hash == ([FileHashLen]byte{}) {

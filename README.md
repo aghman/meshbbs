@@ -71,6 +71,7 @@ recovered, and the instance would have to re-establish with its peers as a new n
 ./meshbbs user add bob              # new accounts cannot post to federated areas by default
 ./meshbbs user grant bob post_federated
 ./meshbbs peer alias pnw <node-id>  # local petname; never travels on the wire
+./meshbbs file describe uploads NOTES.TXT "Repeater notes"  # SFTP cannot carry one
 ./meshbbs config reference          # every setting, generated from the source
 ```
 

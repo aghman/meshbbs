@@ -6,6 +6,7 @@ import (
 
 	"github.com/aghman/meshbbs/internal/blobstore"
 	"github.com/aghman/meshbbs/internal/store"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // seedFiles gives the fixture a file area with some contents.
@@ -233,4 +234,136 @@ func TestFKeyOpensFilesAndMStillOpensMessages(t *testing.T) {
 
 	f.login(t, "austin").typeRunes("f").contains("File Areas")
 	f.login(t, "austin").typeRunes("m").contains("Message Areas")
+}
+
+// openFiles walks to the file listing for "utils", the second area
+// alphabetically. The listing is ordered by upload time, so row 0 is
+// ARCHIVE.ZIP (austin's), row 1 is README.TXT (bob's).
+func openFiles(t *testing.T, f *fixture, nick string) *session {
+	t.Helper()
+	return f.login(t, nick).typeRunes("f").typeRunes("j").enter()
+}
+
+// The gap this closes: SFTP cannot carry a description, so before this every
+// real upload had one that was empty and no way to change it.
+func TestDescribeOwnUpload(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+
+	s := openFiles(t, f, "austin")
+	s.contains("d describe")
+
+	s.typeRunes("d").contains("Describe ARCHIVE.ZIP")
+	// The current text is loaded for editing rather than cleared, so fixing a
+	// word does not mean retyping the sentence.
+	s.contains("A compressed archive")
+
+	s.press(tea.KeyCtrlU).line("Now a better description")
+	s.contains("Now a better description")
+
+	got, err := f.store.GetFile(f.ctx, "utils", "ARCHIVE.ZIP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != "Now a better description" {
+		t.Errorf("stored description = %q, want %q", got.Description, "Now a better description")
+	}
+}
+
+// The rule is own uploads or sysop. bob's file is not austin's to describe.
+func TestCannotDescribeSomeoneElsesUpload(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+
+	// Move to README.TXT, which bob uploaded.
+	s := openFiles(t, f, "austin").typeRunes("j")
+	if strings.Contains(s.view(), "d describe") {
+		t.Error("the describe hint is shown on a file the user cannot describe")
+	}
+
+	// The hint being absent is not the check. A browser sends the same key
+	// names an SSH user can type, so "d" arrives regardless.
+	s.typeRunes("d")
+	s.contains("You can only describe files you uploaded")
+
+	got, err := f.store.GetFile(f.ctx, "utils", "README.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != "Notes about this area" {
+		t.Errorf("description changed to %q despite the refusal", got.Description)
+	}
+}
+
+func TestSysopCanDescribeAnyUpload(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	if _, err := f.store.CreateUser(f.ctx, store.CreateUserOptions{
+		Nick: "carol", CanLogin: true, IsSysop: true,
+		Capabilities: store.DefaultCapabilities,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// README.TXT belongs to bob, and carol uploaded nothing at all.
+	s := openFiles(t, f, "carol").typeRunes("j")
+	s.contains("d describe")
+	s.typeRunes("d").contains("Describe README.TXT")
+	s.press(tea.KeyCtrlU).line("Sysop rewrote this")
+
+	got, err := f.store.GetFile(f.ctx, "utils", "README.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != "Sysop rewrote this" {
+		t.Errorf("stored description = %q, want the sysop's text", got.Description)
+	}
+}
+
+func TestDescribeCanBeCancelled(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+
+	s := openFiles(t, f, "austin")
+	s.typeRunes("d").press(tea.KeyCtrlU).typeRunes("discard me").escape()
+
+	got, err := f.store.GetFile(f.ctx, "utils", "ARCHIVE.ZIP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != "A compressed archive" {
+		t.Errorf("escape saved %q; it must discard the edit", got.Description)
+	}
+}
+
+// An empty description is how you clear one, not an error.
+func TestDescribeWithEmptyTextClears(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+
+	openFiles(t, f, "austin").typeRunes("d").press(tea.KeyCtrlU).enter()
+
+	got, err := f.store.GetFile(f.ctx, "utils", "ARCHIVE.ZIP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != "" {
+		t.Errorf("description = %q after clearing, want empty", got.Description)
+	}
+}
+
+// The detail screen returns to the listing on any key, which is why "d" needed
+// a real handler there rather than falling through to that.
+func TestDescribeFromTheDetailScreen(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+
+	s := openFiles(t, f, "austin").enter()
+	s.contains("d describe")
+	s.typeRunes("d").contains("Describe ARCHIVE.ZIP")
 }

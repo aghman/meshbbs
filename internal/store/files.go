@@ -47,6 +47,41 @@ var ErrFileExists = errors.New("a file with that name already exists in this are
 // and silently never reaches the network.
 const MaxFileNameLen = record.MaxFileNameLen
 
+// MaxFileDescLen bounds a file's description, for the same reason and from the
+// same source as MaxFileNameLen.
+const MaxFileDescLen = record.MaxFileDescLen
+
+// MayDescribe reports whether nick may set this file's description.
+//
+// The rule is: the person who uploaded it, or a sysop. That deliberately does
+// NOT get a capability of its own. Capabilities in this codebase gate airtime
+// and abuse vectors — post_federated spends the network's shared budget,
+// send_dm_offnode reaches other instances — and describing your own upload is
+// neither. It is the same authority that put the bytes there in the first
+// place, which upload_files already granted; a second grant would let a sysop
+// produce the incoherent state of a user who can upload files but not say what
+// they are.
+//
+// A pure function rather than a store method because both callers already hold
+// both inputs — the TUI from the session, the CLI from running on the server
+// box — and a database round trip to re-derive them would be the kind of check
+// that is easy to skip.
+func (f File) MayDescribe(nick string, sysop bool) bool {
+	if sysop {
+		return true
+	}
+	// An empty uploader is a file with no owner to be — files predating the
+	// uploader column, or written by something other than an SFTP session. It
+	// is not a wildcard that matches a session with no nick.
+	if f.Uploader == "" || nick == "" {
+		return false
+	}
+	// Case-insensitively, because the column is COLLATE NOCASE and nicks are
+	// unique case-insensitively (§6.7): "Austin" and "austin" are one account,
+	// so they must be one answer here too.
+	return strings.EqualFold(f.Uploader, nick)
+}
+
 // PutFile records a file this node now holds.
 //
 // The blob row and the catalog row are written in one transaction. Half of this
@@ -275,6 +310,52 @@ func (s *Store) SetFileRecord(ctx context.Context, fileID int64, id record.ID) e
 		return fmt.Errorf("attach file record: %w", err)
 	}
 	return nil
+}
+
+// SetFileDescription sets the free text shown beside a file in the catalog.
+//
+// Until this existed the column could only ever hold the empty string: SFTP has
+// nowhere to carry a description, so every real upload arrived with one, and
+// §6.5's FILE record then spent wire bytes on a field that was always empty.
+//
+// It does NOT check permission. That is the caller's, through MayDescribe, for
+// the same reason SetAreaFederated does not check whether the actor is a sysop:
+// the store is where the data rule lives (a description must fit the wire) and
+// the edge is where the policy rule lives (whose file this is). Mixing them
+// would give this method a notion of the current user, which nothing else here
+// has.
+func (s *Store) SetFileDescription(ctx context.Context, areaName, name, description, actor string) error {
+	f, err := s.GetFile(ctx, areaName, name)
+	if err != nil {
+		return err
+	}
+	description = strings.TrimSpace(description)
+	if err := record.ValidateFileDescription(description); err != nil {
+		return err
+	}
+
+	// Clearing record_id for the same reason RenameFile does: the FILE record
+	// announced a description, and it just changed. Leaving the old record
+	// attached would mark this file as published when what is published no
+	// longer matches it, and the catalog other BBSes hold would stay wrong with
+	// nothing here saying so. Nulling it puts the file back in the state the
+	// publisher looks for.
+	//
+	// This is a no-op today — nothing mints FILE records yet — and it is
+	// written now because the alternative is remembering it later, from inside
+	// the publishing code, where the symptom is a stale description on someone
+	// else's BBS.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE files SET description = ?, record_id = NULL WHERE id = ?`,
+		description, f.ID); err != nil {
+		return fmt.Errorf("set file description: %w", err)
+	}
+
+	detail := description
+	if detail == "" {
+		detail = "(cleared)"
+	}
+	return s.audit(ctx, actor, "file.describe", areaName+"/"+f.Name, detail)
 }
 
 // RemoveFile deletes a catalog entry and reports whether its blob is now
