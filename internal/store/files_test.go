@@ -624,3 +624,202 @@ func TestCatalogSkipsAnUnparseableEntry(t *testing.T) {
 		t.Errorf("catalog is %+v, want just the parseable entry", entries)
 	}
 }
+
+// A local-only area publishes nothing, so the record log is empty and the
+// files table is the whole listing. Reading only the log would show an empty
+// area that visibly has files in it.
+func TestAreaContentsForALocalOnlyArea(t *testing.T) {
+	s, ctx := testStore(t)
+	if _, err := s.CreateFileArea(ctx, "utils", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutFile(ctx, "utils", File{
+		Name: "LOCAL.ZIP", Hash: fileHashOf(0x11), Size: 10, Uploader: "austin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if entries, err := s.ListCatalog(ctx, "utils"); err != nil {
+		t.Fatal(err)
+	} else if len(entries) != 0 {
+		t.Fatalf("a local-only area announced %d entries", len(entries))
+	}
+
+	entries, err := s.ListAreaContents(ctx, "utils")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("area contents has %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Name != "LOCAL.ZIP" || !e.Local || !e.Held || e.Uploader != "austin" {
+		t.Errorf("entry is %+v", e)
+	}
+}
+
+// A federated area's own file appears in the log AND the table. It must be one
+// row, carrying what only the table knows.
+func TestAreaContentsDoesNotDoubleCountOurOwnFile(t *testing.T) {
+	s, ctx := testStore(t)
+	area, err := s.CreateFileArea(ctx, "meshwide", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := testKey(t, 1)
+	if err := s.PutNode(ctx, Node{ID: self.ID(), PublicKey: self.Public, IsSelf: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	hash := fileHashOf(0x22)
+	if _, err := s.PutFile(ctx, "meshwide", File{
+		Name: "OURS.ZIP", Hash: hash, Size: 100, Uploader: "austin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := record.TruncateFileHash(hash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewFileRecord(self, 1, 1_700_000_000, area.Tag, record.FileBody{
+		Name: "OURS.ZIP", Size: 100, Hash: wire,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := s.ListAreaContents(ctx, "meshwide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("our own file appears %d times, want 1", len(entries))
+	}
+	// The merged row keeps what only the local table knows.
+	if entries[0].Uploader != "austin" {
+		t.Errorf("the merged row lost the uploader: %+v", entries[0])
+	}
+}
+
+// A peer's file gets the sysop's petname for the holding node, because that is
+// the only human-facing name in the design ([D9]) — and the sysop's contact,
+// which is the only actionable thing a user has for a file we cannot fetch.
+func TestAreaContentsLabelsTheHolder(t *testing.T) {
+	s, ctx := testStore(t)
+	area, err := s.CreateFileArea(ctx, "meshwide", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := testKey(t, 1)
+	if err := s.PutNode(ctx, Node{ID: self.ID(), PublicKey: self.Public, IsSelf: true}); err != nil {
+		t.Fatal(err)
+	}
+	peer := testKey(t, 2)
+	if err := s.PutNode(ctx, Node{
+		ID: peer.ID(), PublicKey: peer.Public,
+		DisplayName: "Pacific NW BBS", SysopContact: "sysop@pnw.example",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	theirHash := fileHashOf(0x33)
+	wire, err := record.TruncateFileHash(theirHash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewFileRecord(peer, 1, 1_700_000_000, area.Tag, record.FileBody{
+		Name: "THEIRS.ZIP", Size: 50, Hash: wire,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	// With no alias set, the node's own display name is the fallback.
+	entries, err := s.ListAreaContents(ctx, "meshwide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries", len(entries))
+	}
+	if entries[0].Holder != "Pacific NW BBS" {
+		t.Errorf("holder is %q, want the node's display name", entries[0].Holder)
+	}
+	if entries[0].HolderContact != "sysop@pnw.example" {
+		t.Errorf("holder contact is %q", entries[0].HolderContact)
+	}
+
+	// A petname beats the display name: it is the name this sysop chose, and
+	// [D9] makes it the human-facing surface.
+	if err := s.SetAlias(ctx, "pnw", peer.ID()); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = s.ListAreaContents(ctx, "meshwide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries[0].Holder != "pnw" {
+		t.Errorf("holder is %q, want the local petname", entries[0].Holder)
+	}
+}
+
+// Two BBSes may hold different files under one name. Both are listed, because
+// collapsing them would hide one node's file behind another's.
+func TestAreaContentsKeepsBothWhenNamesCollide(t *testing.T) {
+	s, ctx := testStore(t)
+	area, err := s.CreateFileArea(ctx, "meshwide", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := testKey(t, 1)
+	if err := s.PutNode(ctx, Node{ID: self.ID(), PublicKey: self.Public, IsSelf: true}); err != nil {
+		t.Fatal(err)
+	}
+	peer := trustedKey(t, s, ctx, 2)
+
+	if _, err := s.PutFile(ctx, "meshwide", File{
+		Name: "README.TXT", Hash: fileHashOf(0x44), Size: 10, Uploader: "austin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	theirHash := fileHashOf(0x55)
+	wire, err := record.TruncateFileHash(theirHash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewFileRecord(peer, 1, 1_700_000_000, area.Tag, record.FileBody{
+		Name: "README.TXT", Size: 999, Hash: wire,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := s.ListAreaContents(ctx, "meshwide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want both files named README.TXT", len(entries))
+	}
+	var mine, theirs bool
+	for _, e := range entries {
+		if e.Local && e.Held {
+			mine = true
+		}
+		if !e.Local && !e.Held && e.Size == 999 {
+			theirs = true
+		}
+	}
+	if !mine || !theirs {
+		t.Errorf("entries are %+v", entries)
+	}
+}

@@ -26,7 +26,7 @@ type (
 	fileAreasLoadedMsg struct{ areas []store.Area }
 	filesLoadedMsg     struct {
 		area  string
-		files []store.File
+		files []store.CatalogEntry
 	}
 )
 
@@ -61,9 +61,11 @@ func (m Model) loadFileAreas() tea.Cmd {
 	}
 }
 
+// loadFiles reads what the whole NETWORK has in an area, not just what this
+// node holds — that is the point of a replicating catalog (§6.5).
 func (m Model) loadFiles(area string) tea.Cmd {
 	return func() tea.Msg {
-		files, err := m.cfg.Store.ListFiles(m.ctx, area)
+		files, err := m.cfg.Store.ListAreaContents(m.ctx, area)
 		if err != nil {
 			return statusMsg{text: err.Error(), isErr: true}
 		}

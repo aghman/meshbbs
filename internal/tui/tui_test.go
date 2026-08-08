@@ -385,6 +385,22 @@ func TestGoldenFrames(t *testing.T) {
 		f.login(t, "austin").typeRunes("f").typeRunes("j").enter().golden("file_list")
 	})
 
+	t.Run("file_list_remote", func(t *testing.T) {
+		f := newFixture(t)
+		seedFiles(t, f)
+		f.user(t, "austin", "pw")
+		seedPeerFile(t, f, "meshwide", "REMOTE.ZIP", 900_000, "pnw", "sysop@pnw.example")
+		f.login(t, "austin").typeRunes("f").enter().golden("file_list_remote")
+	})
+
+	t.Run("file_info_remote", func(t *testing.T) {
+		f := newFixture(t)
+		seedFiles(t, f)
+		f.user(t, "austin", "pw")
+		seedPeerFile(t, f, "meshwide", "REMOTE.ZIP", 900_000, "pnw", "sysop@pnw.example")
+		f.login(t, "austin").typeRunes("f").enter().enter().golden("file_info_remote")
+	})
+
 	t.Run("file_info", func(t *testing.T) {
 		f := newFixture(t)
 		seedFiles(t, f)

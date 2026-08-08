@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"github.com/aghman/meshbbs/internal/blobstore"
+	"github.com/aghman/meshbbs/internal/identity"
+	"github.com/aghman/meshbbs/internal/record"
+	"github.com/aghman/meshbbs/internal/rng"
 	"github.com/aghman/meshbbs/internal/store"
 )
 
@@ -80,7 +83,10 @@ func TestFileBrowserListsFiles(t *testing.T) {
 	s.contains("Files in utils", "ARCHIVE.ZIP", "README.TXT", "BIG.IMG")
 	// Sizes are rounded for the listing, which is what a glance wants.
 	s.contains("4.0 KB", "812 B", "4.2 MB")
-	s.contains("austin", "bob")
+	// The column names the BBS holding each file, not the person who uploaded
+	// it: a FILE record carries no uploader, so a node is all the network knows.
+	// The uploader is still on the detail screen, where it is knowable.
+	s.contains("Held by", "here")
 }
 
 func TestFileBrowserShowsFetchCommand(t *testing.T) {
@@ -233,4 +239,133 @@ func TestFKeyOpensFilesAndMStillOpensMessages(t *testing.T) {
 
 	f.login(t, "austin").typeRunes("f").contains("File Areas")
 	f.login(t, "austin").typeRunes("m").contains("Message Areas")
+}
+
+// seedPeerFile announces a file from another BBS into a federated area, the way
+// anti-entropy would.
+func seedPeerFile(t *testing.T, f *fixture, area, name string, size uint64, alias, contact string) identity.NodeID {
+	t.Helper()
+	a, err := f.store.GetFileArea(f.ctx, area)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := identity.GenerateNodeKey(rng.TestSecret(42))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.PutNode(f.ctx, store.Node{
+		ID: peer.ID(), PublicKey: peer.Public,
+		DisplayName: "Pacific NW", SysopContact: contact,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if alias != "" {
+		if err := f.store.SetAlias(f.ctx, alias, peer.ID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var full blobstore.Hash
+	full[0], full[1] = 0xAB, 0xCD
+	wire, err := record.TruncateFileHash(full[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := record.NewFileRecord(peer, 1, 1_700_000_300, a.Tag, record.FileBody{
+		Name: name, Size: size, Hash: wire, Description: "Held over there",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.PutRecord(f.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	return peer.ID()
+}
+
+// The catalog shows the whole network's files, not just ours. That is the
+// entire point of replicating it (§6.5).
+func TestFileBrowserShowsPeerFiles(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+	seedPeerFile(t, f, "meshwide", "REMOTE.ZIP", 900_000, "pnw", "sysop@pnw.example")
+
+	// "meshwide" is the first area alphabetically.
+	s := f.login(t, "austin").typeRunes("f").enter()
+	s.contains("REMOTE.ZIP", "878.9 KB", "pnw")
+	// Said once for the listing rather than repeated on every row.
+	s.containsProse("File listings travel the mesh; the files themselves never do")
+}
+
+// A file we do not hold must say so plainly, and must NOT promise a fetch that
+// does not exist.
+func TestPeerFileDetailIsHonest(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+	seedPeerFile(t, f, "meshwide", "REMOTE.ZIP", 900_000, "pnw", "sysop@pnw.example")
+
+	s := f.login(t, "austin").typeRunes("f").enter().enter()
+	s.contains("REMOTE.ZIP", "Held by pnw")
+	s.containsProse("This BBS does not have the file, only its listing")
+	s.contains("sysop@pnw.example")
+
+	// No download instructions, because there is no download. And no promise of
+	// a sneakernet queue: that is Phase 5, nothing records a request today, and
+	// a promise nothing will keep is worse than saying so.
+	s.notContains("To download it:", "sftp ")
+	s.notContains("queued", "queue")
+}
+
+// Our own file still offers the fetch command, so the honest-about-remote path
+// has not made the local one unhelpful.
+func TestHeldFileStillShowsTheFetchCommand(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+
+	cfg := f.config(IntentAuthenticated, "austin")
+	cfg.SSHPort = 2222
+	u, err := f.store.GetUser(f.ctx, "austin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.User = u
+
+	s := newSession(t, cfg).typeRunes("f").typeRunes("j").enter().enter()
+	s.contains("To download it:", "sftp -P 2222 austin@this-bbs", "get /utils/ARCHIVE.ZIP")
+	s.notContains("Held by pnw", "does not have the file")
+}
+
+// With no petname and no display name, the short ID is the fallback that always
+// exists — a holder column can never be blank.
+func TestPeerFileWithoutAPetnameShowsTheID(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+	id := seedPeerFile(t, f, "meshwide", "ANON.ZIP", 100, "", "")
+
+	s := f.login(t, "austin").typeRunes("f").enter()
+	// No alias was set, so the node's own display name is what shows.
+	s.contains("Pacific NW")
+
+	s.enter().containsProse("Ask your sysop if you need it")
+	if id.IsZero() {
+		t.Fatal("the peer has no ID")
+	}
+}
+
+// A local-only area has no records at all, so a listing built from the log
+// alone would show an empty area that visibly has files in it.
+func TestLocalOnlyAreaStillListsItsFiles(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+
+	// "utils" is local-only and holds three files.
+	s := f.login(t, "austin").typeRunes("f").typeRunes("j").enter()
+	s.contains("ARCHIVE.ZIP", "README.TXT", "BIG.IMG")
+	// Nothing here is elsewhere, so the mesh caveat is not shown.
+	s.notContains("File listings travel the mesh")
 }

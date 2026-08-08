@@ -469,6 +469,7 @@ Two smaller bounds in the same family:
   1. **Direct IP** from a holding BBS (the TLS 1.3 link of §7.9, or plain HTTPS if the sysop publishes one).
   2. **Sneakernet queue** — the request is recorded, and satisfied at the next bundle exchange.
 - Be honest in the UI: a file with no IP-reachable holder shows "available by request only — queued for next exchange," with the requesting user notified when it lands. Not an error, not a spinner that never resolves.
+  - **Corrected in implementation.** The queue is a Phase 5 deliverable and does not exist yet: nothing records a request and nothing would satisfy one. The browser therefore says which BBS holds the file, that the mesh will never carry its bytes, and — where the holding node published one — that sysop's contact. Printing "queued for next exchange" today would be the exact dishonesty this bullet is about, and worse than the spinner it warns against, because a false promise does not even look like it is still working. The wording returns when the queue does.
 
 ### 6.6 Doors — see §9.
 
@@ -819,7 +820,7 @@ Restating the §1 conclusion as an enforced rule, because it will be tempting to
 - The UI shows network-wide file listings with a "held by" indicator.
 - **The mesh `Link` implementation rejects file payloads.** This is a type-level constraint, not a config option: `FILE_DATA` is not in the set of record types the mesh link will serialize. There is no sysop flag to turn it on and no size threshold below which it's allowed.
 - Fetch paths: (1) direct IP from a holding BBS, (2) queued for the next sneakernet exchange. That's it.
-- Be honest in the UI: "held by `pnw` (`K7QM4X2P…`) — no IP route from here; queued for next exchange" is a feature, not a failure.
+- Be honest in the UI: "held by `pnw` (`K7QM4X2P…`) — no IP route from here; queued for next exchange" is a feature, not a failure. (The first half ships as written; the queue clause is deferred with the queue — see §6.5.)
 
 ### 7.6 The airtime governor
 

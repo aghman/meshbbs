@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/aghman/meshbbs/internal/blobstore"
@@ -355,6 +356,23 @@ type CatalogEntry struct {
 	// mesh replicates catalogs and never bytes (§7.5).
 	Held bool
 
+	// Holder is the friendliest name for Origin: the sysop's local petname if
+	// there is one, else the node's own display name, else nothing — in which
+	// case a caller falls back to the ID. Resolved here rather than per row by
+	// the UI, which would be one query per file.
+	Holder string
+
+	// HolderContact is the holding sysop's contact string from their NODE
+	// record, when they published one. It is the only actionable thing a user
+	// has for a file this BBS cannot fetch, so it is worth carrying.
+	HolderContact string
+
+	// Uploader is the local nick that put the file here, and is empty for a
+	// peer's file. A FILE record carries no uploader — the origin node is the
+	// attribution the network gets (§6.5) — so this is knowable only for our
+	// own.
+	Uploader string
+
 	TS int64
 }
 
@@ -424,4 +442,116 @@ func (s *Store) ListCatalog(ctx context.Context, areaName string) ([]CatalogEntr
 		out = append(out, p.entry)
 	}
 	return out, nil
+}
+
+// ListAreaContents returns everything visible in a file area.
+//
+// # Why this is not just ListCatalog
+//
+// The record log is the network's catalog, but it is not the whole picture at
+// either end. A LOCAL-only area publishes nothing, so its log entries do not
+// exist and the files table is the only source. And a federated area's own
+// files appear in both, where the local row knows things the record cannot
+// carry — who uploaded it, and the full content hash.
+//
+// So this merges: every announced entry, plus every local file that has not
+// been announced, with local rows enriched from the table. A peer announcing a
+// name we also hold produces TWO rows, which is honest rather than tidy — they
+// are different files on different BBSes that happen to share a name, and the
+// holder column is what tells them apart.
+func (s *Store) ListAreaContents(ctx context.Context, areaName string) ([]CatalogEntry, error) {
+	entries, err := s.ListCatalog(ctx, areaName)
+	if err != nil {
+		return nil, err
+	}
+	local, err := s.ListFiles(ctx, areaName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Enrich our own announced entries, and collect the names so the loop below
+	// can tell an unannounced file from one already present.
+	announced := map[string]int{}
+	for i, e := range entries {
+		if e.Local {
+			announced[e.Name] = i
+		}
+	}
+	for _, f := range local {
+		if i, ok := announced[f.Name]; ok {
+			entries[i].Uploader = f.Uploader
+			continue
+		}
+		entries = append(entries, CatalogEntry{
+			Name: f.Name, Size: f.Size, Description: f.Description,
+			Local: true, Held: true, Uploader: f.Uploader, TS: f.UploadedAt,
+		})
+	}
+
+	if err := s.labelHolders(ctx, entries); err != nil {
+		return nil, err
+	}
+
+	// Oldest first, matching every other listing in the BBS.
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].TS != entries[j].TS {
+			return entries[i].TS < entries[j].TS
+		}
+		return entries[i].Name < entries[j].Name
+	})
+	return entries, nil
+}
+
+// labelHolders fills in Holder and HolderContact for peer entries.
+//
+// Two queries for the whole listing rather than two per row: an area with fifty
+// files would otherwise be a hundred round trips through a pool capped at one
+// connection.
+func (s *Store) labelHolders(ctx context.Context, entries []CatalogEntry) error {
+	var needed bool
+	for _, e := range entries {
+		if !e.Local && !e.Origin.IsZero() {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return nil
+	}
+
+	aliases, err := s.ListAliases(ctx)
+	if err != nil {
+		return err
+	}
+	byNode := map[identity.NodeID]string{}
+	for _, a := range aliases {
+		// First alias wins: ListAliases orders by name, so this is stable
+		// rather than dependent on which row the database returned first.
+		if _, seen := byNode[a.NodeID]; !seen {
+			byNode[a.NodeID] = a.Alias
+		}
+	}
+
+	nodes, err := s.ListNodes(ctx)
+	if err != nil {
+		return err
+	}
+	info := map[identity.NodeID]Node{}
+	for _, n := range nodes {
+		info[n.ID] = n
+	}
+
+	for i := range entries {
+		if entries[i].Local || entries[i].Origin.IsZero() {
+			continue
+		}
+		n := info[entries[i].Origin]
+		entries[i].HolderContact = n.SysopContact
+		if alias, ok := byNode[entries[i].Origin]; ok {
+			entries[i].Holder = alias
+			continue
+		}
+		entries[i].Holder = n.DisplayName
+	}
+	return nil
 }
