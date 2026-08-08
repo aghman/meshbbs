@@ -34,6 +34,7 @@ func (s *Server) sessionMiddleware() wish.Middleware {
 			sp := newSessionPresence(s.presence)
 			sess.Context().SetValue(presenceKey{}, sp)
 			defer sp.Leave(sess.Context().SessionID())
+			defer closeMuxFor(sess)
 			h(sess)
 		}
 	}
@@ -41,6 +42,27 @@ func (s *Server) sessionMiddleware() wish.Middleware {
 
 // presenceKey is the context key under which a session's presence view lives.
 type presenceKey struct{}
+
+// muxKey is the context key under which a session's connection mux lives.
+type muxKey struct{}
+
+// muxFor recovers the mux the program handler built for a session.
+//
+// It lives on the context for the same reason the presence view does: the thing
+// that creates it runs inside the Bubble Tea middleware, and the thing that has
+// to tear it down wraps the whole session from outside.
+func muxFor(sess ssh.Session) *connMux {
+	m, _ := sess.Context().Value(muxKey{}).(*connMux)
+	return m
+}
+
+// closeMuxFor releases a session's mux, if it got as far as having one. A
+// session with no PTY, or one that failed authentication, never does.
+func closeMuxFor(sess ssh.Session) {
+	if m := muxFor(sess); m != nil {
+		m.Close()
+	}
+}
 
 // presenceFor recovers the presence view the middleware created for a session.
 func presenceFor(sess ssh.Session) tui.PresenceTracker {
@@ -124,10 +146,18 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 		Ctx:        context.Background(),
 	})
 
+	// Everything the session reads and writes goes through the mux rather than
+	// straight to sess, so that a door can be handed the connection later
+	// without cancelling a read in flight (see mux.go). With nothing borrowed
+	// the mux is a pass-through, which is what it is for every session until
+	// doors exist.
+	mux := newConnMux(sess, sess)
+	sess.Context().SetValue(muxKey{}, mux)
+
 	_ = winCh
 	return tea.NewProgram(model,
-		tea.WithInput(sess),
-		tea.WithOutput(sess),
+		tea.WithInput(mux.TUI()),
+		tea.WithOutput(mux.TUI()),
 		tea.WithAltScreen(),
 	)
 }
