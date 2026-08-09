@@ -31,8 +31,10 @@ type Door struct {
 	MaxConcurrent int
 	NodeLock      bool
 	WallClock     time.Duration
-	// CPULimit and MemLimit are recorded but not yet enforced; see
-	// UnenforcedLimits.
+	// CPULimit and MemLimit are optional (§9.4). Whether they can be ENFORCED
+	// depends on the operating system, which is not a question this package
+	// can answer — internal/door does, and the launcher refuses a door whose
+	// limits this platform cannot apply.
 	CPULimit time.Duration
 	MemLimit int64
 
@@ -142,24 +144,6 @@ const (
 	MaxDoorStateKeyLen   = 64
 	MaxDoorStateValueLen = 4096
 )
-
-// UnenforcedLimits names the limits a door row can carry that nothing currently
-// applies (§9.4).
-//
-// Returned rather than logged from here so the caller can say it where a sysop
-// will see it. Setting one is not an error — the column exists so that turning
-// it on later is a code change and not a migration — but a limit that is
-// recorded and not applied must never be allowed to look like protection.
-func (d Door) UnenforcedLimits() []string {
-	var out []string
-	if d.CPULimit > 0 {
-		out = append(out, "cpu_limit")
-	}
-	if d.MemLimit > 0 {
-		out = append(out, "mem_limit")
-	}
-	return out
-}
 
 // MayAnnounce reports whether this door has somewhere to announce to.
 //

@@ -142,14 +142,6 @@ func doorOutcome(name string, res door.Result) string {
 
 // specFor turns a door row into something the runner will accept.
 func specFor(d store.Door) (door.Spec, error) {
-	if unenforced := d.UnenforcedLimits(); len(unenforced) > 0 {
-		// Said out loud rather than ignored. A sysop who set a memory limit
-		// believes there is one, and a limit that is recorded and not applied
-		// must never be allowed to look like protection (§9.4).
-		return door.Spec{}, fmt.Errorf(
-			"%s sets %v, which nothing enforces yet; clear it so the limit is not "+
-				"mistaken for protection", d.Name, unenforced)
-	}
 	spec := door.Spec{
 		Name:          d.Name,
 		Path:          d.Path,
@@ -157,6 +149,8 @@ func specFor(d store.Door) (door.Spec, error) {
 		Dir:           d.Cwd,
 		Env:           passthroughEnv(d.EnvPassthrough),
 		Dropfile:      d.DropfileType,
+		CPULimit:      d.CPULimit,
+		MemLimit:      d.MemLimit,
 		MaxConcurrent: d.MaxConcurrent,
 		NodeLock:      d.NodeLock,
 		WallClock:     d.WallClock,

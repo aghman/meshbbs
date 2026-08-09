@@ -31,10 +31,10 @@ CREATE TABLE doors (
     env_passthrough TEXT NOT NULL DEFAULT '[]',
     dropfile_type   TEXT NOT NULL DEFAULT 'none',
 
-    -- Limits (§9.4). cpu_limit and mem_limit are recorded but NOT yet enforced:
-    -- applying them needs rlimits set between fork and exec, which Go offers no
-    -- cgo-free hook for. They are here because leaving the column out would mean
-    -- a migration later; a sysop setting one today gets a warning, not silence.
+    -- Limits (§9.4). Whether cpu_limit and mem_limit can be ENFORCED depends on
+    -- the operating system — memory cannot be limited on macOS at all — so a
+    -- door whose limits this platform cannot apply is refused when it launches
+    -- rather than being run without them.
     max_concurrent    INTEGER NOT NULL DEFAULT 0,   -- 0 = no cap
     node_lock         INTEGER NOT NULL DEFAULT 0,
     cpu_limit_secs    INTEGER NOT NULL DEFAULT 0,   -- 0 = unset

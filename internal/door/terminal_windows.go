@@ -7,7 +7,6 @@ import (
 	"os"
 	"sync"
 	"syscall"
-	"unsafe"
 
 	"github.com/charmbracelet/x/conpty"
 	"golang.org/x/sys/windows"
@@ -68,7 +67,7 @@ func startTerminal(spec Spec, sess Session) (terminal, error) {
 		return nil, fmt.Errorf("create pseudo console: %w", err)
 	}
 
-	job, err := newDoorJob()
+	job, err := newDoorJob(spec)
 	if err != nil {
 		_ = cpty.Close()
 		return nil, err
@@ -104,25 +103,16 @@ func startTerminal(spec Spec, sess Session) (terminal, error) {
 	return &windowsTerminal{cpty: cpty, job: job, proc: proc, pid: pid}, nil
 }
 
-// newDoorJob creates the job a door and its descendants live in.
-func newDoorJob() (windows.Handle, error) {
+// newDoorJob creates the job a door and its descendants live in, carrying
+// kill-on-close and whatever limits the door was configured with.
+func newDoorJob(spec Spec) (windows.Handle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return 0, fmt.Errorf("create job object: %w", err)
 	}
-	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
-		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
-			LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-		},
-	}
-	if _, err := windows.SetInformationJobObject(
-		job,
-		windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&info)),
-		uint32(unsafe.Sizeof(info)),
-	); err != nil {
+	if err := applyJobLimits(job, spec.CPULimit, spec.MemLimit); err != nil {
 		_ = windows.CloseHandle(job)
-		return 0, fmt.Errorf("configure job object: %w", err)
+		return 0, err
 	}
 	return job, nil
 }

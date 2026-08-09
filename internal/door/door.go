@@ -68,6 +68,11 @@ type Spec struct {
 	// Many doors keep per-node state on disk and assume they are alone in it
 	// (§9.4).
 	NodeLock bool
+	// CPULimit bounds the processor time a door may use, and MemLimit the
+	// memory it may hold. Both are optional, and neither is the safety net —
+	// see limits.go, and WallClock below, which is.
+	CPULimit time.Duration
+	MemLimit int64
 	// WallClock bounds one run, and is REQUIRED. A door is a third-party binary
 	// holding a user's session open; without a bound, one that hangs takes the
 	// session with it and the user cannot even quit. A generous limit is a
@@ -235,6 +240,11 @@ func (m *Manager) Running(name string) int {
 // holding the connection on the door's behalf and must not get it back early.
 func (m *Manager) Run(ctx context.Context, spec Spec, sess Session) (Result, error) {
 	if err := spec.validate(); err != nil {
+		return Result{}, err
+	}
+	// Refused here rather than ignored: a limit this platform cannot apply
+	// must not be allowed to pass for protection (§9.4).
+	if err := checkLimits(spec); err != nil {
 		return Result{}, err
 	}
 	release, err := m.reserve(spec, sess.Node)

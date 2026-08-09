@@ -160,6 +160,13 @@ jobs:
           ./meshbbs --data-dir "$D" door disable tradewars
           ./meshbbs --data-dir "$D" door remove tradewars
 
+          # A memory limit is enforceable on Linux and not on macOS, and the
+          # difference must be visible where a sysop sets one rather than when a
+          # player cannot start the game (§9.4).
+          ./meshbbs --data-dir "$D" door add capped /bin/echo --mem-limit 67108864
+          ./meshbbs --data-dir "$D" door show capped | grep -q "67108864 bytes"
+          ./meshbbs --data-dir "$D" door remove capped
+
           # A door too long to post under must be refused when it is installed,
           # not when it first tries to announce (§9.1.1, author field is 16B).
           if ./meshbbs --data-dir "$D" door add averylongdoorname /bin/echo \

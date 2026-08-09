@@ -14,6 +14,7 @@ import (
 
 	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/config"
+	"github.com/aghman/meshbbs/internal/door"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/spf13/cobra"
@@ -33,6 +34,23 @@ type env struct {
 
 // Execute runs the root command.
 func Execute() int {
+	// Before cobra sees anything: this binary doubles as its own helper for
+	// applying a door's resource limits, because on Unix those can only be set
+	// between fork and exec and Go offers no hook there without cgo (§4,
+	// internal/door/limits.go). The helper applies the limits and execs the
+	// door in place, so it leaves no process behind.
+	//
+	// Checked here rather than registered as a command so that it cannot be
+	// reached by a user typing something plausible, and so that no command
+	// parsing runs in a process that is about to become a different program.
+	if door.IsHelper(os.Args) {
+		if err := door.RunHelper(os.Args); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+
 	if err := newRootCmd().Execute(); err != nil {
 		// Cobra has already printed the error; exit non-zero without repeating it.
 		return 1

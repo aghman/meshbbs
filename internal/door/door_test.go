@@ -39,6 +39,17 @@ const (
 )
 
 func TestMain(m *testing.M) {
+	// The limit helper, exactly as the real binary does it (cli.Execute). The
+	// runner re-executes whatever os.Executable() reports, which under test is
+	// this binary — so without this, every door with a limit would re-enter the
+	// test suite instead of applying its limits.
+	if IsHelper(os.Args) {
+		if err := RunHelper(os.Args); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if mode := os.Getenv(helperEnv); mode != "" {
 		helperMain(mode, os.Getenv(helperArgEnv))
 		return

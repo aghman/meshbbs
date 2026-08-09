@@ -4,6 +4,7 @@ package door
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -53,7 +54,17 @@ type unixTerminal struct {
 }
 
 func startTerminal(spec Spec, sess Session) (terminal, error) {
-	cmd := exec.Command(spec.Path, spec.Args...)
+	// A door with a CPU or memory limit is launched through this binary acting
+	// as its own helper, which applies the limits and then execs the door in
+	// place (limits.go). One with no limits is launched directly, so the
+	// ordinary case does not go anywhere near it.
+	self, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("find this binary, to apply the door's limits: %w", err)
+	}
+	path, args := limitCommand(self, spec)
+
+	cmd := exec.Command(path, args...)
 	cmd.Dir = spec.Dir
 	cmd.Env = spec.environ(sess)
 

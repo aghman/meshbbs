@@ -3,11 +3,14 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/aghman/meshbbs/internal/door"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -89,6 +92,8 @@ func newDoorShowCmd(e *env) *cobra.Command {
 				fmt.Fprintf(w, "env_passthrough\t%s\n", strings.Join(d.EnvPassthrough, " "))
 				fmt.Fprintf(w, "dropfile\t%s\n", d.DropfileType)
 				fmt.Fprintf(w, "wall_clock\t%s\n", d.WallClock)
+				fmt.Fprintf(w, "cpu_limit\t%s\n", limitOrNone(d.CPULimit))
+				fmt.Fprintf(w, "mem_limit\t%s\n", bytesOrNone(d.MemLimit))
 				fmt.Fprintf(w, "max_concurrent\t%d\n", d.MaxConcurrent)
 				fmt.Fprintf(w, "node_lock\t%t\n", d.NodeLock)
 				fmt.Fprintf(w, "required_capability\t%s\n", d.RequiredCapability)
@@ -107,13 +112,7 @@ func newDoorShowCmd(e *env) *cobra.Command {
 						"do themselves, every such action is written to the audit log, and "+
 						"each user is told the first time it happens.\n")
 				}
-				if unenforced := d.UnenforcedLimits(); len(unenforced) > 0 {
-					fmt.Fprintf(out, "\nWARNING: %s set but NOT enforced. Applying them needs "+
-						"resource limits between fork and exec, which is not built yet. "+
-						"This door will refuse to launch until they are cleared, so that a "+
-						"limit nobody applies cannot be mistaken for protection.\n",
-						strings.Join(unenforced, " and "))
-				}
+				warnUnsupportedLimits(out, d)
 				return nil
 			})
 		},
@@ -127,6 +126,8 @@ func newDoorAddCmd(e *env) *cobra.Command {
 		envPassthrough  []string
 		dropfile        string
 		wallClock       time.Duration
+		cpuLimit        time.Duration
+		memLimit        int64
 		maxConcurrent   int
 		nodeLock        bool
 		requiredCap     string
@@ -171,6 +172,8 @@ playing it.`,
 					MaxConcurrent:      maxConcurrent,
 					NodeLock:           nodeLock,
 					WallClock:          wallClock,
+					CPULimit:           cpuLimit,
+					MemLimit:           memLimit,
 					RequiredCapability: requiredCap,
 					APILevel:           apiLevel,
 					AnnounceArea:       announceArea,
@@ -185,6 +188,7 @@ playing it.`,
 				out := cmd.OutOrStdout()
 				fmt.Fprintf(out, "Installed %s at API level %d (%s).\n",
 					d.Name, d.APILevel, apiLevelName(d.APILevel))
+				warnUnsupportedLimits(out, d)
 				if d.APILevel >= store.APIActAsUser {
 					// Loudly, once, at the moment of the decision. A grant this
 					// wide should not be something a sysop discovers later in a
@@ -210,6 +214,10 @@ playing it.`,
 		"dropfile to write: none, door.sys, door32.sys or dorinfo1.def")
 	f.DurationVar(&wallClock, "limit", time.Hour,
 		"wall-clock limit; the door is killed when it runs out")
+	f.DurationVar(&cpuLimit, "cpu-limit", 0,
+		"processor time a door may use, 0 for no limit; not the safety net, --limit is")
+	f.Int64Var(&memLimit, "mem-limit", 0,
+		"memory a door may hold in bytes, 0 for no limit; cannot be enforced on macOS")
 	f.IntVar(&maxConcurrent, "max-concurrent", 0, "simultaneous instances, 0 for no cap")
 	f.BoolVar(&nodeLock, "node-lock", false, "allow only one instance per node number")
 	f.StringVar(&requiredCap, "required-capability", "",
@@ -300,4 +308,38 @@ func withDoorStore(cmd *cobra.Command, e *env, fn func(context.Context, *store.S
 	}
 	defer st.Close()
 	return fn(ctx, st)
+}
+
+// warnUnsupportedLimits says so when a door carries a limit this platform
+// cannot apply.
+//
+// At install time as well as on show, because the alternative is a sysop
+// discovering it when a player cannot start the game. The door is refused at
+// launch rather than run without the limit (§9.4), and saying that here is the
+// difference between a configuration mistake and an outage.
+func warnUnsupportedLimits(out io.Writer, d store.Door) {
+	bad := door.UnsupportedLimits(d.CPULimit, d.MemLimit)
+	if len(bad) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "\nWARNING: %s cannot be enforced on %s, so %s will REFUSE to\n"+
+		"launch until it is cleared. A limit nobody applies must not be mistaken\n"+
+		"for protection.\n",
+		strings.Join(bad, " and "), runtime.GOOS, d.Name)
+}
+
+// limitOrNone renders a duration limit, or says there is not one.
+func limitOrNone(d time.Duration) string {
+	if d <= 0 {
+		return "none"
+	}
+	return d.String()
+}
+
+// bytesOrNone renders a byte limit, or says there is not one.
+func bytesOrNone(n int64) string {
+	if n <= 0 {
+		return "none"
+	}
+	return fmt.Sprintf("%d bytes", n)
 }

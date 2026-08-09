@@ -141,17 +141,23 @@ func TestDoorValidation(t *testing.T) {
 	}
 }
 
-// A limit that is recorded and not applied must never look like protection.
-func TestUnenforcedLimitsAreReported(t *testing.T) {
+// The limits are stored as configured, whatever this platform can do with
+// them: what is enforceable is internal/door's question, and the launcher
+// refuses a door whose limits cannot be applied here.
+func TestDoorLimitsRoundTrip(t *testing.T) {
+	s, ctx := testStore(t)
 	d := testDoor()
-	if got := d.UnenforcedLimits(); len(got) != 0 {
-		t.Errorf("a door with no cpu or memory limit reported %v", got)
-	}
-	d.CPULimit = time.Minute
+	d.CPULimit = 90 * time.Second
 	d.MemLimit = 1 << 20
-	got := strings.Join(d.UnenforcedLimits(), ",")
-	if !strings.Contains(got, "cpu_limit") || !strings.Contains(got, "mem_limit") {
-		t.Errorf("unenforced limits reported as %q", got)
+	if err := s.PutDoor(ctx, d, "sysop"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetDoor(ctx, d.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CPULimit != d.CPULimit || got.MemLimit != d.MemLimit {
+		t.Errorf("limits round-tripped as cpu=%v mem=%d", got.CPULimit, got.MemLimit)
 	}
 }
 
