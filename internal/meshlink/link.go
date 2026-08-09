@@ -993,11 +993,44 @@ func (l *Link) announcement() []byte {
 // connect-time announcement only reaches peers that were already listening.
 func (l *Link) Announce(ctx context.Context) error { return l.announce(ctx) }
 
+// announce broadcasts this node's binding and counts it.
+//
+// # Why the counter moves before the send, and comes back if it fails
+//
+// A send is not over when the call returns. sendFrame hands the frame to the
+// radio, and from that instant the packet is a peer's to act on: it decodes,
+// it answers, it binds a node ID, and an observer watching for that effect can
+// see all of it while the sending goroutine has not yet reached the line after
+// the call. Incrementing there means the counter can be behind a packet whose
+// arrival has already been witnessed — the send demonstrably happened, and the
+// number says it did not.
+//
+// Where that bit, so far, is the suite. TestWhoIsForAnotherRadioIsIgnored
+// waits for b to learn a — which can only happen if a answered the who-is —
+// and then read AnnouncesSent as unchanged. It failed about one full-suite run
+// in five and never once in isolation, which made it look unreproducible; the
+// window is simply as wide as the scheduler makes it, and
+//
+//	go test ./internal/meshlink/ -run TestWhoIsForAnotherRadioIsIgnored \
+//	    -count=300 -cpu=1
+//
+// pins one goroutine's worth of it and fails every time. On a real mesh the
+// same gap is microseconds against a status screen nobody reads that fast, so
+// ordering the increment costs approximately nothing and buys a counter that
+// cannot contradict a packet already delivered.
+//
+// Counting first closes it, at the price of a counter that would include sends
+// that then failed. Hence the refund on the error path: on a radio that has
+// dropped, every periodic announce fails, and a screen showing those as sent
+// would answer "why can nobody see me" with the one number that still looks
+// fine. Nothing goes out on that path, so no observer can have seen an effect
+// the refund contradicts.
 func (l *Link) announce(ctx context.Context) error {
+	l.announcesSent.Add(1)
 	if err := l.sendFrame(ctx, broadcastAddr, l.announcement(), false); err != nil {
+		l.announcesSent.Add(^uint64(0))
 		return err
 	}
-	l.announcesSent.Add(1)
 	return nil
 }
 
@@ -1111,10 +1144,14 @@ func (l *Link) SendClass(ctx context.Context, to identity.NodeID, payload []byte
 	// retries are limited, and asking for them on a broadcast would have every
 	// hearer acknowledge — the digest storm with a different name.
 	wantAck := dest != broadcastAddr && payload[0] == FrameControl
+	// Counted before the send and refunded if it fails, for the reason spelled
+	// out above announce: a packet the peer has already acted on must not be
+	// missing from the number that says we sent it.
+	l.sent.Add(1)
 	if err := l.sendFrame(ctx, dest, payload, wantAck); err != nil {
+		l.sent.Add(^uint64(0))
 		return err
 	}
-	l.sent.Add(1)
 	return nil
 }
 
