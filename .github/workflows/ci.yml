@@ -152,6 +152,22 @@ jobs:
           ./meshbbs --data-dir "$D" dev seed --seed 2 --users 1 --posts 0 >/dev/null
           echo "newpassword" | ./meshbbs --data-dir "$D" user passwd bob
 
+          # Doors are database rows, not config, so the CLI is the only way to
+          # install one and the only place a bad one can be caught (§11.5).
+          ./meshbbs --data-dir "$D" door add tradewars /bin/echo --limit 30m
+          ./meshbbs --data-dir "$D" door list | grep -q tradewars
+          ./meshbbs --data-dir "$D" door show tradewars | grep -q "api_level"
+          ./meshbbs --data-dir "$D" door disable tradewars
+          ./meshbbs --data-dir "$D" door remove tradewars
+
+          # A door too long to post under must be refused when it is installed,
+          # not when it first tries to announce (§9.1.1, author field is 16B).
+          if ./meshbbs --data-dir "$D" door add averylongdoorname /bin/echo \
+               --announce-area general; then
+            echo "FAIL: accepted a door whose name cannot fit a post author"
+            exit 1
+          fi
+
           # An unknown config key must fail the check (§11.3).
           echo 'levle = "debug"' >> "$D/config.toml"
           if ./meshbbs --data-dir "$D" config check; then

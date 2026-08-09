@@ -51,6 +51,10 @@ type Options struct {
 	IdleTimeoutMins         int
 	UnlockedIdleTimeoutMins int
 	SessionTTLHours         int
+	// SSHHost and SSHPort are how a browser user reaches a terminal, for the
+	// door list to point at. Doors are not playable here ([D16], doors.go).
+	SSHHost string
+	SSHPort int
 	// SessionLimit ends a session after this long (§11.5). Zero means no limit.
 	//
 	// Distinct from the idle timeouts above, which end a session that has

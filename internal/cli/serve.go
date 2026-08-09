@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aghman/meshbbs/internal/bbs"
+	"github.com/aghman/meshbbs/internal/door"
 	"github.com/aghman/meshbbs/internal/logging"
 	"github.com/aghman/meshbbs/internal/sshd"
 	"github.com/aghman/meshbbs/internal/store"
@@ -103,6 +104,14 @@ Serves SSH on the configured port. Users connect with:
 				port = e.cfg.SSH.Port
 			}
 
+			// Doors get a manager and a way into the BBS (§9.1.1). One manager
+			// for the instance, because the limits it enforces — how many
+			// copies of a door may run, which nodes hold a lock, how often a
+			// door may announce — are statements about the whole board and not
+			// about one session.
+			doors := door.New(e.clock, log)
+			doors.SetHost(svc.Doors())
+
 			srv, err := sshd.NewServer(svc, st, sshd.Options{
 				Bind:         e.cfg.SSH.Bind,
 				Port:         port,
@@ -115,6 +124,7 @@ Serves SSH on the configured port. Users connect with:
 				WebEnabled:   e.cfg.Web.Enabled,
 				WebURL:       e.cfg.Web.Origin,
 				SessionLimit: sessionLimit(e.cfg.Users.SessionTimeLimitMins),
+				Doors:        doors,
 				Clock:        e.clock,
 				Location:     loc,
 				Logger:       log,
@@ -210,9 +220,13 @@ Serves SSH on the configured port. Users connect with:
 					UnlockedIdleTimeoutMins: e.cfg.Web.UnlockedIdleTimeoutMins,
 					SessionTTLHours:         e.cfg.Web.SessionTTLHours,
 					SessionLimit:            sessionLimit(e.cfg.Users.SessionTimeLimitMins),
-					EnrolAttemptsPerHour:    e.cfg.Web.EnrolAttemptsPerHour,
-					AuthAttemptsPerHour:     e.cfg.Web.AuthAttemptsPerHour,
-					TrustedProxies:          e.cfg.TrustedProxyRanges(),
+					// Doors are not playable in a browser ([D16]); the list
+					// says so and points at the terminal that can run them.
+					SSHHost:              sshHostFor(e.cfg.SSH.Bind),
+					SSHPort:              port,
+					EnrolAttemptsPerHour: e.cfg.Web.EnrolAttemptsPerHour,
+					AuthAttemptsPerHour:  e.cfg.Web.AuthAttemptsPerHour,
+					TrustedProxies:       e.cfg.TrustedProxyRanges(),
 					// Shared with SSH and telnet, not duplicated: a browser user
 					// gets a node number, shows up in who's-online, and joins the
 					// same chat as everyone else.
@@ -261,4 +275,18 @@ func sessionLimit(mins int) time.Duration {
 		return 0
 	}
 	return time.Duration(mins) * time.Minute
+}
+
+// sshHostFor turns the SSH listener's bind address into something a caller can
+// type.
+//
+// A wildcard bind says nothing about how to reach the board, so it produces no
+// host at all and the browser prints a placeholder. That is better than
+// printing 0.0.0.0, which looks like an answer and is not one.
+func sshHostFor(bind string) string {
+	switch bind {
+	case "", "0.0.0.0", "::", "[::]":
+		return ""
+	}
+	return bind
 }

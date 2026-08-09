@@ -70,6 +70,7 @@ const (
 	screenFileArea
 	screenFileInfo
 	screenFileDescribe
+	screenDoorList
 	screenGoodbye
 )
 
@@ -109,6 +110,12 @@ type Config struct {
 	// limit, which is the default and what every board ran on until someone
 	// needed the lines back.
 	SessionLimit time.Duration
+	// Doors runs a door on this session's terminal, or explains why this front
+	// end cannot. Nil means this connection offers no doors at all.
+	Doors DoorLauncher
+	// TermType is the client's declared terminal, passed through to doors as
+	// TERM. Empty is normal for a browser, which has no such thing.
+	TermType string
 	// DisableWatchers stops a session from starting its background watchers:
 	// the chat poller and the session-time watcher.
 	//
@@ -146,6 +153,10 @@ type Model struct {
 	// Transient UI state.
 	status    string
 	statusErr bool
+
+	// doors installed on this BBS, and the cursor within them.
+	doors   []store.Door
+	doorIdx int
 
 	// startedAt is when this session began, for the time limit. Read from the
 	// injected clock, so a virtual one makes a two-hour limit testable.
@@ -282,6 +293,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case timeCheckMsg:
 		return m.enforceTimeLimit()
+
+	case doorsLoadedMsg:
+		m.doors = msg.doors
+		if m.doorIdx >= len(m.doors) {
+			m.doorIdx = 0
+		}
+		return m, nil
+
+	case doorDoneMsg:
+		// Back on the list with the outcome. The door owned the screen while it
+		// ran and the renderer's output was discarded, so what the user is
+		// looking at is whatever the door left — the front end repaints.
+		m.status, m.statusErr = msg.status, msg.isErr
+		m.setWhere("doors")
+		return m, nil
 
 	case statusMsg:
 		m.status, m.statusErr = msg.text, msg.isErr
@@ -452,6 +478,8 @@ func (m Model) Screen() Screen {
 		return m.buildFileInfo()
 	case screenFileDescribe:
 		return m.buildFileDescribe()
+	case screenDoorList:
+		return m.buildDoorList()
 	default:
 		return m.buildMenu()
 	}

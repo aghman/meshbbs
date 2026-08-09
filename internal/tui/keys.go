@@ -53,6 +53,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFileInfoKey(msg)
 	case screenFileDescribe:
 		return m.handleFileDescribeKey(msg)
+	case screenDoorList:
+		return m.handleDoorListKey(msg)
 	case screenAreaRead:
 		return m.handleAreaReadKey(msg)
 	case screenPostCompose:
@@ -126,6 +128,11 @@ func (m Model) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sysop_ = sysopState{}
 		m.setWhere("sysop")
 		return m, tea.Batch(m.loadSysopData(), m.loadPeers())
+	case "d":
+		m.screen = screenDoorList
+		m.doorIdx = 0
+		m.setWhere("doors")
+		return m, m.loadDoors()
 	case "n":
 		m.screen = screenNodeInfo
 		return m, nil

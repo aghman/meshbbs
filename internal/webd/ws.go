@@ -99,6 +99,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		// the one thing the SSH path has to guess at (§5.4).
 		Encoding:     term.EncodingUTF8,
 		SessionLimit: s.opts.SessionLimit,
+		Doors:        &doorLauncher{sshHost: s.opts.SSHHost, sshPort: s.opts.SSHPort},
 		ThemeName:    s.opts.ThemeName,
 		Width:        webWidth,
 		Height:       webHeight,

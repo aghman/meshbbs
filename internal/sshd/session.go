@@ -119,6 +119,18 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 		height = 24
 	}
 
+	// Everything the session reads and writes goes through the mux rather than
+	// straight to sess, so that a door can be handed the connection without
+	// cancelling a read in flight (see mux.go). With nothing borrowed the mux
+	// is a pass-through.
+	mux := newConnMux(sess, sess)
+	sess.Context().SetValue(muxKey{}, mux)
+
+	var doors tui.DoorLauncher
+	if s.opts.Doors != nil {
+		doors = &doorLauncher{mux: mux, mgr: s.opts.Doors, windows: winCh}
+	}
+
 	model := tui.New(tui.Config{
 		Service:      s.svc,
 		Store:        s.store,
@@ -143,24 +155,26 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 		KeyFP:        d.Fingerprint,
 		AuthNote:     d.Reason,
 		SessionLimit: s.opts.SessionLimit,
+		Doors:        doors,
+		TermType:     pty.Term,
 		Logger:       s.log,
 		Ctx:          context.Background(),
 	})
 
-	// Everything the session reads and writes goes through the mux rather than
-	// straight to sess, so that a door can be handed the connection later
-	// without cancelling a read in flight (see mux.go). With nothing borrowed
-	// the mux is a pass-through, which is what it is for every session until
-	// doors exist.
-	mux := newConnMux(sess, sess)
-	sess.Context().SetValue(muxKey{}, mux)
-
-	_ = winCh
-	return tea.NewProgram(model,
+	p := tea.NewProgram(model,
 		tea.WithInput(mux.TUI()),
 		tea.WithOutput(mux.TUI()),
 		tea.WithAltScreen(),
 	)
+
+	// A door draws over the alt screen while the renderer's output is being
+	// discarded, so the renderer comes back believing the screen already shows
+	// its last frame. ClearScreen wipes what the door left AND forces a full
+	// repaint; without it the user gets the menu back as a few stray lines over
+	// a game's final board.
+	mux.onResume = func() { p.Send(tea.ClearScreen()) }
+
+	return p
 }
 
 // TUI adapts the tracker to the interface the session layer needs.
