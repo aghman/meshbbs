@@ -125,7 +125,7 @@ func (m Model) refreshChat() tea.Cmd {
 // and §12.1 forbids reaching for one in domain code — the determinism checker
 // catches it, as it did when this was first written with time.After.
 func (m Model) pollChat() tea.Cmd {
-	if m.cfg.Chat == nil || m.cfg.DisableChatPolling {
+	if m.cfg.Chat == nil || m.cfg.DisableWatchers {
 		return nil
 	}
 	ch := m.cfg.Chat.Watch(m.cfg.SessionID)

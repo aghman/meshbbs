@@ -40,6 +40,9 @@ type clientMsg struct {
 type serverMsg struct {
 	Screen tui.Screen `json:"screen"`
 	Nick   string     `json:"nick"`
+	// Farewell is why the session is ending, on the last frame before the
+	// socket closes. Empty on every other frame.
+	Farewell string `json:"farewell,omitempty"`
 }
 
 const (
@@ -94,19 +97,21 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		// The browser renders Screen values, so this only decides which glyph
 		// set the model reaches for. A browser is unambiguously UTF-8, which is
 		// the one thing the SSH path has to guess at (§5.4).
-		Encoding:   term.EncodingUTF8,
-		ThemeName:  s.opts.ThemeName,
-		Width:      webWidth,
-		Height:     webHeight,
-		SessionID:  sess.ID,
-		Remote:     r.RemoteAddr,
-		WebEnabled: true,
-		WebURL:     s.opts.Origin,
-		Intent:     tui.IntentAuthenticated,
-		Nick:       user.Nick,
-		User:       user,
-		Logger:     s.log,
-		Ctx:        ctx,
+		Encoding:     term.EncodingUTF8,
+		SessionLimit: s.opts.SessionLimit,
+		Doors:        &doorLauncher{sshHost: s.opts.SSHHost, sshPort: s.opts.SSHPort},
+		ThemeName:    s.opts.ThemeName,
+		Width:        webWidth,
+		Height:       webHeight,
+		SessionID:    sess.ID,
+		Remote:       r.RemoteAddr,
+		WebEnabled:   true,
+		WebURL:       s.opts.Origin,
+		Intent:       tui.IntentAuthenticated,
+		Nick:         user.Nick,
+		User:         user,
+		Logger:       s.log,
+		Ctx:          ctx,
 	})
 	// Closing the driver runs the model's own exit path, which clears the mail
 	// passphrase and leaves Presence — the same teardown an SSH disconnect gets.
@@ -175,7 +180,9 @@ func (s *Server) writeLoop(ctx context.Context, conn *websocket.Conn,
 			// The user quit. Send the final screen, then close politely so the
 			// browser can say so rather than reporting a dropped connection.
 			_ = s.push(ctx, conn, driver, nick)
-			_ = conn.Close(websocket.StatusNormalClosure, "goodbye")
+			// The close reason as well as the frame: a browser that has already
+			// torn the page down still surfaces this one.
+			_ = conn.Close(websocket.StatusNormalClosure, closeReason(driver.Farewell()))
 			return
 		case <-driver.Dirty():
 		}
@@ -187,7 +194,9 @@ func (s *Server) push(ctx context.Context, conn *websocket.Conn,
 	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 
-	err := wsjson.Write(writeCtx, conn, serverMsg{Screen: driver.Screen(), Nick: nick})
+	err := wsjson.Write(writeCtx, conn, serverMsg{
+		Screen: driver.Screen(), Nick: nick, Farewell: driver.Farewell(),
+	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		s.log.Debug("web session write failed", "err", err)
 	}
@@ -203,4 +212,17 @@ func originHost(origin string) string {
 		}
 	}
 	return origin
+}
+
+// closeReason fits a farewell into a WebSocket close frame, which allows 123
+// bytes and drops the whole close if given more.
+func closeReason(farewell string) string {
+	if farewell == "" {
+		return "goodbye"
+	}
+	const max = 120
+	if len(farewell) > max {
+		return farewell[:max]
+	}
+	return farewell
 }

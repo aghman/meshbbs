@@ -13,7 +13,9 @@ and no address authority — and sysops give peers short local names (`austin@pn
 name hosts in an SSH config. A gateway can bridge selected echo areas to existing FidoNet-style
 message networks.
 
-**Status:** Phase 3 is code-complete — a usable single-node BBS, the sync protocol and its
+**Status:** Phase 4 is code-complete — door games run over SSH and telnet, with the §9.1.1
+capability model, resource limits, dropfiles, two bundled reference doors and a written
+[spec](docs/doors.md). Phase 3 is code-complete — a usable single-node BBS, the sync protocol and its
 simulator, federation over IP, and the Meshtastic link with its airtime governor, ham-mode safety
 checks, `mesh survey`, and file catalog replication.
 
@@ -93,6 +95,8 @@ recovered, and the instance would have to re-establish with its peers as a new n
 
 - [High-Level Design](docs/design.md) — architecture, mesh sync protocol, airtime budget, roadmap,
   and the decision log.
+- [The Door API](docs/doors.md) — what a door is handed, what it may ask for, and what it
+  will be refused. The contract a door author writes against, specified at the wire level.
 - [Web UI Design](docs/webui.md) — the semantic-terminal shape, the block vocabulary, passkey
   authentication and enrolment. Owns §5.3 of the design doc in detail.
 - [Configuration reference](docs/config.md) — generated; run `meshbbs config reference` for the

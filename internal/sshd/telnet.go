@@ -33,7 +33,9 @@ type TelnetOptions struct {
 	Chat        *tui.ChatRoom
 	Presence    *Presence
 	Location    *time.Location
-	Logger      *slog.Logger
+	// SessionLimit ends a session after this long (§11.5). Zero means no limit.
+	SessionLimit time.Duration
+	Logger       *slog.Logger
 }
 
 // TelnetServer serves the BBS over a raw socket.
@@ -206,16 +208,24 @@ func (t *TelnetServer) handle(ctx context.Context, conn net.Conn) {
 		// user later says otherwise (§5.4).
 		Encoding: term.EncodingCP437,
 		Width:    80, Height: 24,
-		SessionID: sessionID,
-		Remote:    conn.RemoteAddr().String(),
-		Intent:    tui.IntentGuest,
-		Nick:      "guest",
-		Ctx:       ctx,
+		SessionID:    sessionID,
+		SessionLimit: t.opts.SessionLimit,
+		Remote:       conn.RemoteAddr().String(),
+		Intent:       tui.IntentGuest,
+		Nick:         "guest",
+		Ctx:          ctx,
 	})
 
+	// The mux sits OUTSIDE the telnet reader, so a borrower gets application
+	// bytes with IAC sequences already stripped — a door has no business seeing
+	// telnet negotiation, and the state machine below must keep running across a
+	// handoff or it would lose its place mid-sequence.
+	mux := newConnMux(&telnetReader{conn: conn, onEnd: cancelConn}, conn)
+	defer mux.Close()
+
 	p := tea.NewProgram(model,
-		tea.WithInput(&telnetReader{conn: conn, onEnd: cancelConn}),
-		tea.WithOutput(conn),
+		tea.WithInput(mux.TUI()),
+		tea.WithOutput(mux.TUI()),
 		tea.WithContext(connCtx),
 	)
 	if _, err := p.Run(); err != nil {

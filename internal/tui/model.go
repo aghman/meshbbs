@@ -70,6 +70,7 @@ const (
 	screenFileArea
 	screenFileInfo
 	screenFileDescribe
+	screenDoorList
 	screenGoodbye
 )
 
@@ -105,13 +106,27 @@ type Config struct {
 	Chat      *ChatRoom
 	Clock     clock.Clock
 	Location  *time.Location
-	// DisableChatPolling stops a session from starting the background chat
-	// watcher. It exists for tests: the watcher parks until someone speaks,
-	// which is correct in a real program (commands run in goroutines) and a
-	// deadlock in a harness that drives Update synchronously.
-	DisableChatPolling bool
-	Logger             *slog.Logger
-	Ctx                context.Context
+	// SessionLimit ends a session after this long (§11.5). Zero means no
+	// limit, which is the default and what every board ran on until someone
+	// needed the lines back.
+	SessionLimit time.Duration
+	// Doors runs a door on this session's terminal, or explains why this front
+	// end cannot. Nil means this connection offers no doors at all.
+	Doors DoorLauncher
+	// TermType is the client's declared terminal, passed through to doors as
+	// TERM. Empty is normal for a browser, which has no such thing.
+	TermType string
+	// DisableWatchers stops a session from starting its background watchers:
+	// the chat poller and the session-time watcher.
+	//
+	// It exists for tests. Both park on something that has not happened yet —
+	// somebody speaking, or the clock reaching the next mark — which is correct
+	// in a real program, where commands run in goroutines, and a stall in a
+	// harness that drives Update synchronously and waits out a timeout on each
+	// one. Tests advance the clock and send the message instead.
+	DisableWatchers bool
+	Logger          *slog.Logger
+	Ctx             context.Context
 }
 
 // Model is the session state.
@@ -138,6 +153,20 @@ type Model struct {
 	// Transient UI state.
 	status    string
 	statusErr bool
+
+	// doors installed on this BBS, and the cursor within them.
+	doors   []store.Door
+	doorIdx int
+
+	// startedAt is when this session began, for the time limit. Read from the
+	// injected clock, so a virtual one makes a two-hour limit testable.
+	startedAt time.Time
+	// timeWarned is the warning mark already given, or zero. Marks are
+	// descending, so "already warned at 5m" is timeWarned == 5m.
+	timeWarned time.Duration
+	// farewell is what the user is told on the way out, when it is not the
+	// ordinary goodbye.
+	farewell string
 
 	signup      signupState
 	areas       []store.Area
@@ -212,15 +241,29 @@ func New(cfg Config) Model {
 	if m.screen == screenMenu {
 		m.join()
 	}
+	m.startedAt = m.clockNow()
 	return m
 }
 
 // Init implements tea.Model.
 func (m Model) Init() tea.Cmd {
+	cmds := []tea.Cmd{}
 	if m.screen == screenMenu {
-		return m.loadAreas()
+		cmds = append(cmds, m.loadAreas())
 	}
-	return nil
+	// Started here rather than at the first keypress: a session that connects
+	// and sits there is exactly the one a time limit is for.
+	if cmd := m.watchTimeLimit(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	switch len(cmds) {
+	case 0:
+		return nil
+	case 1:
+		return cmds[0]
+	default:
+		return tea.Batch(cmds...)
+	}
 }
 
 // Update implements tea.Model.
@@ -247,6 +290,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.leave()
 		}
 		return m.handleKey(msg)
+
+	case timeCheckMsg:
+		return m.enforceTimeLimit()
+
+	case doorsLoadedMsg:
+		m.doors = msg.doors
+		if m.doorIdx >= len(m.doors) {
+			m.doorIdx = 0
+		}
+		return m, nil
+
+	case doorDoneMsg:
+		// Back on the list with the outcome. The door owned the screen while it
+		// ran and the renderer's output was discarded, so what the user is
+		// looking at is whatever the door left — the front end repaints.
+		m.status, m.statusErr = msg.status, msg.isErr
+		m.setWhere("doors")
+		return m, nil
 
 	case statusMsg:
 		m.status, m.statusErr = msg.text, msg.isErr
@@ -417,6 +478,8 @@ func (m Model) Screen() Screen {
 		return m.buildFileInfo()
 	case screenFileDescribe:
 		return m.buildFileDescribe()
+	case screenDoorList:
+		return m.buildDoorList()
 	default:
 		return m.buildMenu()
 	}
@@ -428,7 +491,11 @@ func (m Model) View() string {
 		// The goodbye is not a screen: there is no frame, no help line and
 		// nothing to navigate. Giving it one would mean a Screen kind that
 		// every renderer has to special-case anyway.
-		return m.styles.Title.Render("\nDisconnecting. Thanks for calling.\n\n")
+		goodbye := m.farewell
+		if goodbye == "" {
+			goodbye = "Disconnecting. Thanks for calling."
+		}
+		return m.styles.Title.Render("\n" + goodbye + "\n\n")
 	}
 	r := ansiRenderer{styles: m.styles, width: m.frameWidth(), height: m.height}
 	return r.render(m.Screen())
@@ -457,6 +524,16 @@ func (m *Model) join() {
 	if m.cfg.Presence != nil {
 		m.nodeNum = m.cfg.Presence.Join(m.cfg.SessionID, m.nick, m.cfg.Remote, m.guest)
 	}
+}
+
+// leaveBecause ends the session with something other than the usual goodbye.
+//
+// The reason matters more than it looks. A caller dropped without explanation
+// assumes a fault and reconnects, which on a board with a time limit is exactly
+// the behaviour the limit was meant to prevent.
+func (m Model) leaveBecause(reason string) (tea.Model, tea.Cmd) {
+	m.farewell = reason
+	return m.leave()
 }
 
 // leave tears the session down cleanly.

@@ -15,6 +15,7 @@ import (
 	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/blobstore"
 	"github.com/aghman/meshbbs/internal/clock"
+	"github.com/aghman/meshbbs/internal/door"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/aghman/meshbbs/internal/theme"
 	"github.com/aghman/meshbbs/internal/tui"
@@ -42,9 +43,17 @@ type Options struct {
 	// onto.
 	WebEnabled bool
 	WebURL     string
-	Clock      clock.Clock
-	Location   *time.Location
-	Logger     *slog.Logger
+	// SessionLimit ends a session after this long (§11.5). Zero means no limit.
+	SessionLimit time.Duration
+	// BBSName and SysopName identify the board to a door's dropfile (§9.2).
+	BBSName   string
+	SysopName string
+	// Doors runs door games. Nil means this BBS offers none, which is a
+	// complete BBS — §9.1 is a feature, not a dependency.
+	Doors    *door.Manager
+	Clock    clock.Clock
+	Location *time.Location
+	Logger   *slog.Logger
 }
 
 // Server is the SSH front end.

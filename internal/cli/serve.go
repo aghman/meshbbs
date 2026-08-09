@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/aghman/meshbbs/internal/bbs"
+	"github.com/aghman/meshbbs/internal/door"
 	"github.com/aghman/meshbbs/internal/logging"
 	"github.com/aghman/meshbbs/internal/sshd"
 	"github.com/aghman/meshbbs/internal/store"
@@ -102,6 +104,14 @@ Serves SSH on the configured port. Users connect with:
 				port = e.cfg.SSH.Port
 			}
 
+			// Doors get a manager and a way into the BBS (§9.1.1). One manager
+			// for the instance, because the limits it enforces — how many
+			// copies of a door may run, which nodes hold a lock, how often a
+			// door may announce — are statements about the whole board and not
+			// about one session.
+			doors := door.New(e.clock, log)
+			doors.SetHost(svc.Doors())
+
 			srv, err := sshd.NewServer(svc, st, sshd.Options{
 				Bind:         e.cfg.SSH.Bind,
 				Port:         port,
@@ -113,6 +123,10 @@ Serves SSH on the configured port. Users connect with:
 				DefaultTheme: e.cfg.Theme.Default,
 				WebEnabled:   e.cfg.Web.Enabled,
 				WebURL:       e.cfg.Web.Origin,
+				SessionLimit: sessionLimit(e.cfg.Users.SessionTimeLimitMins),
+				Doors:        doors,
+				BBSName:      e.cfg.Node.DisplayName,
+				SysopName:    e.cfg.Node.SysopName,
 				Clock:        e.clock,
 				Location:     loc,
 				Logger:       log,
@@ -170,16 +184,17 @@ Serves SSH on the configured port. Users connect with:
 			// telnet server itself at every start.
 			if e.cfg.Telnet.Enabled {
 				tel := sshd.NewTelnetServer(svc, st, sshd.TelnetOptions{
-					Bind:        e.cfg.Telnet.Bind,
-					Port:        e.cfg.Telnet.Port,
-					GuestOnly:   e.cfg.Telnet.GuestOnly,
-					MaxSessions: e.cfg.Telnet.MaxSessions,
-					Themes:      themes,
-					Theme:       e.cfg.Theme.Default,
-					Chat:        srv.Chat(),
-					Presence:    srv.Presence(),
-					Location:    loc,
-					Logger:      log,
+					Bind:         e.cfg.Telnet.Bind,
+					Port:         e.cfg.Telnet.Port,
+					GuestOnly:    e.cfg.Telnet.GuestOnly,
+					MaxSessions:  e.cfg.Telnet.MaxSessions,
+					Themes:       themes,
+					Theme:        e.cfg.Theme.Default,
+					Chat:         srv.Chat(),
+					Presence:     srv.Presence(),
+					Location:     loc,
+					SessionLimit: sessionLimit(e.cfg.Users.SessionTimeLimitMins),
+					Logger:       log,
 				})
 				fmt.Fprintf(out, "  telnet    %s:%d (PLAINTEXT, guest-only)\n\n",
 					e.cfg.Telnet.Bind, e.cfg.Telnet.Port)
@@ -206,9 +221,14 @@ Serves SSH on the configured port. Users connect with:
 					IdleTimeoutMins:         e.cfg.Web.IdleTimeoutMins,
 					UnlockedIdleTimeoutMins: e.cfg.Web.UnlockedIdleTimeoutMins,
 					SessionTTLHours:         e.cfg.Web.SessionTTLHours,
-					EnrolAttemptsPerHour:    e.cfg.Web.EnrolAttemptsPerHour,
-					AuthAttemptsPerHour:     e.cfg.Web.AuthAttemptsPerHour,
-					TrustedProxies:          e.cfg.TrustedProxyRanges(),
+					SessionLimit:            sessionLimit(e.cfg.Users.SessionTimeLimitMins),
+					// Doors are not playable in a browser ([D16]); the list
+					// says so and points at the terminal that can run them.
+					SSHHost:              sshHostFor(e.cfg.SSH.Bind),
+					SSHPort:              port,
+					EnrolAttemptsPerHour: e.cfg.Web.EnrolAttemptsPerHour,
+					AuthAttemptsPerHour:  e.cfg.Web.AuthAttemptsPerHour,
+					TrustedProxies:       e.cfg.TrustedProxyRanges(),
 					// Shared with SSH and telnet, not duplicated: a browser user
 					// gets a node number, shows up in who's-online, and joins the
 					// same chat as everyone else.
@@ -245,3 +265,30 @@ Serves SSH on the configured port. Users connect with:
 }
 
 var _ = store.ErrNotFound
+
+// sessionLimit turns the configured minutes into a duration, treating anything
+// non-positive as no limit at all.
+//
+// One helper rather than the conversion written three times, because three
+// front ends share one limit and a board where the browser times you out and
+// SSH does not is a bug report nobody can reproduce.
+func sessionLimit(mins int) time.Duration {
+	if mins <= 0 {
+		return 0
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+// sshHostFor turns the SSH listener's bind address into something a caller can
+// type.
+//
+// A wildcard bind says nothing about how to reach the board, so it produces no
+// host at all and the browser prints a placeholder. That is better than
+// printing 0.0.0.0, which looks like an answer and is not one.
+func sshHostFor(bind string) string {
+	switch bind {
+	case "", "0.0.0.0", "::", "[::]":
+		return ""
+	}
+	return bind
+}

@@ -252,7 +252,13 @@ function renderBlock(b) {
 
 // --- screen ----------------------------------------------------------------
 
+// The last words the server said, kept so the disconnect notice can repeat
+// them. A session cut short — a time limit, a sysop — must say why, or the
+// caller assumes a fault and reconnects.
+let farewell = "";
+
 function renderScreen(msg) {
+  if (msg.farewell) farewell = msg.farewell;
   const sc = msg.screen;
   const root = document.getElementById("screen");
   const atBottom =
@@ -309,7 +315,8 @@ export function connect() {
     document.getElementById("screen").replaceChildren(
       el("h1", "title", "Disconnected"),
       el("hr", "rule"),
-      el("div", "muted", "Thanks for calling. Reload to reconnect.")
+      el("div", "muted", farewell || "Thanks for calling."),
+      el("div", "muted", "Reload to reconnect.")
     );
   });
 }

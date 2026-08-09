@@ -370,6 +370,31 @@ func TestGoldenFrames(t *testing.T) {
 		f.login(t, "austin").typeRunes("m").golden("area_list")
 	})
 
+	t.Run("door_list", func(t *testing.T) {
+		f := newFixture(t)
+		f.user(t, "austin", "pw")
+		installDoor(t, f, store.Door{Name: "tradewars", Enabled: true, MaxConcurrent: 4})
+		installDoor(t, f, store.Door{Name: "lord", Enabled: true, NodeLock: true})
+		s := doorSession(t, f, "austin", &fakeLauncher{canRun: true})
+		s.typeRunes("d").golden("door_list")
+	})
+
+	// The same screen for a front end that cannot run them. The difference is
+	// one block of prose, and it is the whole of what [D16] costs a browser
+	// user — worth a frame of its own so that losing it is a red build.
+	t.Run("door_list_no_terminal", func(t *testing.T) {
+		f := newFixture(t)
+		f.user(t, "austin", "pw")
+		installDoor(t, f, store.Door{Name: "tradewars", Enabled: true})
+		s := doorSession(t, f, "austin", &fakeLauncher{
+			canRun: false,
+			why: "Door games need a terminal, which a browser tab is not. " +
+				"They are listed here so you know what this BBS has; connect over " +
+				"SSH to play.",
+		})
+		s.typeRunes("d").golden("door_list_no_terminal")
+	})
+
 	t.Run("file_areas", func(t *testing.T) {
 		f := newFixture(t)
 		seedFiles(t, f)

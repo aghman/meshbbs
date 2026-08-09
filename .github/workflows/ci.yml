@@ -152,6 +152,39 @@ jobs:
           ./meshbbs --data-dir "$D" dev seed --seed 2 --users 1 --posts 0 >/dev/null
           echo "newpassword" | ./meshbbs --data-dir "$D" user passwd bob
 
+          # Doors are database rows, not config, so the CLI is the only way to
+          # install one and the only place a bad one can be caught (§11.5).
+          ./meshbbs --data-dir "$D" door add tradewars /bin/echo --limit 30m
+          ./meshbbs --data-dir "$D" door list | grep -q tradewars
+          ./meshbbs --data-dir "$D" door show tradewars | grep -q "api_level"
+          ./meshbbs --data-dir "$D" door disable tradewars
+          ./meshbbs --data-dir "$D" door remove tradewars
+
+          # The reference doors must install and be launchable (§9.1). This is
+          # the proof-of-life a sysop runs before pointing the board at
+          # somebody else's software, so it must survive a release.
+          ./meshbbs --data-dir "$D" door examples
+          ./meshbbs --data-dir "$D" door list | grep -q guess
+          # Spaces, not a tab: the column is laid out by text/tabwriter.
+          ./meshbbs --data-dir "$D" door show hello | grep -qE "api_level +1 "
+          ./meshbbs --data-dir "$D" door remove hello
+          ./meshbbs --data-dir "$D" door remove guess
+
+          # A memory limit is enforceable on Linux and not on macOS, and the
+          # difference must be visible where a sysop sets one rather than when a
+          # player cannot start the game (§9.4).
+          ./meshbbs --data-dir "$D" door add capped /bin/echo --mem-limit 67108864
+          ./meshbbs --data-dir "$D" door show capped | grep -q "67108864 bytes"
+          ./meshbbs --data-dir "$D" door remove capped
+
+          # A door too long to post under must be refused when it is installed,
+          # not when it first tries to announce (§9.1.1, author field is 16B).
+          if ./meshbbs --data-dir "$D" door add averylongdoorname /bin/echo \
+               --announce-area general; then
+            echo "FAIL: accepted a door whose name cannot fit a post author"
+            exit 1
+          fi
+
           # An unknown config key must fail the check (§11.3).
           echo 'levle = "debug"' >> "$D/config.toml"
           if ./meshbbs --data-dir "$D" config check; then
@@ -230,6 +263,20 @@ jobs:
       # inbound traffic.
       - name: Fuzz mesh announcement parser
         run: .github/scripts/fuzz.sh ./internal/meshlink FuzzDecodeAnnounce 30s
+      # The door API's request parser. Unlike every target above it, what is on
+      # the other end is not a stranger on the mesh but a third-party binary the
+      # sysop installed, running with the server's privileges (§9.4) — no
+      # channel PSK to get past first, and a million malformed requests a second
+      # if it likes. The property is that a door cannot take the BBS down by
+      # talking nonsense to it.
+      - name: Fuzz door API request parser
+        run: .github/scripts/fuzz.sh ./internal/door FuzzAPIRequest 30s
+      # Dropfile generation (§12.11). Not a parser — we write these — and the
+      # property is that the SHAPE cannot be moved. Every format is positional,
+      # so a line break in a caller's name renumbers every field below it, and
+      # the fields below a name include the security level.
+      - name: Fuzz dropfile generation
+        run: .github/scripts/fuzz.sh ./internal/door FuzzDropfile 20s
 
   golden:
     name: Golden frames are stable

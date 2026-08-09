@@ -31,6 +31,7 @@ command that explains why it will not run is not.`,
 		},
 	}
 	cmd.AddCommand(newDevSeedCmd(e))
+	cmd.AddCommand(newDevDoorRunCmd(e))
 	return cmd
 }
 

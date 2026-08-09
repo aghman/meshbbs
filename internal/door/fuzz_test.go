@@ -1,0 +1,169 @@
+package door
+
+import (
+	"bufio"
+	"net"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// The door API's request parser, fuzzed (§12.5).
+//
+// Every other target in this suite parses something that arrived over the mesh
+// from a stranger. This one parses something that arrived from a THIRD-PARTY
+// BINARY the sysop installed, running on the sysop's own machine with the
+// server's privileges (§9.4). That is a different threat and, in one respect, a
+// worse one: a door does not have to get past a channel PSK first, and it can
+// send a million malformed requests a second from a process nobody is watching.
+//
+// The property under test is deliberately weak and absolute: whatever it sends,
+// the server neither panics nor stops serving. It is not that the input is
+// understood — most of it will not be — but that a door cannot take the BBS
+// down by talking nonsense to it.
+func FuzzAPIRequest(f *testing.F) {
+	seeds := []string{
+		`{"id":1,"op":"session.get"}`,
+		`{"id":2,"op":"state.set","key":"k","value":"v"}`,
+		`{"id":3,"op":"state.get","scope":"global","key":"k"}`,
+		`{"id":4,"op":"announce","subject":"s","text":"t"}`,
+		`{"id":5,"op":"user.post","area":"general","subject":"s","text":"t"}`,
+		`{"id":6,"op":"user.dm","to":"bob","text":"t"}`,
+		`{"op":"hello","token":"wrong"}`,
+		``,
+		`{`,
+		`[]`,
+		`null`,
+		`{"id":"not-a-number","op":"session.get"}`,
+		`{"op":"state.set","scope":"../../etc","key":"k"}`,
+		`{"op":"session.get"}` + "\n" + `{"op":"state.keys"}`,
+		"\x00\x00\x00",
+		strings.Repeat(`{"op":"session.get"}`+"\n", 8),
+	}
+	for _, s := range seeds {
+		f.Add([]byte(s))
+	}
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		host := newFakeHost()
+		mgr := New(realClock(), discardLogger())
+		mgr.SetHost(host)
+
+		// Level 4 so that no operation is turned away by the level check before
+		// its own parsing runs — the point is to reach every handler.
+		a := &apiServer{
+			mgr:  mgr,
+			host: host,
+			spec: Spec{Name: "fuzzdoor", Grant: Grant{
+				Level: 4, AnnounceArea: "games", AnnouncePerHour: 1000, StateQuota: 4096,
+			}},
+			sess:    Session{Nick: "alice", Node: 1, Width: 80, Height: 24},
+			token:   "fuzz-token",
+			closing: make(chan struct{}),
+			conns:   map[net.Conn]struct{}{},
+		}
+
+		server, client := net.Pipe()
+		served := make(chan struct{})
+		go func() {
+			defer close(served)
+			a.serveConn(server)
+		}()
+
+		// Drain replies. net.Pipe is unbuffered, so a server writing with
+		// nobody reading would deadlock and be reported as a hang rather than
+		// as the parser bug this is looking for.
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			_, _ = bufio.NewReader(client).WriteTo(discardWriter{})
+		}()
+
+		deadline := time.Now().Add(5 * time.Second)
+		_ = client.SetDeadline(deadline)
+
+		// Say hello first, so the fuzzed bytes reach dispatch rather than
+		// stopping at the handshake. The handshake itself is covered by the
+		// unfuzzed tests, and by whatever the corpus sends before this line
+		// lands in a later iteration.
+		_, _ = client.Write([]byte(`{"id":0,"op":"hello","token":"fuzz-token"}` + "\n"))
+		_, _ = client.Write(data)
+		_, _ = client.Write([]byte("\n"))
+		_ = client.Close()
+
+		select {
+		case <-served:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the server did not finish with %q", data)
+		}
+		<-drained
+	})
+}
+
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// Dropfile generation, fuzzed (§12.11).
+//
+// Not a parser — we write these, we do not read them — and the property is not
+// that the output means anything. It is that the SHAPE cannot be moved. Every
+// one of these formats is positional, so a value carrying a line break does not
+// spoil one field, it renumbers all of them, and the fields below a caller's
+// name include their security level. A name of "Bob\r\n255" that shifted the
+// file would hand its owner sysop access to any door that trusts the number.
+//
+// So: whatever goes in, the line count is exactly what the format says, and the
+// security level is still on the line it belongs on.
+func FuzzDropfile(f *testing.F) {
+	seeds := []struct{ name, location, bbs, sysop string }{
+		{"Alice Anderson", "Portland, OR", "Fog City", "Sam Sysop"},
+		{"Bob\r\n255", "Nowhere", "BBS", "Sysop"},
+		{"\n\n\n\n\n", "\r\r\r", "\n", "\r\n"},
+		{"", "", "", ""},
+		{"\x1b[31mred", "\x00nul", "\x7fdel", "\ta\tb"},
+		{strings.Repeat("x", 4096), "y", "z", "w"},
+		{"名前", "場所", "掲示板", "管理者"},
+	}
+	for _, s := range seeds {
+		f.Add(s.name, s.location, s.bbs, s.sysop, 3, true)
+	}
+
+	f.Fuzz(func(t *testing.T, name, location, bbs, sysop string, node int, ansi bool) {
+		sess := Session{
+			Nick: "alice", RealName: name, Location: location,
+			BBSName: bbs, SysopName: sysop, Node: node, ANSI: ansi,
+			Height:        25,
+			TimeRemaining: func() time.Duration { return 42 * time.Minute },
+		}
+
+		for _, format := range []string{DropfileDoorSys, DropfileDoor32, DropfileDorinfo1} {
+			spec := Spec{Name: "fuzz", Dir: "/opt/doors", Dropfile: format, WallClock: time.Minute}
+			text, err := dropfileBody(spec, sess)
+			if err != nil {
+				t.Fatalf("%s: %v", format, err)
+			}
+
+			got := strings.Split(strings.TrimSuffix(text, "\r\n"), "\r\n")
+			if want := dropfileLineCount(format); len(got) != want {
+				t.Fatalf("%s has %d lines, want %d, from name=%q location=%q",
+					format, len(got), want, name, location)
+			}
+			// A bare LF would also shift a door reading line by line.
+			if strings.Contains(strings.ReplaceAll(text, "\r\n", ""), "\n") {
+				t.Fatalf("%s contains a bare newline, from name=%q", format, name)
+			}
+			// And the level is still where the format says it is, unchanged by
+			// anything the caller supplied.
+			level := strconv.Itoa(securityLevel(sess))
+			at := map[string]int{
+				DropfileDoorSys: 14, DropfileDoor32: 7, DropfileDorinfo1: 10,
+			}[format]
+			if got[at] != level {
+				t.Fatalf("%s security level moved: line %d is %q, want %q (name=%q)",
+					format, at+1, got[at], level, name)
+			}
+		}
+	})
+}

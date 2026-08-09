@@ -34,6 +34,7 @@ func (s *Server) sessionMiddleware() wish.Middleware {
 			sp := newSessionPresence(s.presence)
 			sess.Context().SetValue(presenceKey{}, sp)
 			defer sp.Leave(sess.Context().SessionID())
+			defer closeMuxFor(sess)
 			h(sess)
 		}
 	}
@@ -41,6 +42,27 @@ func (s *Server) sessionMiddleware() wish.Middleware {
 
 // presenceKey is the context key under which a session's presence view lives.
 type presenceKey struct{}
+
+// muxKey is the context key under which a session's connection mux lives.
+type muxKey struct{}
+
+// muxFor recovers the mux the program handler built for a session.
+//
+// It lives on the context for the same reason the presence view does: the thing
+// that creates it runs inside the Bubble Tea middleware, and the thing that has
+// to tear it down wraps the whole session from outside.
+func muxFor(sess ssh.Session) *connMux {
+	m, _ := sess.Context().Value(muxKey{}).(*connMux)
+	return m
+}
+
+// closeMuxFor releases a session's mux, if it got as far as having one. A
+// session with no PTY, or one that failed authentication, never does.
+func closeMuxFor(sess ssh.Session) {
+	if m := muxFor(sess); m != nil {
+		m.Close()
+	}
+}
 
 // presenceFor recovers the presence view the middleware created for a session.
 func presenceFor(sess ssh.Session) tui.PresenceTracker {
@@ -97,39 +119,65 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 		height = 24
 	}
 
+	// Everything the session reads and writes goes through the mux rather than
+	// straight to sess, so that a door can be handed the connection without
+	// cancelling a read in flight (see mux.go). With nothing borrowed the mux
+	// is a pass-through.
+	mux := newConnMux(sess, sess)
+	sess.Context().SetValue(muxKey{}, mux)
+
+	var doors tui.DoorLauncher
+	if s.opts.Doors != nil {
+		doors = &doorLauncher{
+			mux: mux, mgr: s.opts.Doors, windows: winCh,
+			bbsName: s.opts.BBSName, sysopName: s.opts.SysopName,
+		}
+	}
+
 	model := tui.New(tui.Config{
-		Service:    s.svc,
-		Store:      s.store,
-		Presence:   presenceFor(sess),
-		Chat:       s.chat,
-		Clock:      s.opts.Clock,
-		Location:   s.opts.Location,
-		Themes:     s.opts.Themes,
-		ThemeName:  s.opts.DefaultTheme,
-		Encoding:   encoding,
-		Width:      width,
-		Height:     height,
-		SessionID:  sess.Context().SessionID(),
-		Remote:     sess.RemoteAddr().String(),
-		WebEnabled: s.opts.WebEnabled,
-		WebURL:     s.opts.WebURL,
-		SSHPort:    s.opts.Port,
-		Intent:     tui.Intent(d.Intent),
-		Nick:       d.Nick,
-		User:       d.User,
-		PublicKey:  d.PublicKey,
-		KeyFP:      d.Fingerprint,
-		AuthNote:   d.Reason,
-		Logger:     s.log,
-		Ctx:        context.Background(),
+		Service:      s.svc,
+		Store:        s.store,
+		Presence:     presenceFor(sess),
+		Chat:         s.chat,
+		Clock:        s.opts.Clock,
+		Location:     s.opts.Location,
+		Themes:       s.opts.Themes,
+		ThemeName:    s.opts.DefaultTheme,
+		Encoding:     encoding,
+		Width:        width,
+		Height:       height,
+		SessionID:    sess.Context().SessionID(),
+		Remote:       sess.RemoteAddr().String(),
+		WebEnabled:   s.opts.WebEnabled,
+		WebURL:       s.opts.WebURL,
+		SSHPort:      s.opts.Port,
+		Intent:       tui.Intent(d.Intent),
+		Nick:         d.Nick,
+		User:         d.User,
+		PublicKey:    d.PublicKey,
+		KeyFP:        d.Fingerprint,
+		AuthNote:     d.Reason,
+		SessionLimit: s.opts.SessionLimit,
+		Doors:        doors,
+		TermType:     pty.Term,
+		Logger:       s.log,
+		Ctx:          context.Background(),
 	})
 
-	_ = winCh
-	return tea.NewProgram(model,
-		tea.WithInput(sess),
-		tea.WithOutput(sess),
+	p := tea.NewProgram(model,
+		tea.WithInput(mux.TUI()),
+		tea.WithOutput(mux.TUI()),
 		tea.WithAltScreen(),
 	)
+
+	// A door draws over the alt screen while the renderer's output is being
+	// discarded, so the renderer comes back believing the screen already shows
+	// its last frame. ClearScreen wipes what the door left AND forces a full
+	// repaint; without it the user gets the menu back as a few stray lines over
+	// a game's final board.
+	mux.onResume = func() { p.Send(tea.ClearScreen()) }
+
+	return p
 }
 
 // TUI adapts the tracker to the interface the session layer needs.

@@ -147,6 +147,19 @@ func (d *Driver) Select(index int) {
 	d.markDirty()
 }
 
+// Farewell is why the session ended, when it was not the user's own choice.
+//
+// The ANSI front end gets this from View(), which the web never calls: it
+// renders Screen values, and a goodbye is deliberately not a Screen. Without
+// this the browser would close a timed-out session with no explanation, and a
+// caller who thinks the connection dropped reconnects — which on a board with
+// a time limit is the behaviour the limit exists to prevent.
+func (d *Driver) Farewell() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.model.farewell
+}
+
 // Unlocked reports whether this session is holding a mail passphrase, which is
 // what selects the shorter idle bound on the web (webui.md §9).
 func (d *Driver) Unlocked() bool {
