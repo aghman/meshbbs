@@ -254,6 +254,12 @@ jobs:
       # talking nonsense to it.
       - name: Fuzz door API request parser
         run: .github/scripts/fuzz.sh ./internal/door FuzzAPIRequest 30s
+      # Dropfile generation (§12.11). Not a parser — we write these — and the
+      # property is that the SHAPE cannot be moved. Every format is positional,
+      # so a line break in a caller's name renumbers every field below it, and
+      # the fields below a name include the security level.
+      - name: Fuzz dropfile generation
+        run: .github/scripts/fuzz.sh ./internal/door FuzzDropfile 20s
 
   golden:
     name: Golden frames are stable

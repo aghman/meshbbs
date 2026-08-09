@@ -29,6 +29,11 @@ type doorLauncher struct {
 	// windows carries the client's window-size changes, so a full-screen door
 	// redraws when the user resizes rather than staying at the size it started.
 	windows <-chan ssh.Window
+	// bbsName and sysopName go into a dropfile (§9.2). They belong to the
+	// instance, so the launcher holds them rather than every session carrying
+	// a copy through the model.
+	bbsName   string
+	sysopName string
 }
 
 var _ tui.DoorLauncher = (*doorLauncher)(nil)
@@ -85,6 +90,9 @@ func (l *doorLauncher) Launch(ctx context.Context, d store.Door, sess tui.DoorSe
 			RealName:      sess.RealName,
 			ANSI:          sess.ANSI,
 			Encoding:      sess.Encoding,
+			Sysop:         sess.Sysop,
+			BBSName:       l.bbsName,
+			SysopName:     l.sysopName,
 			TimeRemaining: sessionTimeRemaining(sess, spec.WallClock),
 		})
 		return runErr
@@ -148,6 +156,7 @@ func specFor(d store.Door) (door.Spec, error) {
 		Args:          d.Args,
 		Dir:           d.Cwd,
 		Env:           passthroughEnv(d.EnvPassthrough),
+		Dropfile:      d.DropfileType,
 		MaxConcurrent: d.MaxConcurrent,
 		NodeLock:      d.NodeLock,
 		WallClock:     d.WallClock,

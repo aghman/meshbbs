@@ -125,6 +125,8 @@ Serves SSH on the configured port. Users connect with:
 				WebURL:       e.cfg.Web.Origin,
 				SessionLimit: sessionLimit(e.cfg.Users.SessionTimeLimitMins),
 				Doors:        doors,
+				BBSName:      e.cfg.Node.DisplayName,
+				SysopName:    e.cfg.Node.SysopName,
 				Clock:        e.clock,
 				Location:     loc,
 				Logger:       log,

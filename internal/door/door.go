@@ -54,6 +54,8 @@ type Spec struct {
 	// baseEnv. It REPLACES the server's environment rather than adding to it —
 	// see environ.
 	Env []string
+	// Dropfile is the format to write before launching, or DropfileNone (§9.2).
+	Dropfile string
 	// Grant is what the sysop allowed this door through the API (§9.1.1). It is
 	// ignored when the Manager has no Host, which is the case for a BBS that
 	// runs doors without offering them an API at all — §9.1 calls the socket
@@ -96,6 +98,17 @@ type Session struct {
 	// ANSI and Encoding are the level-1 terminal capability hints.
 	ANSI     bool
 	Encoding string
+	// Sysop selects the security level a dropfile reports. It is NOT a gate:
+	// what a caller may run was decided before the door started.
+	Sysop bool
+	// Location is where the caller says they are calling from, for the
+	// dropfile formats that have a field for it. Free text, and sanitised.
+	Location string
+	// BBSName and SysopName identify the board to a door. They belong to the
+	// instance rather than the session, and are carried here because the front
+	// end launching a door is the thing that knows them.
+	BBSName   string
+	SysopName string
 	// TimeRemaining reports how long this session has left. Nil means no
 	// limit, which a door is told explicitly rather than by a zero.
 	TimeRemaining func() time.Duration
@@ -230,11 +243,12 @@ func (m *Manager) Run(ctx context.Context, spec Spec, sess Session) (Result, err
 	}
 	defer release()
 
-	// The API socket, the descriptor and the token all live and die with this
-	// ONE invocation (§9.1.1): the directory is created here, the token is
-	// minted here, and both are gone before Run returns. A door that restarts
-	// gets a new token, and there is no stale-credential case to reason about
-	// because there is no credential left to go stale.
+	// The invocation's private directory: the API socket, the descriptor, the
+	// token and the dropfile all live and die with this ONE launch (§9.1.1).
+	// A door that restarts gets a new token, and there is no stale-credential
+	// case to reason about because there is no credential left to go stale.
+	// The dropfile goes with it, which is why the file naming a caller and
+	// saying where they live does not outlast their game.
 	api, err := m.startAPI(&spec, sess)
 	if err != nil {
 		return Result{}, err

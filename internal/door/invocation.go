@@ -19,10 +19,16 @@ type invocation struct {
 	server *apiServer
 }
 
+// needsDirectory reports whether this launch has anything to put in a private
+// directory: an API socket, a dropfile, or both.
+func (m *Manager) needsDirectory(spec Spec) bool {
+	return m.host != nil || dropfileName(spec.Dropfile) != ""
+}
+
 // startAPI prepares the API for one launch, appending the descriptor's
 // environment to the spec. It returns nil when no Host is configured.
 func (m *Manager) startAPI(spec *Spec, sess Session) (*invocation, error) {
-	if m.host == nil {
+	if !m.needsDirectory(*spec) {
 		return nil, nil
 	}
 
@@ -38,6 +44,23 @@ func (m *Manager) startAPI(spec *Spec, sess Session) (*invocation, error) {
 	fail := func(err error) (*invocation, error) {
 		inv.close(m)
 		return nil, err
+	}
+
+	// The dropfile first, because a door that reads one reads it before it
+	// does anything else, and because the token substitution below has to see
+	// the finished argument list.
+	dropfile, err := writeDropfile(dir, *spec, sess)
+	if err != nil {
+		return fail(err)
+	}
+	spec.Args = expandDropfileTokens(spec.Args, dropfile)
+	spec.Env = append(spec.Env, dropfileEnv(dropfile)...)
+
+	if m.host == nil {
+		// A dropfile and no API: §9.1 calls the socket optional, and a door
+		// old enough to want DOOR.SYS is exactly the kind that will never
+		// open one.
+		return inv, nil
 	}
 
 	token, err := newToken()

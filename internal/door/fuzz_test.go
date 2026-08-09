@@ -3,6 +3,7 @@ package door
 import (
 	"bufio"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -103,3 +104,66 @@ func FuzzAPIRequest(f *testing.F) {
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// Dropfile generation, fuzzed (§12.11).
+//
+// Not a parser — we write these, we do not read them — and the property is not
+// that the output means anything. It is that the SHAPE cannot be moved. Every
+// one of these formats is positional, so a value carrying a line break does not
+// spoil one field, it renumbers all of them, and the fields below a caller's
+// name include their security level. A name of "Bob\r\n255" that shifted the
+// file would hand its owner sysop access to any door that trusts the number.
+//
+// So: whatever goes in, the line count is exactly what the format says, and the
+// security level is still on the line it belongs on.
+func FuzzDropfile(f *testing.F) {
+	seeds := []struct{ name, location, bbs, sysop string }{
+		{"Alice Anderson", "Portland, OR", "Fog City", "Sam Sysop"},
+		{"Bob\r\n255", "Nowhere", "BBS", "Sysop"},
+		{"\n\n\n\n\n", "\r\r\r", "\n", "\r\n"},
+		{"", "", "", ""},
+		{"\x1b[31mred", "\x00nul", "\x7fdel", "\ta\tb"},
+		{strings.Repeat("x", 4096), "y", "z", "w"},
+		{"名前", "場所", "掲示板", "管理者"},
+	}
+	for _, s := range seeds {
+		f.Add(s.name, s.location, s.bbs, s.sysop, 3, true)
+	}
+
+	f.Fuzz(func(t *testing.T, name, location, bbs, sysop string, node int, ansi bool) {
+		sess := Session{
+			Nick: "alice", RealName: name, Location: location,
+			BBSName: bbs, SysopName: sysop, Node: node, ANSI: ansi,
+			Height:        25,
+			TimeRemaining: func() time.Duration { return 42 * time.Minute },
+		}
+
+		for _, format := range []string{DropfileDoorSys, DropfileDoor32, DropfileDorinfo1} {
+			spec := Spec{Name: "fuzz", Dir: "/opt/doors", Dropfile: format, WallClock: time.Minute}
+			text, err := dropfileBody(spec, sess)
+			if err != nil {
+				t.Fatalf("%s: %v", format, err)
+			}
+
+			got := strings.Split(strings.TrimSuffix(text, "\r\n"), "\r\n")
+			if want := dropfileLineCount(format); len(got) != want {
+				t.Fatalf("%s has %d lines, want %d, from name=%q location=%q",
+					format, len(got), want, name, location)
+			}
+			// A bare LF would also shift a door reading line by line.
+			if strings.Contains(strings.ReplaceAll(text, "\r\n", ""), "\n") {
+				t.Fatalf("%s contains a bare newline, from name=%q", format, name)
+			}
+			// And the level is still where the format says it is, unchanged by
+			// anything the caller supplied.
+			level := strconv.Itoa(securityLevel(sess))
+			at := map[string]int{
+				DropfileDoorSys: 14, DropfileDoor32: 7, DropfileDorinfo1: 10,
+			}[format]
+			if got[at] != level {
+				t.Fatalf("%s security level moved: line %d is %q, want %q (name=%q)",
+					format, at+1, got[at], level, name)
+			}
+		}
+	})
+}

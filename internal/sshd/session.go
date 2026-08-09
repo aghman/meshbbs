@@ -128,7 +128,10 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 
 	var doors tui.DoorLauncher
 	if s.opts.Doors != nil {
-		doors = &doorLauncher{mux: mux, mgr: s.opts.Doors, windows: winCh}
+		doors = &doorLauncher{
+			mux: mux, mgr: s.opts.Doors, windows: winCh,
+			bbsName: s.opts.BBSName, sysopName: s.opts.SysopName,
+		}
 	}
 
 	model := tui.New(tui.Config{

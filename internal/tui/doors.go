@@ -54,6 +54,9 @@ type DoorSession struct {
 	Term     string
 	ANSI     bool
 	Encoding string
+	// Sysop selects the security level a dropfile reports (§9.2). It is not a
+	// gate: what this caller may run was settled before the launcher was asked.
+	Sysop bool
 	// TimeRemaining reports the session's remaining time and whether it is
 	// limited at all. A door handed a bare zero cannot tell "no limit" from
 	// "no time left" (§9.1).
@@ -130,6 +133,7 @@ func (m Model) launchDoor(d store.Door) tea.Cmd {
 		Nick: m.nick, RealName: m.cfg.User.DisplayName, Node: m.nodeNum,
 		Width: m.width, Height: m.height,
 		Term: m.cfg.TermType, ANSI: true, Encoding: m.cfg.Encoding.String(),
+		Sysop:         m.sysop,
 		TimeRemaining: m.Remaining,
 	}
 	launcher, ctx := m.cfg.Doors, m.ctx
