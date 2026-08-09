@@ -59,11 +59,19 @@ func TestDropfileFormatsHaveTheirFixedShape(t *testing.T) {
 			}
 			// It names a caller and says where they live, so it is not for
 			// anyone else on the machine to read.
+			//
+			// Asserted on Unix only, and not because Windows is exempt from the
+			// property. Windows does not carry POSIX modes — Go reports 0666
+			// for any file that is not read-only — so the mode is not where the
+			// answer lives there. What protects it is the same thing that
+			// protects the descriptor beside it: the invocation's directory,
+			// created under the per-user temp path, which is ACL'd to the
+			// account the server runs as.
 			info, err := os.Stat(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			if perm := info.Mode().Perm(); perm&0o077 != 0 && !isWindows() {
 				t.Errorf("%s is mode %04o", format, perm)
 			}
 		})
@@ -230,10 +238,13 @@ func TestNoDropfileMeansNoFile(t *testing.T) {
 }
 
 func TestDropfileTokensReachTheDoor(t *testing.T) {
-	path := "/tmp/mbdoor-x/DOOR.SYS"
+	path := filepath.Join(t.TempDir(), "DOOR.SYS")
 	got := expandDropfileTokens(
 		[]string{"-d", "{dropfile}", "--node-dir={dropfile_dir}", "plain"}, path)
-	want := []string{"-d", path, "--node-dir=/tmp/mbdoor-x", "plain"}
+	// The directory is derived rather than spelled out, because the property is
+	// "the token becomes the file's directory" and not "paths use forward
+	// slashes" — which is only true on one of the platforms this ships to.
+	want := []string{"-d", path, "--node-dir=" + filepath.Dir(path), "plain"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("arg %d is %q, want %q", i, got[i], want[i])

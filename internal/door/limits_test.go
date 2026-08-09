@@ -69,9 +69,15 @@ func TestUnsupportedLimitsReportsOnlyWhatIsUnsupported(t *testing.T) {
 
 // The helper is a sentinel, not a subcommand: it must not be reachable by
 // anything a user would plausibly type.
+//
+// Windows has no helper at all — the job object applies limits directly, so
+// there is nothing to re-execute for — and IsHelper is false there for every
+// input. Asserting that explicitly rather than skipping, because "this platform
+// never takes the helper path" is the contract and not an absence of one.
 func TestHelperIsRecognisedOnlyAsArgvOne(t *testing.T) {
-	if !IsHelper([]string{"meshbbs", HelperArg, "1", "0", "/bin/true"}) {
-		t.Error("the helper was not recognised in argv[1]")
+	sentinel := []string{"meshbbs", HelperArg, "1", "0", "/bin/true"}
+	if got := IsHelper(sentinel); got != !isWindows() {
+		t.Errorf("IsHelper(argv[1]=%s) is %v on %s", HelperArg, got, runtime.GOOS)
 	}
 	for _, args := range [][]string{
 		{"meshbbs"},

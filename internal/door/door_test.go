@@ -307,12 +307,17 @@ func TestRunBridgesTheDoorToTheSession(t *testing.T) {
 		done <- res
 	}()
 
-	if _, err := h.keys.Write([]byte("hello\n")); err != nil {
+	// CR, because that is what pressing Enter sends. A bare LF works on a Unix
+	// pty and does NOT complete a line on a Windows ConPTY, so the door sat
+	// waiting for the rest of one — its echo of "hello" reached the screen and
+	// its reply never did. Sending what a terminal sends is right on both: the
+	// Unix line discipline turns CR into NL for the reader.
+	if _, err := h.keys.Write([]byte("hello\r")); err != nil {
 		t.Fatal(err)
 	}
 	h.await(t, "[HELLO]", 15*time.Second)
 
-	if _, err := h.keys.Write([]byte("quit\n")); err != nil {
+	if _, err := h.keys.Write([]byte("quit\r")); err != nil {
 		t.Fatal(err)
 	}
 	h.await(t, "BYE", 15*time.Second)
