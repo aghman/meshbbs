@@ -36,6 +36,7 @@ func newDoorCmd(e *env) *cobra.Command {
 		newDoorRemoveCmd(e),
 		newDoorEnableCmd(e, true),
 		newDoorEnableCmd(e, false),
+		newDoorExamplesCmd(e),
 	)
 	return cmd
 }

@@ -960,3 +960,98 @@ func TestAPISilentDoorIsDisconnectedOnTheInjectedClock(t *testing.T) {
 		t.Error("a silent door was never disconnected")
 	}
 }
+
+// The client, against the real server.
+//
+// It is the reference doors' only way in, so a break here breaks them — and it
+// is what a Go door author will copy, so it is worth exercising rather than
+// trusting.
+func TestClientSpeaksTheProtocol(t *testing.T) {
+	rig := newAPIRig(t, 4, nil)
+	t.Setenv("MESHBBS_DOOR_DESCRIPTOR", envValue(rig.spec.Env, "MESHBBS_DOOR_DESCRIPTOR"))
+
+	c, err := Open()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer c.Close()
+
+	if c.Level() != 4 {
+		t.Errorf("client reports level %d, want 4", c.Level())
+	}
+
+	sess, err := c.Session()
+	if err != nil || sess.Handle != "alice" || sess.Node != 3 {
+		t.Errorf("session is %+v (err %v)", sess, err)
+	}
+
+	if err := c.StateSet(ScopeMine, "save", "sector=42"); err != nil {
+		t.Fatalf("state set: %v", err)
+	}
+	v, ok, err := c.StateGet(ScopeMine, "save")
+	if err != nil || !ok || v != "sector=42" {
+		t.Errorf("state get returned %q ok=%v err=%v", v, ok, err)
+	}
+	keys, err := c.StateKeys(ScopeMine)
+	if err != nil || len(keys) != 1 {
+		t.Errorf("state keys are %v (err %v)", keys, err)
+	}
+	if err := c.StateDelete(ScopeMine, "save"); err != nil {
+		t.Errorf("state delete: %v", err)
+	}
+
+	if _, err := c.Announce("Champion", "alice won"); err != nil {
+		t.Errorf("announce: %v", err)
+	}
+
+	// The notice arrives on the first act-as-user call and not the second.
+	_, notice, err := c.PostAs("general", "hi", "from a door")
+	if err != nil {
+		t.Fatalf("post as user: %v", err)
+	}
+	if notice == "" {
+		t.Error("the first post as the user carried no notice")
+	}
+	if _, again, _ := c.PostAs("general", "hi", "again"); again != "" {
+		t.Errorf("the notice was repeated: %q", again)
+	}
+}
+
+// A refusal and a fault must be distinguishable, or a door retries the one
+// thing that will never succeed.
+func TestClientDistinguishesRefusalFromFailure(t *testing.T) {
+	rig := newAPIRig(t, 2, nil) // level 2: announce is above its grant
+	t.Setenv("MESHBBS_DOOR_DESCRIPTOR", envValue(rig.spec.Env, "MESHBBS_DOOR_DESCRIPTOR"))
+
+	c, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, err = c.Announce("nope", "text")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("announce above the grant returned %T: %v", err, err)
+	}
+	if !apiErr.Forbidden() {
+		t.Errorf("the refusal is not marked forbidden: %+v", apiErr)
+	}
+
+	// And a dead socket is a fault, not a refusal.
+	rig.inv.close(rig.mgr)
+	if _, err := c.Session(); err == nil {
+		t.Error("a closed connection reported success")
+	} else if errors.As(err, &apiErr) {
+		t.Errorf("a transport failure was reported as a refusal: %+v", apiErr)
+	}
+}
+
+// A door started outside meshbbs says so plainly, because it is the first
+// thing a door author hits and "connection refused" points the wrong way.
+func TestClientWithoutADescriptor(t *testing.T) {
+	t.Setenv("MESHBBS_DOOR_DESCRIPTOR", "")
+	if _, err := Open(); !errors.Is(err, ErrNoDescriptor) {
+		t.Errorf("Open returned %v, want %v", err, ErrNoDescriptor)
+	}
+}

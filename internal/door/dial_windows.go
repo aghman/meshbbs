@@ -9,9 +9,8 @@ import (
 	"github.com/Microsoft/go-winio"
 )
 
+// dialAPI connects to a door API named pipe.
 func dialAPI(addr string) (net.Conn, error) {
-	timeout := 5 * time.Second
+	timeout := 10 * time.Second
 	return winio.DialPipe(addr, &timeout)
 }
-
-func isWindows() bool { return true }

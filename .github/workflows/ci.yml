@@ -160,6 +160,16 @@ jobs:
           ./meshbbs --data-dir "$D" door disable tradewars
           ./meshbbs --data-dir "$D" door remove tradewars
 
+          # The reference doors must install and be launchable (§9.1). This is
+          # the proof-of-life a sysop runs before pointing the board at
+          # somebody else's software, so it must survive a release.
+          ./meshbbs --data-dir "$D" door examples
+          ./meshbbs --data-dir "$D" door list | grep -q guess
+          # Spaces, not a tab: the column is laid out by text/tabwriter.
+          ./meshbbs --data-dir "$D" door show hello | grep -qE "api_level +1 "
+          ./meshbbs --data-dir "$D" door remove hello
+          ./meshbbs --data-dir "$D" door remove guess
+
           # A memory limit is enforceable on Linux and not on macOS, and the
           # difference must be visible where a sysop sets one rather than when a
           # player cannot start the game (§9.4).

@@ -97,6 +97,7 @@ no registry and no address authority. Run "meshbbs id" to see this node's ID.`,
 		newAreaCmd(e),
 		newFileCmd(e),
 		newDoorCmd(e),
+		newDoorExampleCmd(),
 		newMeshCmd(e),
 		newDevCmd(e),
 	)
