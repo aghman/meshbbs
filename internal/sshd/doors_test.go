@@ -233,7 +233,14 @@ won:
 	// Level 2: the score was saved, and level 3: the board was told. Both are
 	// asserted against the DATABASE rather than the screen, because what the
 	// door printed is what the door believed.
-	awaitScreen(t, screen, "new board record", 20*time.Second)
+	//
+	// The marker waited for is the one the door prints AFTER the announcement
+	// returns, not the one it prints after saving the record. Those are two
+	// lines apart in the door and one API round trip apart in time, and waiting
+	// on the earlier one let the query race the post: green on macOS and
+	// Windows, and 0 announcements on the Linux runner. A test that waits for a
+	// marker printed before the thing it is about to assert is not waiting.
+	awaitScreen(t, screen, "The board has been told", 20*time.Second)
 
 	v, ok, err := st.DoorStateGet(ctx, "guess", store.ScopeUser, "austin", "best")
 	if err != nil || !ok || v == "" {
