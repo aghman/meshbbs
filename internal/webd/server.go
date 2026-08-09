@@ -51,6 +51,12 @@ type Options struct {
 	IdleTimeoutMins         int
 	UnlockedIdleTimeoutMins int
 	SessionTTLHours         int
+	// SessionLimit ends a session after this long (§11.5). Zero means no limit.
+	//
+	// Distinct from the idle timeouts above, which end a session that has
+	// stopped being used. This one ends a session that is being used, which is
+	// the whole point: it shares the lines out.
+	SessionLimit time.Duration
 
 	// Presence and Chat are the SSH front end's, shared rather than duplicated:
 	// a browser user gets a node number and appears in who's-online next to

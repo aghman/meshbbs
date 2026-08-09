@@ -360,10 +360,10 @@ func (f *fixture) config(intent Intent, nick string) Config {
 		// local time and every golden containing one becomes machine-
 		// dependent. CI runs UTC; a developer laptop usually does not.
 		Location: time.UTC,
-		// The chat watcher parks until someone speaks. That is right in a real
-		// program and a deadlock here, so tests inject chat updates directly
-		// with send() instead.
-		DisableChatPolling: true,
+		// The background watchers park on something that has not happened yet.
+		// That is right in a real program and a stall here, so tests drive them
+		// directly with send() instead.
+		DisableWatchers: true,
 	}
 }
 

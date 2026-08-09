@@ -45,6 +45,7 @@ Generated from the source. Do not edit by hand.
 | `users.default_directory_listed` | bool | `true` | `MESHBBS_USERS_DEFAULT_DIRECTORY_LISTED` | Whether new users are listed in the network directory ([N9]). |
 | `users.guest_enabled` | bool | `true` | `MESHBBS_USERS_GUEST_ENABLED` | Allow anonymous read-only access via ssh guest@. |
 | `users.registration_mode` | string | `open` | `MESHBBS_USERS_REGISTRATION_MODE` | open, approval, invite, or closed. Default 'open' with federated posting withheld: the door is open, the shared airtime is gated ([N7]). |
+| `users.session_time_limit_mins` | int | `0` | `MESHBBS_USERS_SESSION_TIME_LIMIT_MINS` | End a session after this many minutes. 0 means no limit. Sysops are never timed out: the limit shares lines between callers, and the operator is not competing for one. |
 | `web.auth_attempts_per_hour` | int | `60` | `MESHBBS_WEB_AUTH_ATTEMPTS_PER_HOUR` | Sign-in attempts allowed per client per hour. Looser than enrolment: a passkey prompt that the user dismisses costs an attempt, and that is a normal thing to do more than once. |
 | `web.bind` | string | `0.0.0.0` | `MESHBBS_WEB_BIND` | Address to listen on. |
 | `web.enabled` | bool | `false` | `MESHBBS_WEB_ENABLED` | Serve the browser front end. Off by default: it needs a public origin and a TLS certificate, which have no sensible defaults. |

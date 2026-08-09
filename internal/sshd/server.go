@@ -42,9 +42,11 @@ type Options struct {
 	// onto.
 	WebEnabled bool
 	WebURL     string
-	Clock      clock.Clock
-	Location   *time.Location
-	Logger     *slog.Logger
+	// SessionLimit ends a session after this long (§11.5). Zero means no limit.
+	SessionLimit time.Duration
+	Clock        clock.Clock
+	Location     *time.Location
+	Logger       *slog.Logger
 }
 
 // Server is the SSH front end.

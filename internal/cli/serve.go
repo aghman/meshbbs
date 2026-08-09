@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/logging"
@@ -113,6 +114,7 @@ Serves SSH on the configured port. Users connect with:
 				DefaultTheme: e.cfg.Theme.Default,
 				WebEnabled:   e.cfg.Web.Enabled,
 				WebURL:       e.cfg.Web.Origin,
+				SessionLimit: sessionLimit(e.cfg.Users.SessionTimeLimitMins),
 				Clock:        e.clock,
 				Location:     loc,
 				Logger:       log,
@@ -170,16 +172,17 @@ Serves SSH on the configured port. Users connect with:
 			// telnet server itself at every start.
 			if e.cfg.Telnet.Enabled {
 				tel := sshd.NewTelnetServer(svc, st, sshd.TelnetOptions{
-					Bind:        e.cfg.Telnet.Bind,
-					Port:        e.cfg.Telnet.Port,
-					GuestOnly:   e.cfg.Telnet.GuestOnly,
-					MaxSessions: e.cfg.Telnet.MaxSessions,
-					Themes:      themes,
-					Theme:       e.cfg.Theme.Default,
-					Chat:        srv.Chat(),
-					Presence:    srv.Presence(),
-					Location:    loc,
-					Logger:      log,
+					Bind:         e.cfg.Telnet.Bind,
+					Port:         e.cfg.Telnet.Port,
+					GuestOnly:    e.cfg.Telnet.GuestOnly,
+					MaxSessions:  e.cfg.Telnet.MaxSessions,
+					Themes:       themes,
+					Theme:        e.cfg.Theme.Default,
+					Chat:         srv.Chat(),
+					Presence:     srv.Presence(),
+					Location:     loc,
+					SessionLimit: sessionLimit(e.cfg.Users.SessionTimeLimitMins),
+					Logger:       log,
 				})
 				fmt.Fprintf(out, "  telnet    %s:%d (PLAINTEXT, guest-only)\n\n",
 					e.cfg.Telnet.Bind, e.cfg.Telnet.Port)
@@ -206,6 +209,7 @@ Serves SSH on the configured port. Users connect with:
 					IdleTimeoutMins:         e.cfg.Web.IdleTimeoutMins,
 					UnlockedIdleTimeoutMins: e.cfg.Web.UnlockedIdleTimeoutMins,
 					SessionTTLHours:         e.cfg.Web.SessionTTLHours,
+					SessionLimit:            sessionLimit(e.cfg.Users.SessionTimeLimitMins),
 					EnrolAttemptsPerHour:    e.cfg.Web.EnrolAttemptsPerHour,
 					AuthAttemptsPerHour:     e.cfg.Web.AuthAttemptsPerHour,
 					TrustedProxies:          e.cfg.TrustedProxyRanges(),
@@ -245,3 +249,16 @@ Serves SSH on the configured port. Users connect with:
 }
 
 var _ = store.ErrNotFound
+
+// sessionLimit turns the configured minutes into a duration, treating anything
+// non-positive as no limit at all.
+//
+// One helper rather than the conversion written three times, because three
+// front ends share one limit and a board where the browser times you out and
+// SSH does not is a bug report nobody can reproduce.
+func sessionLimit(mins int) time.Duration {
+	if mins <= 0 {
+		return 0
+	}
+	return time.Duration(mins) * time.Minute
+}

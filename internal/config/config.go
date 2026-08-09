@@ -127,6 +127,10 @@ type Users struct {
 	RegistrationMode string `toml:"registration_mode" default:"open" doc:"open, approval, invite, or closed. Default 'open' with federated posting withheld: the door is open, the shared airtime is gated ([N7])."`
 	GuestEnabled     bool   `toml:"guest_enabled" default:"true" doc:"Allow anonymous read-only access via ssh guest@."`
 	DirectoryListed  bool   `toml:"default_directory_listed" default:"true" doc:"Whether new users are listed in the network directory ([N9])."`
+	// SessionTimeLimitMins is §11.5's session_time_limit, with the unit in the
+	// name as the web keys already do — a bare number of unstated units is the
+	// one thing a config reference cannot fix afterwards.
+	SessionTimeLimitMins int `toml:"session_time_limit_mins" default:"0" doc:"End a session after this many minutes. 0 means no limit. Sysops are never timed out: the limit shares lines between callers, and the operator is not competing for one."`
 }
 
 // Theme configures appearance (§5.4, [D15], [N5]).
@@ -435,6 +439,11 @@ func (c *Config) validateWeb() []string {
 	}
 	if (c.Web.TLSCert == "") != (c.Web.TLSKey == "") {
 		problems = append(problems, "web.tls_cert and web.tls_key must be set together")
+	}
+
+	if c.Users.SessionTimeLimitMins < 0 {
+		problems = append(problems,
+			"users.session_time_limit_mins cannot be negative; use 0 for no limit")
 	}
 
 	if c.Web.EnrolmentCodeTTLMins < 1 {
