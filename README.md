@@ -13,7 +13,9 @@ and no address authority — and sysops give peers short local names (`austin@pn
 name hosts in an SSH config. A gateway can bridge selected echo areas to existing FidoNet-style
 message networks.
 
-**Status:** Phase 4 is in progress — doors run, with an API, limits and a spec. Phase 3 is code-complete — a usable single-node BBS, the sync protocol and its
+**Status:** Phase 4 is code-complete — door games run over SSH and telnet, with the §9.1.1
+capability model, resource limits, dropfiles, two bundled reference doors and a written
+[spec](docs/doors.md). Phase 3 is code-complete — a usable single-node BBS, the sync protocol and its
 simulator, federation over IP, and the Meshtastic link with its airtime governor, ham-mode safety
 checks, `mesh survey`, and file catalog replication.
 
