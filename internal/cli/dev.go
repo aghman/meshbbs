@@ -33,6 +33,7 @@ command that explains why it will not run is not.`,
 	}
 	cmd.AddCommand(newDevSeedCmd(e))
 	cmd.AddCommand(newDevDoorRunCmd(e))
+	cmd.AddCommand(newDevVectorCmd(e))
 	return cmd
 }
 
