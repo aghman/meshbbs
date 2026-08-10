@@ -69,6 +69,27 @@ func TestSmallPacketsAreNotCheap(t *testing.T) {
 	}
 }
 
+// Every class the classifier can produce needs a reserve entry.
+//
+// A missing one reads as 0.0, which is ClassControl's share — so a class added
+// as a new BOTTOM rung would silently become the highest-priority traffic on
+// the mesh, and the drain-order test below would still pass because a prefix of
+// one is a prefix. This is the check that fails instead.
+func TestEveryClassReservesMoreThanTheOneAboveIt(t *testing.T) {
+	ladder := []Class{ClassControl, ClassDM, ClassForum, ClassFileCatalog, ClassDoorEvent}
+	for i, c := range ladder {
+		if _, ok := reserve[c]; !ok {
+			t.Errorf("%v has no reserve entry, so it would reserve nothing and "+
+				"outrank the roster", c)
+			continue
+		}
+		if i > 0 && !(reserve[c] > reserve[ladder[i-1]]) {
+			t.Errorf("%v reserves %.2f and %v reserves %.2f: the lower class must give way first",
+				ladder[i-1], reserve[ladder[i-1]], c, reserve[c])
+		}
+	}
+}
+
 // Under backpressure, drop from the bottom: the last of the budget belongs to
 // the traffic that keeps the federation converging.
 func TestClassesFallOutInPriorityOrder(t *testing.T) {
@@ -93,7 +114,7 @@ func TestClassesFallOutInPriorityOrder(t *testing.T) {
 	// fractions are tuning, and tuning should be free to change without a test
 	// having to be rewritten to match it.
 	g2, clk := newTestGovernor(t, nil)
-	ladder := []Class{ClassControl, ClassDM, ClassForum, ClassFileCatalog}
+	ladder := []Class{ClassControl, ClassDM, ClassForum, ClassFileCatalog, ClassDoorEvent}
 
 	for step := 0; step < 60; step++ {
 		var allowed []bool

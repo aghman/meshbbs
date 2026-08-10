@@ -50,6 +50,26 @@ const (
 	// ClassFileCatalog is file metadata. There is no class for file CONTENT
 	// because `[D8]` puts no files on the mesh at all.
 	ClassFileCatalog
+	// ClassDoorEvent is inter-BBS door league traffic (§9.5).
+	//
+	// # Why below the file catalog, when §1.1 says "alongside forum posts"
+	//
+	// §1.1 wrote that before §7.6's ladder had a bottom rung, and §7.6's own
+	// list stops at the file catalog. Putting door events below it is a
+	// refinement of both rather than a contradiction, and the reason is worth
+	// stating because it decides what a congested mesh drops first.
+	//
+	// A catalog entry that arrives a week late is still TRUE: the file is still
+	// there, the hash still matches, and a user searching next month finds it.
+	// A battle report that arrives a week late is noise — the game has moved
+	// on, nobody is waiting for it, and it competes with a person's post for
+	// the same second of channel time. Between a person's words and a game's
+	// telemetry, the person wins.
+	//
+	// This also makes the feature safe to ship before `N10` is measured. A
+	// league that turns out to be too chatty for the mesh degrades by losing
+	// its own traffic first, rather than by pushing somebody's mail out.
+	ClassDoorEvent
 )
 
 func (c Class) String() string {
@@ -62,6 +82,8 @@ func (c Class) String() string {
 		return "forum"
 	case ClassFileCatalog:
 		return "file-catalog"
+	case ClassDoorEvent:
+		return "door-event"
 	}
 	return "unknown"
 }
@@ -77,6 +99,7 @@ var reserve = map[Class]float64{
 	ClassDM:          0.10,
 	ClassForum:       0.35,
 	ClassFileCatalog: 0.60,
+	ClassDoorEvent:   0.70,
 }
 
 // Ceiling limits, as a percentage of total channel time.

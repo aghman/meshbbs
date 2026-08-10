@@ -16,6 +16,49 @@ import (
 	"github.com/aghman/meshbbs/internal/store"
 )
 
+// fakeKinds answers what the classifier asks about an area, the way the gossip
+// store's refreshed cache does in production.
+type fakeKinds struct{ files, doors map[record.AreaTag]bool }
+
+func (f fakeKinds) IsFileArea(a record.AreaTag) bool { return f.files[a] }
+func (f fakeKinds) IsDoorArea(a record.AreaTag) bool { return f.doors[a] }
+
+func kindsWithFiles(tags ...record.AreaTag) fakeKinds {
+	f := fakeKinds{files: map[record.AreaTag]bool{}, doors: map[record.AreaTag]bool{}}
+	for _, t := range tags {
+		f.files[t] = true
+	}
+	return f
+}
+
+func kindsWithDoors(tags ...record.AreaTag) fakeKinds {
+	f := fakeKinds{files: map[record.AreaTag]bool{}, doors: map[record.AreaTag]bool{}}
+	for _, t := range tags {
+		f.doors[t] = true
+	}
+	return f
+}
+
+// doorEventRecords are what a league actually federates, as opposed to the
+// posts classTestRecords makes. Used where the traffic's TYPE matters as well
+// as its area.
+func doorEventRecords(t *testing.T, key identity.NodeKey, area record.AreaTag, n int) []*record.Record {
+	t.Helper()
+	var out []*record.Record
+	for i := 1; i <= n; i++ {
+		r, err := record.NewDoorEventRecord(key, uint64(i), uint32(1_800_000_000+i), area,
+			record.DoorEventBody{
+				Game:   "lord",
+				Events: []record.DoorEvent{{Kind: uint8(i), Actor: "alice"}},
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // classLink is the outbox's link, recording the priority class it was handed.
 type classLink struct {
 	sent    int
@@ -58,7 +101,11 @@ func classTestRecords(t *testing.T, key identity.NodeKey, area record.AreaTag, n
 // be able to check against the design without running a mesh.
 func TestClassifyArea(t *testing.T) {
 	utils := record.AreaTagFor("utils")
-	classify := classifierFor(func(a record.AreaTag) bool { return a == utils })
+	league := record.AreaTagFor("lordleague")
+	classify := classifierFor(fakeKinds{
+		files: map[record.AreaTag]bool{utils: true},
+		doors: map[record.AreaTag]bool{league: true},
+	})
 
 	for _, c := range []struct {
 		name string
@@ -70,6 +117,7 @@ func TestClassifyArea(t *testing.T) {
 		{"forum", record.AreaTagFor("general"), governor.ClassForum},
 		{"directory", record.ProfileArea, governor.ClassForum},
 		{"file area", utils, governor.ClassFileCatalog},
+		{"door league", league, governor.ClassDoorEvent},
 	} {
 		if got := classify(c.area); got != c.want {
 			t.Errorf("%s area classified %v, want %v", c.name, got, c.want)
@@ -77,17 +125,22 @@ func TestClassifyArea(t *testing.T) {
 	}
 }
 
-// A file area is only catalog traffic because something said so. The tag is a
-// hash of a name and carries no kind, so a classifier with no lookup must fall
-// back to forum rather than guess — under-pricing catalog traffic is a
-// throughput question, mispricing anything else is a correctness one.
-func TestClassifyWithoutAFileAreaLookup(t *testing.T) {
+// An area is only catalog or league traffic because something said so. The tag
+// is a hash of a name and carries no kind, so a classifier with no lookup must
+// fall back to forum rather than guess — under-pricing those two is a
+// throughput question, mispricing the roster or mail is a correctness one.
+func TestClassifyWithoutAnAreaKindLookup(t *testing.T) {
 	classify := classifierFor(nil)
-	if got := classify(record.AreaTagFor("utils")); got != governor.ClassForum {
-		t.Errorf("with no lookup, an area classified %v, want ClassForum", got)
+	for _, name := range []string{"utils", "lordleague"} {
+		if got := classify(record.AreaTagFor(name)); got != governor.ClassForum {
+			t.Errorf("with no lookup, %s classified %v, want ClassForum", name, got)
+		}
 	}
 	if got := classify(store.RosterArea); got != governor.ClassControl {
 		t.Errorf("with no lookup, the roster classified %v, want ClassControl", got)
+	}
+	if got := classify(record.DMArea); got != governor.ClassDM {
+		t.Errorf("with no lookup, mail classified %v, want ClassDM", got)
 	}
 }
 
@@ -117,8 +170,8 @@ func TestProductionWiringFiresTheHamModeRefusal(t *testing.T) {
 	// missing field in exactly this call, so a test that supplied its own
 	// config would have gone on passing.
 	out, err := federationOutbox(key.ID(), fl, dict,
-		// No file areas in this fixture; the catalog arm has its own test.
-		func(record.AreaTag) bool { return false },
+		// No file or door areas in this fixture; those arms have their own test.
+		kindsWithFiles(),
 		// Ham mode: the radio reports is_licensed, so encryption is off limits.
 		func() bool { return false },
 		slog.New(slog.NewTextHandler(&sysopLog, nil)))
@@ -189,7 +242,7 @@ func TestProductionWiringPricesAFileCatalog(t *testing.T) {
 
 	utils := record.AreaTagFor("utils")
 	out, err := federationOutbox(key.ID(), fl, dict,
-		func(a record.AreaTag) bool { return a == utils },
+		kindsWithFiles(utils),
 		func() bool { return true },
 		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)))
 	if err != nil {
@@ -214,6 +267,61 @@ func TestProductionWiringPricesAFileCatalog(t *testing.T) {
 	general := record.AreaTagFor("general")
 	if err := out.SendRecords(general, classTestRecords(t, key, general, 2)); err != nil {
 		t.Fatal(err)
+	}
+	for i, c := range fl.classes[before:] {
+		if c != governor.ClassForum {
+			t.Fatalf("forum symbol %d went out as %v, want ClassForum", i, c)
+		}
+	}
+}
+
+// The door-league arm through the real outbox.
+//
+// Same shape and same reason as the file-catalog test: a priority that is
+// correct in classifierFor and never installed in the binary is the defect
+// class this file exists for. What reaches the LINK is the only thing that
+// decides what a congested mesh drops.
+func TestProductionWiringPricesADoorLeague(t *testing.T) {
+	key, err := identity.GenerateNodeKey(rng.TestSecret(9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dict, _, err := federationDictionaries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl := &classLink{}
+
+	league := record.AreaTagFor("lordleague")
+	out, err := federationOutbox(key.ID(), fl, dict,
+		kindsWithDoors(league),
+		func() bool { return true },
+		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := out.SendRecords(league, doorEventRecords(t, key, league, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if fl.sent == 0 {
+		t.Fatal("nothing was sent for a federated door league")
+	}
+	for i, c := range fl.classes {
+		if c != governor.ClassDoorEvent {
+			t.Fatalf("symbol %d went out as %v, want ClassDoorEvent", i, c)
+		}
+	}
+
+	// A forum area through the same outbox is unaffected: the arm is selective,
+	// not a blanket downgrade of everything the node sends.
+	before := len(fl.classes)
+	general := record.AreaTagFor("general")
+	if err := out.SendRecords(general, classTestRecords(t, key, general, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if len(fl.classes) == before {
+		t.Fatal("nothing was sent for the forum area")
 	}
 	for i, c := range fl.classes[before:] {
 		if c != governor.ClassForum {

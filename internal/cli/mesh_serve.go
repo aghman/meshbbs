@@ -139,7 +139,7 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 	// ham mode is what the radio reports and a sysop can turn it on without
 	// restarting the BBS.
 	outbox, err := federationOutbox(key.ID(), ml, dict,
-		gstore.IsFileArea,
+		gstore,
 		func() bool { return ml.Part97().AllowsEncryptedDMs() }, log)
 	if err != nil {
 		ml.Close()
@@ -182,13 +182,13 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 // article over a fake link and check that they are, which is exactly what was
 // missing when the classifier was left unset.
 func federationOutbox(self identity.NodeID, sender bsmp.Sender, dict *bundle.Dictionary,
-	isFileArea func(record.AreaTag) bool,
+	kinds areaKinds,
 	allowEncryptedDMs func() bool, log *slog.Logger) (*bsmp.Outbox, error) {
 	return bsmp.NewOutbox(bsmp.Config{
 		Self:              self,
 		Link:              sender,
 		Dictionary:        dict,
-		Classify:          classifierFor(isFileArea),
+		Classify:          classifierFor(kinds),
 		AllowEncryptedDMs: allowEncryptedDMs,
 		OnRefusedDM: func(area record.AreaTag) {
 			log.Warn("mail held back", "area", area,
@@ -211,17 +211,30 @@ func federationOutbox(self identity.NodeID, sender bsmp.Sender, dict *bundle.Dic
 // Mail does not federate yet (record.DMArea), so today the DM arm is a policy
 // that is in place before the traffic is, rather than dead code — it is what
 // makes the ham-mode block correct the moment mail does go on the wire.
-// classifierFor builds the production classifier over a file-area lookup.
+// areaKinds is what the classifier needs to know about an area beyond its tag.
+//
+// An interface rather than one lookup function per kind, because there are
+// three kinds now and the next one would be a fourth parameter threaded through
+// federationOutbox to every caller. *store.GossipStore satisfies it already:
+// both methods read the cache it refreshes whenever the area list changes, so
+// an area created while the node is running gets the right price without a
+// restart.
+type areaKinds interface {
+	IsFileArea(record.AreaTag) bool
+	IsDoorArea(record.AreaTag) bool
+}
+
+// classifierFor builds the production classifier over an area-kind lookup.
 //
 // An area tag is a hash of a name and says nothing about what the area holds,
-// so the file-catalog arm cannot be a pure function of the tag — it has to ask
-// something that tracks the areas. The lookup is the gossip store's, which is
-// already refreshed whenever the area list changes, so a file area created
-// while the node is running gets the right price without a restart.
+// so neither the file-catalog arm nor the door arm can be a pure function of
+// the tag — both have to ask something that tracks the areas.
 //
-// A nil lookup means "no file areas", which is what a caller with no store
-// wants and never silently misprices anything else.
-func classifierFor(isFileArea func(record.AreaTag) bool) bsmp.Classifier {
+// A nil lookup means "message areas only", which is what a caller with no store
+// wants. It under-prices catalog and door traffic and never misprices anything
+// else: forum is the safe middle, and the two arms below it are throughput
+// questions where the roster and mail arms are correctness ones.
+func classifierFor(kinds areaKinds) bsmp.Classifier {
 	return func(area record.AreaTag) governor.Class {
 		switch area {
 		case store.RosterArea:
@@ -229,12 +242,19 @@ func classifierFor(isFileArea func(record.AreaTag) bool) bsmp.Classifier {
 		case record.DMArea:
 			return governor.ClassDM
 		}
-		// §7.5: a file area's records are catalog entries, and §7.6 puts them at
-		// the bottom of the priority order — below forum posts, because a file
-		// listing that arrives an hour late costs nobody anything, and under
-		// backpressure the classes are dropped from the bottom.
-		if isFileArea != nil && isFileArea(area) {
-			return governor.ClassFileCatalog
+		if kinds != nil {
+			// §7.5: a file area's records are catalog entries, and §7.6 puts
+			// them near the bottom of the priority order — below forum posts,
+			// because a file listing that arrives an hour late costs nobody
+			// anything, and under backpressure classes drop from the bottom.
+			if kinds.IsFileArea(area) {
+				return governor.ClassFileCatalog
+			}
+			// And a door league is below even that. See ClassDoorEvent: a
+			// stale catalog entry is still true, a stale battle report is not.
+			if kinds.IsDoorArea(area) {
+				return governor.ClassDoorEvent
+			}
 		}
 		// Forums, and the user directory with them.
 		return governor.ClassForum
