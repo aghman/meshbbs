@@ -185,7 +185,9 @@ func planFor(p airtime.Preset, cfg survey.Config) string {
 	if hopCount == 0 {
 		hopCount = 3
 	}
-	total := cfg.Baseline + time.Duration(hopCount)*cfg.Load
+	// Two baselines: one before the load phases and one after, so ambient drift
+	// over the run is visible rather than folded into R.
+	total := 2*cfg.Baseline + time.Duration(hopCount)*cfg.Load
 
 	one := p.Packet(cfg.PayloadBytes)
 	perPhase := 0
@@ -199,7 +201,7 @@ func planFor(p airtime.Preset, cfg survey.Config) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Survey plan\n")
 	fmt.Fprintf(&sb, "  radio          %s\n", p)
-	fmt.Fprintf(&sb, "  baseline       %s, silent\n", cfg.Baseline)
+	fmt.Fprintf(&sb, "  baseline       %s, silent — twice, before and after\n", cfg.Baseline)
 	fmt.Fprintf(&sb, "  load           %s at each of hop %v\n", cfg.Load, cfg.HopLimits)
 	fmt.Fprintf(&sb, "  total time     %s\n", total)
 	fmt.Fprintf(&sb, "  transmits      about %d packets of %d bytes\n", packets, cfg.PayloadBytes)

@@ -3,6 +3,7 @@ package survey
 import (
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 
@@ -79,7 +80,22 @@ func (r *Report) Write(w io.Writer, instances int) {
 	p("  channel busy   %.2f%% (sd %.2f, %d fresh samples, %d stale reads)\n",
 		r.Baseline.MeanChannel(), r.Baseline.SDChannel(),
 		len(r.Baseline.Samples), r.Baseline.Stale)
-	p("  duration       %s\n\n", r.Baseline.Ended.Sub(r.Baseline.Started).Round(time.Second))
+	p("  duration       %s\n", r.Baseline.Ended.Sub(r.Baseline.Started).Round(time.Second))
+	if drift, ok := r.Drift(); ok {
+		// Printed next to the opening baseline rather than at the end, because
+		// it is the same measurement and a reader comparing the two should not
+		// have to scroll. The sign is the useful part: positive means the mesh
+		// got busier while we were transmitting, and R is over-stated.
+		raw, _ := r.DriftRaw()
+		p("  closing        %.2f%% (sd %.2f, %d fresh samples)\n",
+			r.BaselineEnd.MeanChannel(), r.BaselineEnd.SDChannel(), len(r.BaselineEnd.Samples))
+		p("  ambient drift  %+.2f to %+.2f points over the run\n", drift, raw)
+		p("                 (the range is our own transmit average still decaying;\n")
+		p("                  a wide one means the closing baseline started too soon)\n")
+	} else {
+		p("  closing        not measured — drift over the run is unknown\n")
+	}
+	p("\n")
 
 	p("Hop limit sweep\n")
 	p("  %-5s %-10s %-10s %-16s %s\n", "hop", "sent", "our tx", "R", "note")
@@ -211,7 +227,56 @@ func notes(r *Report) []string {
 			out = append(out, fmt.Sprintf("hop %d produced no usable measurement (%s)", e.HopLimit, e.Explain))
 		}
 	}
+	out = append(out, driftNotes(r)...)
 	return out
+}
+
+// driftBias is the share of a load phase's measured rise that ambient drift may
+// account for before the estimate stops being trustworthy.
+//
+// A quarter, because the reported interval is already roughly ±20% on a good
+// run: a bias of the same order does not widen the answer, it moves it, and an
+// interval that excludes the truth is worse than a wide one.
+const driftBias = 0.25
+
+// driftNotes reports ambient drift against what each hop actually measured.
+//
+// Stated per hop rather than once, because the same absolute drift matters
+// completely differently at hop 1 and hop 5: a 0.3-point drift against hop 5's
+// 4-point rise is noise, and against hop 1's 0.8-point rise it is a quarter of
+// the answer.
+func driftNotes(r *Report) []string {
+	drift, ok := r.Drift()
+	if !ok {
+		return []string{"no closing baseline: ambient drift over the run is unknown, so R may be biased in either direction by however much this mesh got busier or quieter"}
+	}
+
+	var out []string
+	for _, e := range r.Estimates {
+		if !e.Confident || e.DeltaBusy <= 0 {
+			continue
+		}
+		share := math.Abs(drift) / e.DeltaBusy
+		if share < driftBias {
+			continue
+		}
+		direction := "over-stated"
+		if drift < 0 {
+			direction = "under-stated"
+		}
+		out = append(out, fmt.Sprintf(
+			"the mesh got %s over this run (%+.2f points) and hop %d's rise was only %.2f: "+
+				"as much as %.0f%% of that hop's R may be drift rather than rebroadcast, so treat R≈%.1f as %s",
+			busier(drift), drift, e.HopLimit, e.DeltaBusy, share*100, e.R, direction))
+	}
+	return out
+}
+
+func busier(drift float64) string {
+	if drift < 0 {
+		return "quieter"
+	}
+	return "busier"
 }
 
 func sortStrings(s []string) {
