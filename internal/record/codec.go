@@ -75,6 +75,11 @@ func Unmarshal(b []byte) (*Record, error) {
 	if err := checkNoFileContent(r); err != nil {
 		return nil, err
 	}
+	// And a DOOR_EVENT from a peer carries a batch of bounded events, for the
+	// same reason and with the same consequence if it does not.
+	if err := checkDoorEventBody(r); err != nil {
+		return nil, err
+	}
 	// Retain the exact bytes rather than re-encoding. This is what makes an
 	// encoder change unable to invalidate stored history.
 	r.signed = append([]byte(nil), canonical...)

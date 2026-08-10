@@ -214,6 +214,12 @@ func New(key identity.NodeKey, r Record) (*Record, error) {
 	if err := checkNoFileContent(&r); err != nil {
 		return nil, err
 	}
+	// §9.5: a DOOR_EVENT carries a batch of bounded events. Same reason, same
+	// place — without this the generic 8 KiB body makes the payload bound a
+	// suggestion rather than a rule.
+	if err := checkDoorEventBody(&r); err != nil {
+		return nil, err
+	}
 	out := r
 	out.Body = append([]byte(nil), r.Body...) // defensive copy: records are immutable
 	out.signed = canonical
