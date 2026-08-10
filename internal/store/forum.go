@@ -9,13 +9,13 @@ import (
 	"github.com/aghman/meshbbs/internal/record"
 )
 
-// Area is a federatable namespace: a forum message base (§6.3) or a file area
-// (§6.5).
+// Area is a federatable namespace: a forum message base (§6.3), a file area
+// (§6.5), or an inter-BBS door league (§9.5).
 //
-// Both kinds share this table and this type because at the protocol layer they
+// All three share this table and this type because at the protocol layer they
 // are the same thing — an AreaTag with a version vector — and because the tag
-// namespace is global, so letting the two kinds be named independently would
-// let a message area and a file area collide into one tag. See migration 0005.
+// namespace is global, so letting the kinds be named independently would let
+// two of them collide into one tag. See migrations 0005 and 0007.
 type Area struct {
 	ID            int64
 	Name          string
@@ -36,7 +36,29 @@ const (
 	KindMessage AreaKind = "message"
 	// KindFile is a file area (§6.5).
 	KindFile AreaKind = "file"
+	// KindDoor is an inter-BBS door league (§9.5): it carries DOOR_EVENT
+	// records and nothing else.
+	KindDoor AreaKind = "door"
 )
+
+// Describe names the kind in the words an error message wants.
+//
+// It exists because the two-kind era let error strings say "is a file area" by
+// simply naming the other one, and with three kinds that phrasing became a
+// guess — one that would have been wrong for door areas in the two places a
+// sysop is most likely to meet it.
+func (k AreaKind) Describe() string {
+	switch k {
+	case KindMessage:
+		return "a message area"
+	case KindFile:
+		return "a file area"
+	case KindDoor:
+		return "a door league"
+	default:
+		return fmt.Sprintf("an area of unknown kind %q", string(k))
+	}
+}
 
 // Scope returns a human label for the area's reach.
 //
@@ -69,6 +91,16 @@ func (s *Store) CreateArea(ctx context.Context, name, description string, federa
 // everything above it.
 func (s *Store) CreateFileArea(ctx context.Context, name, description string, federated bool) (Area, error) {
 	return s.createArea(ctx, name, description, federated, KindFile)
+}
+
+// CreateDoorArea creates an inter-BBS door league (§9.5).
+//
+// Same opt-in rule as the other kinds, and the sharpest reason of the three:
+// door events sit at the bottom of the priority order (§1.1), a league is the
+// chattiest thing the design contemplates, and a federated one nobody wanted
+// spends the commons on a game nobody here is playing.
+func (s *Store) CreateDoorArea(ctx context.Context, name, description string, federated bool) (Area, error) {
+	return s.createArea(ctx, name, description, federated, KindDoor)
 }
 
 func (s *Store) createArea(ctx context.Context, name, description string, federated bool, kind AreaKind) (Area, error) {
@@ -163,7 +195,7 @@ func (s *Store) GetArea(ctx context.Context, name string) (Area, error) {
 		return Area{}, err
 	}
 	if a.Kind != KindMessage {
-		return Area{}, fmt.Errorf("%w: %s is a file area", ErrWrongAreaKind, a.Name)
+		return Area{}, fmt.Errorf("%w: %s is %s", ErrWrongAreaKind, a.Name, a.Kind.Describe())
 	}
 	return a, nil
 }
@@ -175,7 +207,19 @@ func (s *Store) GetFileArea(ctx context.Context, name string) (Area, error) {
 		return Area{}, err
 	}
 	if a.Kind != KindFile {
-		return Area{}, fmt.Errorf("%w: %s is a message area", ErrWrongAreaKind, a.Name)
+		return Area{}, fmt.Errorf("%w: %s is %s", ErrWrongAreaKind, a.Name, a.Kind.Describe())
+	}
+	return a, nil
+}
+
+// GetDoorArea loads a DOOR league by name.
+func (s *Store) GetDoorArea(ctx context.Context, name string) (Area, error) {
+	a, err := s.GetAnyArea(ctx, name)
+	if err != nil {
+		return Area{}, err
+	}
+	if a.Kind != KindDoor {
+		return Area{}, fmt.Errorf("%w: %s is %s", ErrWrongAreaKind, a.Name, a.Kind.Describe())
 	}
 	return a, nil
 }
@@ -206,6 +250,11 @@ func (s *Store) ListAreas(ctx context.Context) ([]Area, error) {
 // ListFileAreas returns the file areas, ordered by name.
 func (s *Store) ListFileAreas(ctx context.Context) ([]Area, error) {
 	return s.listAreas(ctx, KindFile)
+}
+
+// ListDoorAreas returns the door leagues, ordered by name.
+func (s *Store) ListDoorAreas(ctx context.Context) ([]Area, error) {
+	return s.listAreas(ctx, KindDoor)
 }
 
 func (s *Store) listAreas(ctx context.Context, kind AreaKind) ([]Area, error) {

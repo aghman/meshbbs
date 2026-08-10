@@ -5,6 +5,7 @@ import (
 	"sort"
 	"text/tabwriter"
 
+	"github.com/aghman/meshbbs/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -41,14 +42,19 @@ func newAreaListCmd(e *env) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Both kinds share one tag namespace (migration 0005), so they
-			// belong in one listing: a sysop deciding on a name needs to see
-			// every name already spent, not half of them.
+			// All three kinds share one tag namespace (migrations 0005 and
+			// 0007), so they belong in one listing: a sysop deciding on a name
+			// needs to see every name already spent, not some of them.
 			fileAreas, err := st.ListFileAreas(ctx)
 			if err != nil {
 				return err
 			}
+			doorAreas, err := st.ListDoorAreas(ctx)
+			if err != nil {
+				return err
+			}
 			areas = append(areas, fileAreas...)
+			areas = append(areas, doorAreas...)
 			if len(areas) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "No areas yet. They are created when the BBS first runs.")
 				return nil
@@ -79,10 +85,11 @@ func newAreaCreateCmd(e *env) *cobra.Command {
 	var description string
 	var federated bool
 	var files bool
+	var kind string
 
 	cmd := &cobra.Command{
 		Use:   "create <name>",
-		Short: "Create a message area, or a file area with --files",
+		Short: "Create a message area, a file area, or a door league",
 		Long: `Create an area.
 
 The area's wire tag is derived from its name, so two instances that create the
@@ -93,13 +100,22 @@ authority to ask, exactly as there is none for node IDs (§6.1.1).
 It also means a typo makes a different area, silently. Check the tag against
 your peers if a federated area does not seem to be reaching them.
 
-With --files the area holds files rather than messages (§6.5), and appears as a
-directory over SFTP. A name can only be spent once across both kinds, because
-both derive the same kind of tag from it.
+--kind chooses what the area holds. A name can only be spent once across all
+three, because they all derive the same kind of tag from it.
+
+  message  a forum message base (§6.3). The default.
+  file     files, browsable over SFTP (§6.5).
+  door     an inter-BBS door league (§9.5), carrying game events between
+           boards. It accepts DOOR_EVENT records and nothing else, and a
+           message area will not accept those.
 
 A federated FILE area replicates the catalog only — names, sizes and hashes.
 File contents never travel over the mesh, at any size, and that is a property of
-the link rather than a setting (§7.5).`,
+the link rather than a setting (§7.5).
+
+A federated DOOR league spends shared airtime on game traffic, which sits at the
+bottom of the priority order (§1.1). Federate one because a league exists to
+play in, not to see what happens.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -109,25 +125,35 @@ the link rather than a setting (§7.5).`,
 			}
 			defer st.Close()
 
-			create := st.CreateArea
-			kind := "message area"
 			if files {
+				kind = string(store.KindFile)
+			}
+			create := st.CreateArea
+			switch store.AreaKind(kind) {
+			case store.KindMessage:
+			case store.KindFile:
 				create = st.CreateFileArea
-				kind = "file area"
+			case store.KindDoor:
+				create = st.CreateDoorArea
+			default:
+				return fmt.Errorf("unknown area kind %q; use message, file or door", kind)
 			}
 			area, err := create(ctx, args[0], description, federated)
 			if err != nil {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Created %s, a %s (tag %x)\n", area.Name, kind, area.Tag[:])
+			fmt.Fprintf(out, "Created %s, %s (tag %x)\n", area.Name, area.Kind.Describe(), area.Tag[:])
 			if federated {
 				fmt.Fprintf(out, "It federates. Peers need an area with the same name to receive it.\n")
 			} else {
 				fmt.Fprintf(out, "It is local only. Run \"meshbbs area federate %s\" to put it on the mesh.\n", area.Name)
 			}
-			if files {
+			switch area.Kind {
+			case store.KindFile:
 				fmt.Fprintf(out, "Users with the upload_files capability can put files in it over SFTP.\n")
+			case store.KindDoor:
+				fmt.Fprintf(out, "It carries door events only; posting into it is refused, here and from peers.\n")
 			}
 			return nil
 		},
@@ -135,7 +161,13 @@ the link rather than a setting (§7.5).`,
 
 	cmd.Flags().StringVar(&description, "description", "", "what the area is for")
 	cmd.Flags().BoolVar(&federated, "federated", false, "put it on the mesh immediately")
-	cmd.Flags().BoolVar(&files, "files", false, "make a file area rather than a message area")
+	cmd.Flags().StringVar(&kind, "kind", string(store.KindMessage), "what the area holds: message, file or door")
+	// --files predates --kind, which arrived when a third kind made a boolean
+	// per kind the wrong shape. Kept working and hidden rather than removed:
+	// breaking a flag to tidy a help page is a bad trade.
+	cmd.Flags().BoolVar(&files, "files", false, "deprecated: use --kind file")
+	_ = cmd.Flags().MarkHidden("files")
+	cmd.MarkFlagsMutuallyExclusive("kind", "files")
 	return cmd
 }
 
