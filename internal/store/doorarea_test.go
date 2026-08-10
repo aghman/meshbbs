@@ -42,15 +42,21 @@ func TestMigrationRebuildKeepsFileRowsAndTheirAreas(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Force 0007 to run AGAIN, now that there is data to lose.
+	// Force the rebuild to run AGAIN, now that there is data to lose.
 	//
 	// Without this the test is vacuous: OpenMemory applies every migration
 	// before the first row exists, so the rebuild happens on an empty table and
-	// a cascade has nothing to delete. Forgetting the migration and re-running
-	// is what a real upgrade looks like — an existing database, with files in
-	// it, meeting this migration for the first time.
+	// a cascade has nothing to delete. Forgetting it and re-running is what a
+	// real upgrade looks like — an existing database, with files in it, meeting
+	// this migration for the first time.
+	//
+	// Everything from 0007 on, not 0007 alone: the rebuild recreates `areas`
+	// from the columns it knew about, so replaying it without the migrations
+	// that came after would drop theirs. That is not a production hazard, since
+	// migrations only run forward in order, but it is the trap this test would
+	// otherwise fall into and blame on the rebuild.
 	if _, err := st.db.ExecContext(ctx,
-		`DELETE FROM schema_migrations WHERE name = '0007_door_areas.sql'`); err != nil {
+		`DELETE FROM schema_migrations WHERE name >= '0007'`); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.migrate(ctx); err != nil {
@@ -292,5 +298,82 @@ func TestIsDoorAreaFollowsFederation(t *testing.T) {
 	}
 	if g.IsFileArea(tag) {
 		t.Error("a league was classified as a file area")
+	}
+}
+
+// §11.3's cross-field rule, enforced where the field is written because SQLite
+// cannot express "these rows add up" as a CHECK.
+func TestAreaSharesMustFitInOneBudget(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenMemory(ctx, clock.NewReal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		if _, err := st.CreateArea(ctx, name, "", true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.SetAreaShare(ctx, "alpha", 0.6, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetAreaShare(ctx, "beta", 0.4, "test"); err != nil {
+		t.Fatalf("0.6 + 0.4 should fit exactly: %v", err)
+	}
+	if err := st.SetAreaShare(ctx, "gamma", 0.1, "test"); !errors.Is(err, ErrShareOverBudget) {
+		t.Errorf("got %v, want ErrShareOverBudget", err)
+	}
+
+	// Re-setting an area's own share compares against the OTHERS, so lowering
+	// or re-applying one must never trip on itself.
+	if err := st.SetAreaShare(ctx, "alpha", 0.5, "test"); err != nil {
+		t.Errorf("lowering an existing share was refused: %v", err)
+	}
+	if err := st.SetAreaShare(ctx, "beta", 0.4, "test"); err != nil {
+		t.Errorf("re-applying an unchanged share was refused: %v", err)
+	}
+
+	// Out of range in either direction.
+	for _, bad := range []float64{-0.1, 1.5} {
+		if err := st.SetAreaShare(ctx, "gamma", bad, "test"); err == nil {
+			t.Errorf("a share of %v was accepted", bad)
+		}
+	}
+}
+
+// A local-only area spends no mesh airtime, so it must not reserve any.
+func TestLocalAreasDoNotConsumeTheAirtimeBudget(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenMemory(ctx, clock.NewReal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if _, err := st.CreateArea(ctx, "localonly", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateArea(ctx, "onthemesh", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetAreaShare(ctx, "localonly", 0.9, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetAreaShare(ctx, "onthemesh", 0.9, "test"); err != nil {
+		t.Errorf("a local-only area's share counted against the mesh budget: %v", err)
+	}
+
+	// And only the federated one reaches the governor.
+	shares, err := st.AreaShares(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := shares[record.AreaTagFor("localonly")]; ok {
+		t.Error("a local-only area was handed to the governor")
+	}
+	if got := shares[record.AreaTagFor("onthemesh")]; got != 0.9 {
+		t.Errorf("federated share = %v, want 0.9", got)
 	}
 }

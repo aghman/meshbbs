@@ -25,7 +25,10 @@ type Area struct {
 	Federated     bool
 	ReadOnly      bool
 	RetentionDays int
-	CreatedAt     int64
+	// AirtimeShare caps what this area may spend, as a fraction of the
+	// instance's whole budget (§6.3). Zero means no cap.
+	AirtimeShare float64
+	CreatedAt    int64
 }
 
 // AreaKind says what an area holds.
@@ -166,7 +169,7 @@ func ValidateAreaName(name string) error {
 
 // areaColumns is the projection every area scan uses, so the SELECT list and
 // scanArea cannot drift apart.
-const areaColumns = `id, name, tag, kind, description, federated, read_only, retention_days, created_at`
+const areaColumns = `id, name, tag, kind, description, federated, read_only, retention_days, airtime_share, created_at`
 
 // scanArea reads one area row from the areaColumns projection.
 func scanArea(sc interface{ Scan(...any) error }) (Area, error) {
@@ -175,7 +178,7 @@ func scanArea(sc interface{ Scan(...any) error }) (Area, error) {
 	var kind string
 	var fed, ro int
 	if err := sc.Scan(&a.ID, &a.Name, &tag, &kind, &a.Description, &fed, &ro,
-		&a.RetentionDays, &a.CreatedAt); err != nil {
+		&a.RetentionDays, &a.AirtimeShare, &a.CreatedAt); err != nil {
 		return Area{}, err
 	}
 	copy(a.Tag[:], tag)
@@ -272,6 +275,88 @@ func (s *Store) listAreas(ctx context.Context, kind AreaKind) ([]Area, error) {
 			return nil, err
 		}
 		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ErrShareOverBudget is returned when the per-area shares would sum past one.
+var ErrShareOverBudget = errors.New("area airtime shares would exceed the whole budget")
+
+// SetAreaShare caps what one area may spend, as a fraction of this instance's
+// budget (§6.3). Zero removes the cap.
+//
+// The sum rule is enforced here because this is the only path that writes the
+// column and SQLite cannot express "these rows add up" as a CHECK. It is a real
+// refusal rather than a warning: an instance that has promised away 130% of its
+// budget has not made a decision about throughput, it has made one it cannot
+// keep, and the failure would show up as areas mysteriously starving each other
+// weeks later.
+//
+// Only FEDERATED areas count toward the sum. A local-only area spends no mesh
+// airtime, so capping it is harmless and reserving budget for it would take
+// that budget from areas that actually transmit.
+func (s *Store) SetAreaShare(ctx context.Context, name string, share float64, actor string) error {
+	if share < 0 || share > 1 {
+		return fmt.Errorf("airtime share must be between 0 and 1, got %v", share)
+	}
+	area, err := s.GetAnyArea(ctx, name)
+	if err != nil {
+		return err
+	}
+
+	if share > 0 && area.Federated {
+		total, err := s.totalAirtimeShare(ctx, area.ID)
+		if err != nil {
+			return err
+		}
+		if total+share > 1 {
+			return fmt.Errorf("%w: %s would take %.0f%% on top of %.0f%% already allocated",
+				ErrShareOverBudget, name, share*100, total*100)
+		}
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE areas SET airtime_share = ? WHERE id = ?`, share, area.ID); err != nil {
+		return fmt.Errorf("set airtime share: %w", err)
+	}
+	return s.audit(ctx, actor, "area.share", name, fmt.Sprintf("%.2f of this node's budget", share))
+}
+
+// totalAirtimeShare sums the shares of every federated area except one.
+func (s *Store) totalAirtimeShare(ctx context.Context, exceptID int64) (float64, error) {
+	var total float64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(airtime_share), 0) FROM areas WHERE federated = 1 AND id != ?`,
+		exceptID).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("sum airtime shares: %w", err)
+	}
+	return total, nil
+}
+
+// AreaShares maps every federated area with a cap to its share, for the
+// governor.
+func (s *Store) AreaShares(ctx context.Context) (map[record.AreaTag]float64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tag, airtime_share FROM areas WHERE federated = 1 AND airtime_share > 0`)
+	if err != nil {
+		return nil, fmt.Errorf("read airtime shares: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[record.AreaTag]float64{}
+	for rows.Next() {
+		var tag []byte
+		var share float64
+		if err := rows.Scan(&tag, &share); err != nil {
+			return nil, err
+		}
+		if len(tag) != 4 {
+			continue
+		}
+		var a record.AreaTag
+		copy(a[:], tag)
+		out[a] = share
 	}
 	return out, rows.Err()
 }

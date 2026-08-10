@@ -1102,17 +1102,17 @@ func (l *Link) MTU() int { return MaxPayload }
 // The priority class is inferred from the frame type, which is all this layer
 // can see: a control frame is control traffic, and anything else is bulk. The
 // sync engine knows more — whether a bundle is mail or a forum post — and says
-// so through SendClass.
+// so through SendCharged.
 func (l *Link) Send(ctx context.Context, to identity.NodeID, payload []byte) error {
 	class := governor.ClassForum
 	if len(payload) > 0 && payload[0] == FrameControl {
 		class = governor.ClassControl
 	}
-	return l.SendClass(ctx, to, payload, class)
+	return l.SendCharged(ctx, to, payload, governor.Charge{Class: class})
 }
 
-// SendClass transmits one datagram at an explicit priority.
-func (l *Link) SendClass(ctx context.Context, to identity.NodeID, payload []byte, class governor.Class) error {
+// SendCharged transmits one datagram, billed to an explicit class and area.
+func (l *Link) SendCharged(ctx context.Context, to identity.NodeID, payload []byte, ch governor.Charge) error {
 	if len(payload) > l.MTU() {
 		return link.ErrTooLarge
 	}
@@ -1144,7 +1144,10 @@ func (l *Link) SendClass(ctx context.Context, to identity.NodeID, payload []byte
 	if !l.Connected() {
 		return ErrNotConnected
 	}
-	if !gov.Allow(len(payload), class) {
+	// withArea is true here and false in Send: the link's own control frames
+	// belong to no area, and the roster's tag is the zero value, so passing the
+	// zero tag as "no area" would silently apply a roster cap to them.
+	if !gov.AllowCharge(len(payload), ch, true) {
 		l.refused.Add(1)
 		return link.ErrNoBudget
 	}

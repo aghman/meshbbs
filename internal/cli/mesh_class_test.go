@@ -63,17 +63,19 @@ func doorEventRecords(t *testing.T, key identity.NodeKey, area record.AreaTag, n
 type classLink struct {
 	sent    int
 	classes []governor.Class
+	areas   [][4]byte
 }
 
 func (l *classLink) MTU() int { return 233 }
 
 func (l *classLink) Send(ctx context.Context, to identity.NodeID, payload []byte) error {
-	return l.SendClass(ctx, to, payload, governor.ClassForum)
+	return l.SendCharged(ctx, to, payload, governor.Charge{Class: governor.ClassForum})
 }
 
-func (l *classLink) SendClass(ctx context.Context, to identity.NodeID, payload []byte, class governor.Class) error {
+func (l *classLink) SendCharged(ctx context.Context, to identity.NodeID, payload []byte, ch governor.Charge) error {
 	l.sent++
-	l.classes = append(l.classes, class)
+	l.classes = append(l.classes, ch.Class)
+	l.areas = append(l.areas, ch.Area)
 	return nil
 }
 
@@ -310,6 +312,21 @@ func TestProductionWiringPricesADoorLeague(t *testing.T) {
 	for i, c := range fl.classes {
 		if c != governor.ClassDoorEvent {
 			t.Fatalf("symbol %d went out as %v, want ClassDoorEvent", i, c)
+		}
+	}
+
+	// The AREA has to reach the link too, not just the class.
+	//
+	// §6.3's per-area share is enforced in the governor, which the link calls —
+	// so an outbox that classifies correctly and then forgets which area the
+	// traffic belonged to produces a cap that is configured, displayed, and
+	// never applied to anything. Nothing else in the suite would notice: every
+	// class assertion still passes.
+	for i, a := range fl.areas {
+		if a != [4]byte(league) {
+			t.Fatalf("symbol %d was billed to area %x, want %x — the per-area "+
+				"share cannot bind if the area does not reach the governor",
+				i, a[:], league[:])
 		}
 	}
 

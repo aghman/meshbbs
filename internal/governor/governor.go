@@ -24,7 +24,9 @@
 package governor
 
 import (
+	"bytes"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -86,6 +88,23 @@ func (c Class) String() string {
 		return "door-event"
 	}
 	return "unknown"
+}
+
+// Charge is what one transmission is billed to.
+//
+// Class alone was enough while the only question was priority. A per-area
+// sub-budget needs to know WHICH area as well, and the two travel together
+// because the class is derived from the area — passing them separately invites
+// a caller to compute one from a tag and pass the other from somewhere else.
+//
+// Area is the raw four-byte tag rather than record.AreaTag so this package need
+// not import record. The dependency would be acyclic, but link.go already
+// names a constant rather than importing the layer above it, and this matches.
+type Charge struct {
+	Class Class
+	// Area is the tag the traffic belongs to. The zero tag is the roster,
+	// which is a real area and simply has no sub-budget configured.
+	Area [4]byte
 }
 
 // reserve is the fraction of the bucket a class must leave untouched.
@@ -178,6 +197,10 @@ type Config struct {
 	// OnAlert reports a peer exceeding its inbound quota, which §7.6 requires
 	// be surfaced rather than silently dropped.
 	OnAlert func(string)
+	// AreaShares caps what a single area may spend, as a fraction of this
+	// instance's whole share (§6.3's airtime_share). An area with no entry
+	// draws from the general pool and is bounded only by its class.
+	AreaShares map[[4]byte]float64
 }
 
 // dutyCycleLimit is the fraction of a rolling hour a region allows one
@@ -218,7 +241,28 @@ type Governor struct {
 	sentPackets, echoes int
 	r                   float64
 
+	// areaBuckets are the per-area sub-budgets (§6.3). Lazily created, so an
+	// area with no configured share costs nothing.
+	areaShares  map[[4]byte]float64
+	areaBuckets map[[4]byte]*areaBucket
+
 	stats Stats
+}
+
+// areaBucket is one area's slice of this instance's budget.
+//
+// # Why the class reserve is not this
+//
+// A reserve stops a class spending the LAST x% of the bucket. It says nothing
+// about rate, so a chatty area inside a 0.70 reserve can still take 30% of the
+// day's budget in an hour and leave the rest of the node nothing until the
+// bucket refills. §6.3 asks for a share, which is a rate, and that needs its
+// own bucket.
+type areaBucket struct {
+	share    float64
+	tokens   time.Duration
+	capacity time.Duration
+	last     time.Time
 }
 
 type txRecord struct {
@@ -239,6 +283,7 @@ type Stats struct {
 	RefusedQuiet   int
 	RefusedDuty    int
 	RefusedBusy    int
+	RefusedArea    int
 	InboundAlerts  int
 	ChargedChannel time.Duration
 }
@@ -247,6 +292,9 @@ type Stats struct {
 func New(cfg Config) (*Governor, error) {
 	if cfg.Clock == nil {
 		cfg.Clock = clock.NewReal()
+	}
+	if cfg.AreaShares == nil {
+		cfg.AreaShares = map[[4]byte]float64{}
 	}
 	if cfg.CeilingPercent <= 0 {
 		cfg.CeilingPercent = DefaultCeilingPercent
@@ -280,6 +328,14 @@ func New(cfg Config) (*Governor, error) {
 		r:       cfg.FloodMultiplier,
 		inbound: map[identity.NodeID]*inboundRec{},
 		last:    cfg.Clock.Now(),
+
+		areaShares:  map[[4]byte]float64{},
+		areaBuckets: map[[4]byte]*areaBucket{},
+	}
+	for a, share := range cfg.AreaShares {
+		if share > 0 {
+			g.areaShares[a] = share
+		}
 	}
 	g.capacity = g.burst()
 	// Start full. A node that has just booted has not spent anything, and
@@ -322,11 +378,25 @@ func (g *Governor) Would(n int, class Class) bool {
 
 // Allow reports whether a packet of n application bytes may be sent now, and
 // charges the budget when it says yes.
+//
+// The area-less form: the packet is billed to the node's budget and to no area.
+// Used by callers that have no area to name, such as the link's own control
+// frames.
 func (g *Governor) Allow(n int, class Class) bool {
+	return g.AllowCharge(n, Charge{Class: class}, false)
+}
+
+// AllowCharge is Allow with an area sub-budget applied.
+//
+// withArea distinguishes "this traffic belongs to the roster", whose tag is the
+// zero value, from "this traffic belongs to no area at all". Without it the two
+// are the same four bytes and a sysop who capped the roster would find the cap
+// silently applied to the link's own frames as well.
+func (g *Governor) AllowCharge(n int, ch Charge, withArea bool) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if err := g.check(n, class); err != nil {
+	if err := g.check(n, ch.Class); err != nil {
 		switch err {
 		case errQuiet:
 			g.stats.RefusedQuiet++
@@ -344,12 +414,100 @@ func (g *Governor) Allow(n int, class Class) bool {
 	air := g.cfg.Preset.Packet(n)
 	cost := time.Duration(float64(air) * g.r)
 
+	// The area's own bucket is checked AFTER the node's and before either is
+	// charged. Charging the node for a packet the area cannot afford would
+	// spend the commons on a transmission that never happens.
+	var b *areaBucket
+	if withArea {
+		if b = g.bucketFor(ch.Area, now); b != nil && b.tokens < cost {
+			g.stats.RefusedArea++
+			return false
+		}
+	}
+
 	g.tokens -= cost
+	if b != nil {
+		b.tokens -= cost
+	}
 	g.localTX = append(g.localTX, txRecord{at: now, air: air})
 	g.sentPackets++
 	g.stats.Allowed++
 	g.stats.ChargedChannel += cost
 	return true
+}
+
+// bucketFor returns the area's sub-budget, refilled, or nil if it has none.
+// Caller holds the lock.
+func (g *Governor) bucketFor(area [4]byte, now time.Time) *areaBucket {
+	share, ok := g.areaShares[area]
+	if !ok || share <= 0 {
+		return nil
+	}
+	b, ok := g.areaBuckets[area]
+	if !ok {
+		// A bucket that cannot hold one full packet can never send one, which
+		// is the same trap burst() guards against and a worse one here: a
+		// sysop who set a small share would get an area that is not slowed but
+		// switched off, with nothing to say so. The floor means shares do not
+		// strictly sum, which is the honest trade and is why the sum rule is a
+		// warning rather than an invariant.
+		capacity := time.Duration(share * float64(g.capacity))
+		if floor := g.costLocked(233); capacity < floor {
+			capacity = floor
+		}
+		b = &areaBucket{share: share, tokens: capacity, capacity: capacity, last: now}
+		g.areaBuckets[area] = b
+		return b
+	}
+	if elapsed := now.Sub(b.last); elapsed > 0 {
+		b.last = now
+		// Same penalty divisor as the node's bucket: a busy channel slows an
+		// area for the same reason it slows everything else.
+		rate := g.shareFraction() * b.share / g.penalty
+		b.tokens += time.Duration(float64(elapsed) * rate)
+		if b.tokens > b.capacity {
+			b.tokens = b.capacity
+		}
+	}
+	return b
+}
+
+// SetAreaShares replaces the per-area caps.
+//
+// Areas are created and re-shared by a sysop while the BBS is running, so this
+// is refreshed from the federation loop alongside the area list rather than
+// read once at startup. Buckets for areas whose share is unchanged keep their
+// tokens: re-reading the config must not hand an area a fresh full bucket, or a
+// sysop could lift the cap by touching the database in a loop.
+func (g *Governor) SetAreaShares(shares map[[4]byte]float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.areaShares = map[[4]byte]float64{}
+	for a, s := range shares {
+		if s > 0 {
+			g.areaShares[a] = s
+		}
+	}
+	for a, b := range g.areaBuckets {
+		share, ok := g.areaShares[a]
+		if !ok {
+			delete(g.areaBuckets, a)
+			continue
+		}
+		if share != b.share {
+			// The size changed, so the bucket is rebuilt — but it keeps what it
+			// had, clamped, rather than being refilled.
+			capacity := time.Duration(share * float64(g.capacity))
+			if floor := g.costLocked(233); capacity < floor {
+				capacity = floor
+			}
+			b.share, b.capacity = share, capacity
+			if b.tokens > capacity {
+				b.tokens = capacity
+			}
+		}
+	}
 }
 
 // check applies every rule without charging. Caller holds the lock.
@@ -575,11 +733,33 @@ func (g *Governor) Explain() string {
 	full := float64(g.cfg.Preset.Packet(233)) * g.r / float64(time.Second)
 	short := float64(g.cfg.Preset.Packet(100)) * g.r / float64(time.Second)
 
-	return fmt.Sprintf(
+	out := fmt.Sprintf(
 		"share: %.0f channel-seconds/day — about %.0f full packets, or %.0f short posts "+
 			"(%.0f%% ceiling ÷ %d instances, R=%.1f%s)",
 		perDay, perDay/full, perDay/short,
 		g.cfg.CeilingPercent, g.cfg.Instances, g.r, g.rNote())
+
+	// §7.6 insists a sysop sees the derived figure rather than the fraction.
+	// "0.1 of your share" is not something anyone can act on; "about one full
+	// packet a day" is, and it is the number that decides whether a league is
+	// playable at all.
+	if len(g.areaShares) > 0 {
+		areas := make([][4]byte, 0, len(g.areaShares))
+		for a := range g.areaShares {
+			areas = append(areas, a)
+		}
+		// Sorted: this string is read from a status screen and a log, and map
+		// order would reshuffle it on every call (§6.2.1 rule 2).
+		sort.Slice(areas, func(i, j int) bool {
+			return bytes.Compare(areas[i][:], areas[j][:]) < 0
+		})
+		for _, a := range areas {
+			share := g.areaShares[a]
+			out += fmt.Sprintf("\n  area %x: %.0f%% of that — about %.1f full packets/day",
+				a[:], share*100, perDay*share/full)
+		}
+	}
+	return out
 }
 
 func (g *Governor) rNote() string {

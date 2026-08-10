@@ -73,11 +73,16 @@ type Sender interface {
 	Budget() link.Budget
 }
 
-// ClassSender is an optional capability: a link that can be told the priority
-// of what it is carrying. The mesh link implements it; IP and the simulator do
-// not need to.
-type ClassSender interface {
-	SendClass(ctx context.Context, to identity.NodeID, payload []byte, class governor.Class) error
+// ChargeSender is an optional capability: a link that can be told what to bill
+// a transmission to. The mesh link implements it; IP and the simulator do not
+// need to, because neither shares a channel with anybody.
+//
+// It carries a governor.Charge rather than a bare class because §6.3's per-area
+// share needs the area as well, and the two travel together — the class is
+// DERIVED from the area, so splitting them across two arguments invites a
+// caller to compute one from a tag and pass the other from somewhere else.
+type ChargeSender interface {
+	SendCharged(ctx context.Context, to identity.NodeID, payload []byte, ch governor.Charge) error
 }
 
 // Config configures an Outbox.
@@ -165,7 +170,9 @@ func (o *Outbox) SendMessage(to identity.NodeID, payload []byte) error {
 			len(frame), o.cfg.Link.MTU())
 	}
 
-	err := o.send(context.Background(), to, frame, governor.ClassControl)
+	// Control frames belong to the protocol rather than to any one area, so
+	// they carry the zero tag and the link bills them to no area's share.
+	err := o.send(context.Background(), to, frame, governor.Charge{Class: governor.ClassControl})
 	if err == link.ErrNoBudget {
 		// Not an error to propagate: the engine's whole design is that a
 		// missed beat is repaired by the next one (§7.3). Failing the caller
@@ -251,7 +258,8 @@ func (o *Outbox) SendRecords(area record.AreaTag, recs []*record.Record) error {
 		frame = binary.BigEndian.AppendUint32(frame, uint32(enc.OrigLen()))
 		frame = append(frame, s.Encode()...)
 
-		err := o.send(context.Background(), link.Broadcast, frame, class)
+		err := o.send(context.Background(), link.Broadcast, frame,
+			governor.Charge{Class: class, Area: area})
 		if err == link.ErrNoBudget {
 			// Stop here and remember where. The governor is not a failure; it
 			// is the thing that makes this a good neighbour, and the cursor is
@@ -281,10 +289,10 @@ func (o *Outbox) SendRecords(area record.AreaTag, recs []*record.Record) error {
 	return nil
 }
 
-// send routes through SendClass when the link understands priorities.
-func (o *Outbox) send(ctx context.Context, to identity.NodeID, frame []byte, class governor.Class) error {
-	if cs, ok := o.cfg.Link.(ClassSender); ok {
-		return cs.SendClass(ctx, to, frame, class)
+// send routes through SendCharged when the link understands priorities.
+func (o *Outbox) send(ctx context.Context, to identity.NodeID, frame []byte, ch governor.Charge) error {
+	if cs, ok := o.cfg.Link.(ChargeSender); ok {
+		return cs.SendCharged(ctx, to, frame, ch)
 	}
 	return o.cfg.Link.Send(ctx, to, frame)
 }

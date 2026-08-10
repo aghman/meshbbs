@@ -35,6 +35,8 @@ type federation struct {
 	inbox  *bsmp.Inbox
 	outbox *bsmp.Outbox
 	gstore *store.GossipStore
+	st     *store.Store
+	ctx    context.Context
 	clk    clock.Clock
 	log    *slog.Logger
 }
@@ -167,8 +169,13 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 
 	f := &federation{
 		link: ml, gov: gov, engine: engine,
-		inbox: inbox, outbox: outbox, gstore: gstore, clk: e.clock, log: log,
+		inbox: inbox, outbox: outbox, gstore: gstore, st: st, ctx: ctx,
+		clk: e.clock, log: log,
 	}
+	// Load the caps once before the first tick, so a restart does not leave
+	// every area uncapped for a whole tick interval.
+	f.refreshAreaShares()
+
 	go f.run(ctx)
 	return f, nil
 }
@@ -289,6 +296,25 @@ const statusInterval = 5 * time.Minute
 // §12.1. That constraint is usually about the simulator being replayable, but
 // it earns its keep here too: a test can drive this loop through a day of
 // federation without waiting for one.
+// refreshAreaShares reloads the per-area caps into the governor (§6.3).
+//
+// A read failure leaves the previous shares in place rather than clearing them.
+// Clearing would UNCAP every area, so a transient database error would turn a
+// budget the sysop set into no budget at all — the one direction this must
+// never fail in.
+func (f *federation) refreshAreaShares() {
+	shares, err := f.st.AreaShares(f.ctx)
+	if err != nil {
+		f.log.Warn("refreshing area airtime shares", "err", err)
+		return
+	}
+	raw := make(map[[4]byte]float64, len(shares))
+	for tag, share := range shares {
+		raw[tag] = share
+	}
+	f.gov.SetAreaShares(raw)
+}
+
 func (f *federation) run(ctx context.Context) {
 	tick := f.clk.After(tickInterval)
 	telemetry := f.clk.After(telemetryInterval)
@@ -316,6 +342,11 @@ func (f *federation) run(ctx context.Context) {
 			if err := f.gstore.Refresh(); err != nil {
 				f.log.Warn("refreshing federated areas", "err", err)
 			}
+			// Shares travel with the area list for the same reason: §6.3 puts
+			// airtime_share on the area row precisely so a sysop can re-tune a
+			// noisy league without a restart, and a cap that needed one is a
+			// cap nobody would reach for while the mesh was actually busy.
+			f.refreshAreaShares()
 			if err := f.engine.Tick(); err != nil {
 				f.log.Error("sync engine", "err", err)
 			}

@@ -419,3 +419,136 @@ func mustKey(t *testing.T, seed uint64) []byte {
 	}
 	return k.Public
 }
+
+// §6.3's per-area share is a RATE, which is what distinguishes it from a class
+// reserve. A reserve stops traffic spending the last x% of the bucket; it says
+// nothing about how fast one area may drain the first x%.
+//
+// So the property is: an area with a share runs out while the node still has
+// budget, and the node can still spend that budget on everything else.
+func TestAnAreaShareLimitsRateNotJustTheFloor(t *testing.T) {
+	league := [4]byte{1, 2, 3, 4}
+	g, _ := newTestGovernor(t, func(c *Config) {
+		c.Instances = 2 // a bench-sized budget, so the node is not the constraint
+		c.AreaShares = map[[4]byte]float64{league: 0.10}
+	})
+
+	capped := 0
+	for i := 0; i < 500; i++ {
+		if !g.AllowCharge(233, Charge{Class: ClassForum, Area: league}, true) {
+			break
+		}
+		capped++
+	}
+	if capped == 0 {
+		t.Fatal("the area could not send at all; its bucket floor is not working")
+	}
+
+	// The node itself must still have budget for other traffic. If the area cap
+	// were implemented as a drain on the shared bucket this would fail, and the
+	// cap would be a node-wide slowdown wearing an area's name.
+	if !g.Would(233, ClassForum) {
+		t.Error("exhausting one area's share also exhausted the node's budget")
+	}
+	if g.Stats().RefusedArea == 0 {
+		t.Error("the refusal was not counted as an area refusal")
+	}
+}
+
+// An area with no share configured is unchanged by any of this.
+func TestAnAreaWithoutAShareIsUncapped(t *testing.T) {
+	other := [4]byte{9, 9, 9, 9}
+	g, _ := newTestGovernor(t, func(c *Config) {
+		c.Instances = 2
+		c.AreaShares = map[[4]byte]float64{{1, 2, 3, 4}: 0.10}
+	})
+
+	sent := 0
+	for i := 0; i < 500 && g.AllowCharge(233, Charge{Class: ClassForum, Area: other}, true); i++ {
+		sent++
+	}
+	if g.Stats().RefusedArea != 0 {
+		t.Errorf("an uncapped area hit an area refusal %d times", g.Stats().RefusedArea)
+	}
+	if sent == 0 {
+		t.Error("an uncapped area could not send")
+	}
+}
+
+// One area exhausting its share must not touch another's.
+func TestAreaSharesAreIndependent(t *testing.T) {
+	a := [4]byte{1, 1, 1, 1}
+	b := [4]byte{2, 2, 2, 2}
+	g, _ := newTestGovernor(t, func(c *Config) {
+		c.Instances = 2
+		c.AreaShares = map[[4]byte]float64{a: 0.10, b: 0.10}
+	})
+
+	for i := 0; i < 500 && g.AllowCharge(233, Charge{Class: ClassForum, Area: a}, true); i++ {
+	}
+	if !g.AllowCharge(233, Charge{Class: ClassForum, Area: b}, true) {
+		t.Error("draining one area's share drained another's")
+	}
+}
+
+// The roster's tag is the zero value, so "no area" and "the roster" are the
+// same four bytes. withArea is what tells them apart, and getting it wrong
+// would apply a roster cap to the link's own control frames.
+func TestChargeWithoutAnAreaIgnoresTheZeroTagShare(t *testing.T) {
+	g, _ := newTestGovernor(t, func(c *Config) {
+		c.Instances = 2
+		// A share on the ZERO tag: the roster.
+		c.AreaShares = map[[4]byte]float64{{}: 0.01}
+	})
+
+	// Drain the roster's share.
+	for i := 0; i < 500 && g.AllowCharge(233, Charge{Class: ClassControl, Area: [4]byte{}}, true); i++ {
+	}
+	if g.Stats().RefusedArea == 0 {
+		t.Fatal("the roster share never bound, so this test proves nothing")
+	}
+
+	// Area-less traffic is unaffected.
+	if !g.Allow(233, ClassControl) {
+		t.Error("a capped roster also capped traffic that belongs to no area")
+	}
+}
+
+// Re-reading the shares must not hand an area a fresh bucket, or a sysop could
+// lift their own cap by touching the database in a loop.
+func TestSetAreaSharesDoesNotRefillTheBucket(t *testing.T) {
+	league := [4]byte{1, 2, 3, 4}
+	g, _ := newTestGovernor(t, func(c *Config) {
+		c.Instances = 2
+		c.AreaShares = map[[4]byte]float64{league: 0.10}
+	})
+
+	for i := 0; i < 500 && g.AllowCharge(233, Charge{Class: ClassForum, Area: league}, true); i++ {
+	}
+	before := g.Stats().RefusedArea
+	if before == 0 {
+		t.Fatal("the share never bound")
+	}
+
+	for i := 0; i < 5; i++ {
+		g.SetAreaShares(map[[4]byte]float64{league: 0.10})
+	}
+	if g.AllowCharge(233, Charge{Class: ClassForum, Area: league}, true) {
+		t.Error("re-applying the same share refilled an exhausted area bucket")
+	}
+}
+
+// §7.6: a sysop must see what a share BUYS, not the fraction.
+func TestExplainStatesWhatAnAreaShareBuys(t *testing.T) {
+	league := [4]byte{0xab, 0xcd, 0xef, 0x01}
+	g, _ := newTestGovernor(t, func(c *Config) {
+		c.AreaShares = map[[4]byte]float64{league: 0.10}
+	})
+	out := g.Explain()
+	if !strings.Contains(out, "abcdef01") {
+		t.Errorf("Explain does not name the capped area:\n%s", out)
+	}
+	if !strings.Contains(out, "packets/day") {
+		t.Errorf("Explain gives a fraction without saying what it buys:\n%s", out)
+	}
+}
