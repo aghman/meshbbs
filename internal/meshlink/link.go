@@ -1079,6 +1079,15 @@ func (l *Link) Name() string { return "mesh" }
 // a truncation — it is total, silent, and looks exactly like a quiet mesh.
 const mtuReserve = 8
 
+// MaxPayload is the largest payload that actually crosses the air.
+//
+// Exported because the reserve is a property of the RADIO, not of this link.
+// Anything that puts a frame on the mesh is bound by it, including code that
+// holds no Link at all — `mesh survey` transmits its own load packets and would
+// otherwise have to restate the number, which is how two copies of a
+// hard-measured constant start disagreeing.
+const MaxPayload = meshtastic.MTU - mtuReserve
+
 // MTU is what a payload may actually be.
 //
 // The link adds no header of its own: it reads the frame-type byte the layer
@@ -1086,7 +1095,7 @@ const mtuReserve = 8
 // byte per fountain symbol — about 15 per bundle at K=15 — for no gain the
 // design's byte budget (§12.7) would forgive. The reserve below is not that
 // kind of header; it is room the FIRMWARE needs and does not ask for.
-func (l *Link) MTU() int { return meshtastic.MTU - mtuReserve }
+func (l *Link) MTU() int { return MaxPayload }
 
 // Send transmits one datagram, subject to the governor.
 //
