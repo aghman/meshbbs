@@ -1,11 +1,15 @@
 package bbs
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aghman/meshbbs/internal/door"
+	"github.com/aghman/meshbbs/internal/record"
 	"github.com/aghman/meshbbs/internal/store"
 )
 
@@ -163,5 +167,146 @@ func TestDoorHostReportsWhetherAnAreaSpendsAirtime(t *testing.T) {
 	}
 	if fed, err := h.AreaIsFederated(ctx, "mesh"); err != nil || !fed {
 		t.Errorf("mesh reported federated=%v (err %v)", fed, err)
+	}
+}
+
+// The league refusals against the REAL store, because the fake in the door
+// package cannot prove any of them: it does not know what an area kind is, it
+// has no alias table, and it does not run the record codec.
+func TestDoorHostQueuesOnlyToARealFederatedLeague(t *testing.T) {
+	h, st, ctx := doorFixture(t)
+
+	// A forum to point a league grant at by mistake. Named uniquely because
+	// the fixture already seeds the default areas.
+	if _, err := st.CreateArea(ctx, "chatter", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateDoorArea(ctx, "local-league", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateDoorArea(ctx, "lordleague", "", true); err != nil {
+		t.Fatal(err)
+	}
+
+	base := door.DoorEventRequest{
+		Door: "lord", Game: "lord", Kind: 3, Actor: "alice",
+	}
+
+	t.Run("a forum is not a league", func(t *testing.T) {
+		ev := base
+		ev.Area = "chatter"
+		if err := h.QueueDoorEvent(ctx, ev); !errors.Is(err, door.ErrNotALeague) {
+			t.Errorf("got %v, want ErrNotALeague", err)
+		}
+	})
+
+	t.Run("an area that does not exist", func(t *testing.T) {
+		ev := base
+		ev.Area = "nope"
+		if err := h.QueueDoorEvent(ctx, ev); !errors.Is(err, door.ErrNotALeague) {
+			t.Errorf("got %v, want ErrNotALeague", err)
+		}
+	})
+
+	t.Run("a local-only league cannot cross boards", func(t *testing.T) {
+		ev := base
+		ev.Area = "local-league"
+		err := h.QueueDoorEvent(ctx, ev)
+		if !errors.Is(err, door.ErrNotALeague) {
+			t.Fatalf("got %v, want ErrNotALeague", err)
+		}
+		if !strings.Contains(err.Error(), "local only") {
+			t.Errorf("the refusal does not say why: %v", err)
+		}
+	})
+
+	t.Run("a federated league accepts it", func(t *testing.T) {
+		ev := base
+		ev.Area = "lordleague"
+		if err := h.QueueDoorEvent(ctx, ev); err != nil {
+			t.Fatalf("queue: %v", err)
+		}
+		queued, err := st.QueuedDoorEvents(ctx, "lordleague", "lord")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(queued) != 1 || queued[0].Actor != "alice" {
+			t.Fatalf("queued %+v", queued)
+		}
+	})
+
+	t.Run("an event that would not encode is the door's mistake", func(t *testing.T) {
+		ev := base
+		ev.Area = "lordleague"
+		ev.Payload = bytes.Repeat([]byte{0xFF}, record.MaxDoorEventPayloadLen+1)
+		if err := h.QueueDoorEvent(ctx, ev); !errors.Is(err, door.ErrInvalidEvent) {
+			t.Errorf("got %v, want ErrInvalidEvent", err)
+		}
+	})
+
+	t.Run("an unresolvable target", func(t *testing.T) {
+		ev := base
+		ev.Area = "lordleague"
+		ev.Target = "bob@nosuchnode"
+		if err := h.QueueDoorEvent(ctx, ev); !errors.Is(err, door.ErrUnknownTarget) {
+			t.Errorf("got %v, want ErrUnknownTarget", err)
+		}
+	})
+}
+
+// A local target resolves to this node, and the wire carries the node ID rather
+// than whatever the door typed (§6.1.4.1: aliases never travel).
+func TestDoorHostResolvesTargetsToNodeIDs(t *testing.T) {
+	h, st, ctx := doorFixture(t)
+	if _, err := st.CreateDoorArea(ctx, "lordleague", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, store.CreateUserOptions{
+		Nick: "bob", DisplayName: "Bob", CanLogin: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := h.QueueDoorEvent(ctx, door.DoorEventRequest{
+		Door: "lord", Area: "lordleague", Game: "lord", Kind: 3,
+		Actor: "alice", Target: "bob",
+	})
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+
+	queued, err := st.QueuedDoorEvents(ctx, "lordleague", "lord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 {
+		t.Fatalf("queued %d events", len(queued))
+	}
+	if queued[0].Target != "bob" {
+		t.Errorf("target = %q, want bob", queued[0].Target)
+	}
+	if queued[0].TargetNode.IsZero() {
+		t.Error("a resolved target carries no node; the wire would refuse it")
+	}
+}
+
+// The queue is bounded, because an unbounded one is a disk-filling primitive
+// handed to a third-party binary.
+func TestDoorEventQueueIsBounded(t *testing.T) {
+	h, st, ctx := doorFixture(t)
+	if _, err := st.CreateDoorArea(ctx, "lordleague", "", true); err != nil {
+		t.Fatal(err)
+	}
+
+	ev := door.DoorEventRequest{
+		Door: "lord", Area: "lordleague", Game: "lord", Kind: 1, Actor: "alice",
+	}
+	for i := 0; i < store.MaxQueuedDoorEvents; i++ {
+		if err := h.QueueDoorEvent(ctx, ev); err != nil {
+			t.Fatalf("queue %d: %v", i, err)
+		}
+	}
+	if err := h.QueueDoorEvent(ctx, ev); !errors.Is(err, store.ErrDoorEventQueueFull) {
+		t.Errorf("got %v, want ErrDoorEventQueueFull", err)
 	}
 }

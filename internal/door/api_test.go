@@ -34,13 +34,25 @@ type fakeHost struct {
 	noticed   map[string]bool
 	quota     int64
 	used      int64
+
+	// leagues names areas that are federated door leagues, and events is what
+	// was queued for them.
+	leagues map[string]bool
+	events  []DoorEventRequest
+	// knownTargets maps a target reference to the nick it resolves to. A
+	// reference that is absent is unresolvable, which is how a league names
+	// somebody who is not on any board we know.
+	knownTargets map[string]string
+	queueFull    bool
 }
 
 func newFakeHost() *fakeHost {
 	return &fakeHost{
-		state:     map[string]string{},
-		federated: map[string]bool{},
-		noticed:   map[string]bool{},
+		state:        map[string]string{},
+		federated:    map[string]bool{},
+		noticed:      map[string]bool{},
+		leagues:      map[string]bool{},
+		knownTargets: map[string]string{},
 	}
 }
 
@@ -1054,4 +1066,27 @@ func TestClientWithoutADescriptor(t *testing.T) {
 	if _, err := Open(); !errors.Is(err, ErrNoDescriptor) {
 		t.Errorf("Open returned %v, want %v", err, ErrNoDescriptor)
 	}
+}
+
+func (h *fakeHost) QueueDoorEvent(ctx context.Context, ev DoorEventRequest) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.leagues[ev.Area] {
+		return fmt.Errorf("%w: %s", ErrNotALeague, ev.Area)
+	}
+	if ev.Target != "" {
+		nick, ok := h.knownTargets[ev.Target]
+		if !ok {
+			return fmt.Errorf("%w: %s", ErrUnknownTarget, ev.Target)
+		}
+		ev.Target = nick
+	}
+	if len(ev.Payload) > 48 {
+		return fmt.Errorf("%w: payload is %d bytes", ErrInvalidEvent, len(ev.Payload))
+	}
+	if h.queueFull {
+		return errors.New("this door has more queued events than the mesh can carry: 100 waiting")
+	}
+	h.events = append(h.events, ev)
+	return nil
 }

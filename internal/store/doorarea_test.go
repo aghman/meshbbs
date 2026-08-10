@@ -50,14 +50,26 @@ func TestMigrationRebuildKeepsFileRowsAndTheirAreas(t *testing.T) {
 	// real upgrade looks like — an existing database, with files in it, meeting
 	// this migration for the first time.
 	//
-	// Everything from 0007 on, not 0007 alone: the rebuild recreates `areas`
-	// from the columns it knew about, so replaying it without the migrations
-	// that came after would drop theirs. That is not a production hazard, since
-	// migrations only run forward in order, but it is the trap this test would
-	// otherwise fall into and blame on the rebuild.
-	if _, err := st.db.ExecContext(ctx,
-		`DELETE FROM schema_migrations WHERE name >= '0007'`); err != nil {
-		t.Fatal(err)
+	// Rewinding means undoing the schema, not just the bookkeeping. Replaying
+	// from 0007 forgets that `areas` was rebuilt, so everything a later
+	// migration added to it has to come back too — and ALTER TABLE ADD COLUMN
+	// is not idempotent, so those later migrations cannot simply be re-run over
+	// their own results.
+	//
+	// None of this is a production concern: migrations run forward, once, in
+	// order. It is the price of testing the one migration that matters here
+	// against a database that already has rows in it.
+	for _, stmt := range []string{
+		`DELETE FROM schema_migrations WHERE name >= '0007'`,
+		`DROP TABLE IF EXISTS door_event_queue`,
+		`ALTER TABLE doors DROP COLUMN league_area`,
+		`ALTER TABLE doors DROP COLUMN league_per_hour`,
+		// areas.airtime_share needs no undoing: 0007 drops the whole table and
+		// recreates it from the columns it knew about, and 0008 re-adds it.
+	} {
+		if _, err := st.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("rewinding the schema (%s): %v", stmt, err)
+		}
 	}
 	if err := st.migrate(ctx); err != nil {
 		t.Fatalf("re-running the rebuild over existing data: %v", err)

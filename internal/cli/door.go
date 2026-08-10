@@ -100,6 +100,8 @@ func newDoorShowCmd(e *env) *cobra.Command {
 				fmt.Fprintf(w, "required_capability\t%s\n", d.RequiredCapability)
 				fmt.Fprintf(w, "api_level\t%d (%s)\n", d.APILevel, apiLevelName(d.APILevel))
 				fmt.Fprintf(w, "announce_area\t%s\n", d.AnnounceArea)
+				fmt.Fprintf(w, "league_area\t%s\n", d.LeagueArea)
+				fmt.Fprintf(w, "league_per_hour\t%d\n", d.LeaguePerHour)
 				fmt.Fprintf(w, "announce_per_hour\t%d\n", d.AnnouncePerHour)
 				fmt.Fprintf(w, "state_quota\t%d bytes\n", d.StateQuota)
 				fmt.Fprintf(w, "enabled\t%t\n", d.Enabled)
@@ -135,6 +137,8 @@ func newDoorAddCmd(e *env) *cobra.Command {
 		apiLevel        int
 		announceArea    string
 		announcePerHour int
+		leagueArea      string
+		leaguePerHour   int
 		stateQuota      int64
 	)
 
@@ -178,6 +182,8 @@ playing it.`,
 					RequiredCapability: requiredCap,
 					APILevel:           apiLevel,
 					AnnounceArea:       announceArea,
+					LeagueArea:         leagueArea,
+					LeaguePerHour:      leaguePerHour,
 					AnnouncePerHour:    announcePerHour,
 					StateQuota:         stateQuota,
 					Enabled:            true,
@@ -225,6 +231,10 @@ playing it.`,
 		"capability a user needs to run this door, on top of run_doors")
 	f.IntVar(&apiLevel, "api-level", store.APIAnnounce,
 		"door API level 1-4; 4 is act_as_user and must be set deliberately (§9.1.1)")
+	f.StringVar(&leagueArea, "league-area", "",
+		"federated door area this door reports game events to (§9.5)")
+	f.IntVar(&leaguePerHour, "league-per-hour", 6,
+		"how many game events this door may report an hour")
 	f.StringVar(&announceArea, "announce-area", "",
 		"local area this door may post announcements to; it may not be federated")
 	f.IntVar(&announcePerHour, "announce-per-hour", 4, "announcements allowed per hour")

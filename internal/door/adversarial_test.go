@@ -2,6 +2,8 @@ package door
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -341,4 +343,234 @@ func TestEveryReplyIsOneJSONObject(t *testing.T) {
 			t.Errorf("a stored newline did not survive the round trip: %q", res.Value)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// §9.5 — attacking the league grant
+// ---------------------------------------------------------------------------
+
+// leagueRig is an API rig whose door may report to a league.
+func leagueRig(t *testing.T, tune func(*Spec, *Session)) *apiRig {
+	t.Helper()
+	rig := newAPIRig(t, 3, func(spec *Spec, sess *Session) {
+		spec.Grant.LeagueArea = "lordleague"
+		spec.Grant.LeaguePerHour = 4
+		if tune != nil {
+			tune(spec, sess)
+		}
+	})
+	rig.host.snapshot(func(h *fakeHost) {
+		h.leagues["lordleague"] = true
+		h.knownTargets["bob@pnw"] = "bob"
+	})
+	return rig
+}
+
+// A door must not be able to report a result for somebody else.
+//
+// This is the level-3 analogue of the level-2 cross-user reach test: the actor
+// is the session's nick and there is no request field that could override it.
+// If a door could name the actor, an inter-BBS league would let any sysop's
+// door credit any of their players' kills to anyone at all — and unlike a
+// forged post, nobody would see it happen locally.
+func TestDoorCannotReportAResultForSomeoneElse(t *testing.T) {
+	rig := leagueRig(t, func(spec *Spec, _ *Session) { spec.Grant.LeaguePerHour = 20 })
+	c := rig.hello(t)
+
+	// Every field the request struct has, tried as a way in. `to` is the
+	// target, which IS caller-supplied by design; none of the others may
+	// become the actor.
+	for _, req := range []request{
+		{ID: 1, Op: opEventEmit, Game: "lord", Text: "carol"},
+		{ID: 2, Op: opEventEmit, Game: "lord", Subject: "carol"},
+		{ID: 3, Op: opEventEmit, Game: "lord", Value: "carol"},
+		{ID: 4, Op: opEventEmit, Game: "lord", Key: "carol"},
+		{ID: 5, Op: opEventEmit, Game: "lord", Scope: "carol"},
+		{ID: 6, Op: opEventEmit, Game: "lord", Area: "carol"},
+	} {
+		if res := c.send(t, req); !res.OK {
+			t.Fatalf("emit %d was refused outright: %s", req.ID, res.Error)
+		}
+	}
+
+	rig.host.snapshot(func(h *fakeHost) {
+		if len(h.events) != 6 {
+			t.Fatalf("queued %d events, want 6", len(h.events))
+		}
+		for i, ev := range h.events {
+			if ev.Actor != "alice" {
+				t.Errorf("event %d was attributed to %q, want the session's own nick", i, ev.Actor)
+			}
+			// The area is the GRANT's, never the request's.
+			if ev.Area != "lordleague" {
+				t.Errorf("event %d went to area %q, want the granted league", i, ev.Area)
+			}
+		}
+	})
+}
+
+// A guest has no name to put on other people's mesh.
+func TestAGuestSessionCannotEmit(t *testing.T) {
+	rig := leagueRig(t, func(_ *Spec, sess *Session) { sess.Nick = "" })
+	c := rig.hello(t)
+
+	res := c.send(t, request{ID: 1, Op: opEventEmit, Game: "lord"})
+	if res.OK {
+		t.Fatal("a guest session put an event on the league")
+	}
+	if res.Code != codeForbidden {
+		t.Errorf("code %q, want %q", res.Code, codeForbidden)
+	}
+}
+
+// Level 3 is always available; the league grant is not. A door with the level
+// and no area must be told the sysop has not chosen one, which is a different
+// thing from being rate-limited against nothing.
+func TestALeagueGrantIsSeparateFromTheLevel(t *testing.T) {
+	rig := newAPIRig(t, 3, nil) // level 3, no LeagueArea
+	c := rig.hello(t)
+
+	res := c.send(t, request{ID: 1, Op: opEventEmit, Game: "lord"})
+	if res.OK {
+		t.Fatal("a door with no league area emitted anyway")
+	}
+	if res.Code != codeForbidden {
+		t.Errorf("code %q, want %q", res.Code, codeForbidden)
+	}
+	if !strings.Contains(res.Error, "sysop has not chosen") {
+		t.Errorf("error does not say the grant is missing: %q", res.Error)
+	}
+}
+
+// A door below level 3 cannot emit at all, whatever it was granted.
+func TestALevelTwoDoorCannotEmit(t *testing.T) {
+	rig := newAPIRig(t, 2, func(spec *Spec, _ *Session) {
+		// The sysop set a league area and then dropped the level. The lower of
+		// the two wins, because capabilities intersect rather than escalate.
+		spec.Grant.LeagueArea = "lordleague"
+		spec.Grant.LeaguePerHour = 4
+	})
+	c := rig.hello(t)
+
+	res := c.send(t, request{ID: 1, Op: opEventEmit, Game: "lord"})
+	if res.OK {
+		t.Fatal("a level-2 door emitted a league event")
+	}
+	if res.Code != codeForbidden {
+		t.Errorf("code %q, want %q", res.Code, codeForbidden)
+	}
+}
+
+// The rate limit lives on the Manager, so relaunching the door does not reset
+// it — the same property the announce limit has and for the same reason.
+func TestTheLeagueRateLimitSurvivesARelaunch(t *testing.T) {
+	rig := leagueRig(t, nil)
+	c := rig.hello(t)
+
+	for i := 0; i < 4; i++ {
+		if res := c.send(t, request{ID: i, Op: opEventEmit, Game: "lord"}); !res.OK {
+			t.Fatalf("emit %d refused: %s", i, res.Error)
+		}
+	}
+	res := c.send(t, request{ID: 9, Op: opEventEmit, Game: "lord"})
+	if res.OK {
+		t.Fatal("the fifth event beat a limit of four an hour")
+	}
+	if res.Code != codeRateLimit {
+		t.Errorf("code %q, want %q", res.Code, codeRateLimit)
+	}
+
+	// A second invocation of the SAME door, as a relaunch would be.
+	spec := rig.spec
+	sess := Session{Nick: "alice", Node: 4, Width: 80, Height: 24}
+	inv, err := rig.mgr.startAPI(&spec, sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inv.close(rig.mgr)
+
+	desc := readDescriptor(t, spec)
+	c2 := (&apiRig{spec: spec, token: desc.Token, desc: desc}).dial(t)
+	if res := c2.send(t, request{ID: 1, Op: opHello, Token: desc.Token}); !res.OK {
+		t.Fatalf("hello on the relaunch: %s", res.Error)
+	}
+	if res := c2.send(t, request{ID: 2, Op: opEventEmit, Game: "lord"}); res.OK {
+		t.Error("relaunching the door reset its league rate limit")
+	}
+}
+
+// The three refusals the host owns must arrive as refusals rather than as
+// internal errors: a door told "internal error" retries, and a door told
+// "forbidden" or "bad request" does not.
+func TestHostRefusalsReachTheDoorAsRefusals(t *testing.T) {
+	rig := leagueRig(t, nil)
+	c := rig.hello(t)
+
+	t.Run("an area that is not a league", func(t *testing.T) {
+		rig.host.snapshot(func(h *fakeHost) { h.leagues = map[string]bool{} })
+		res := c.send(t, request{ID: 1, Op: opEventEmit, Game: "lord"})
+		if res.OK || res.Code != codeForbidden {
+			t.Errorf("ok=%v code=%q, want forbidden", res.OK, res.Code)
+		}
+		rig.host.snapshot(func(h *fakeHost) { h.leagues["lordleague"] = true })
+	})
+
+	t.Run("a target nobody can resolve", func(t *testing.T) {
+		res := c.send(t, request{ID: 2, Op: opEventEmit, Game: "lord", To: "nobody@nowhere"})
+		if res.OK || res.Code != codeBadRequest {
+			t.Errorf("ok=%v code=%q, want bad_request", res.OK, res.Code)
+		}
+	})
+
+	t.Run("an oversized payload", func(t *testing.T) {
+		big := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 49))
+		res := c.send(t, request{ID: 3, Op: opEventEmit, Game: "lord", Payload: big})
+		if res.OK || res.Code != codeBadRequest {
+			t.Errorf("ok=%v code=%q, want bad_request", res.OK, res.Code)
+		}
+	})
+
+	t.Run("a payload that is not base64", func(t *testing.T) {
+		res := c.send(t, request{ID: 4, Op: opEventEmit, Game: "lord", Payload: "not base64!!"})
+		if res.OK || res.Code != codeBadRequest {
+			t.Errorf("ok=%v code=%q, want bad_request", res.OK, res.Code)
+		}
+	})
+
+	t.Run("a full queue is a quota, not a fault", func(t *testing.T) {
+		rig.host.snapshot(func(h *fakeHost) { h.queueFull = true })
+		res := c.send(t, request{ID: 5, Op: opEventEmit, Game: "lord"})
+		if res.OK || res.Code != codeQuota {
+			t.Errorf("ok=%v code=%q, want quota", res.OK, res.Code)
+		}
+		rig.host.snapshot(func(h *fakeHost) { h.queueFull = false })
+	})
+}
+
+// Emitting must not claim the event was sent. §6.5 is explicit that a promise
+// nothing will keep is worse than saying less.
+func TestEmitSaysQueuedAndNotSent(t *testing.T) {
+	rig := leagueRig(t, nil)
+	c := rig.hello(t)
+
+	res := c.send(t, request{ID: 1, Op: opEventEmit, Game: "lord", To: "bob@pnw"})
+	if !res.OK {
+		t.Fatalf("emit refused: %s", res.Error)
+	}
+	if !res.Queued {
+		t.Error("the response does not say the event was queued")
+	}
+	if res.Record != "" {
+		t.Errorf("a record id was returned for something not yet signed: %q", res.Record)
+	}
+
+	// The target reached the host as written; resolving it is the host's job.
+	rig.host.snapshot(func(h *fakeHost) {
+		if len(h.events) != 1 {
+			t.Fatalf("queued %d events", len(h.events))
+		}
+		if h.events[0].Target != "bob" {
+			t.Errorf("target resolved to %q, want bob", h.events[0].Target)
+		}
+	})
 }
