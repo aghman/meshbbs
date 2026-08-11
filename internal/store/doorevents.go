@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/aghman/meshbbs/internal/identity"
+	"github.com/aghman/meshbbs/internal/record"
 )
 
 // MaxQueuedDoorEvents bounds how many un-flushed events one door may hold.
@@ -173,4 +175,105 @@ func (s *Store) DoorEventGroups(ctx context.Context) ([][2]string, error) {
 		out = append(out, [2]string{area, game})
 	}
 	return out, rows.Err()
+}
+
+// DeliveredDoorEvent is one event read back out of the log for a door (§9.5).
+//
+// Flattened from records: one record carries up to
+// record.MaxDoorEventsPerRecord events, and a door wants events rather than
+// records. The cursor is still per-record, because a record either arrived or
+// did not — there is no partial delivery to represent.
+type DeliveredDoorEvent struct {
+	// Cursor is the record's local arrival number. Every event out of one
+	// record shares it.
+	Cursor int64
+	Origin identity.NodeID
+	// At is the record's advisory timestamp (§6.2.1): rendered, never computed
+	// from.
+	At         int64
+	Kind       uint8
+	Actor      string
+	Target     string
+	TargetNode identity.NodeID
+	Payload    []byte
+}
+
+// DoorEventsSince reads a league's events in the order they REACHED this node.
+//
+// # Why the cursor is local arrival order
+//
+// Not (origin, seq): records arrive out of order on a mesh as a matter of
+// course, and a door that remembered a per-origin high-water mark would step
+// past a record repaired an hour late and never ask for it again. Not
+// received_at either — it is seconds, and a league night delivers a fight as
+// several records inside one.
+//
+// See migration 0010 for why local_seq is an explicit counter rather than the
+// rowid.
+//
+// truncated reports that retention has pruned records the caller had not seen:
+// its cursor points below the oldest record still held, so there is a gap that
+// no amount of polling will fill. A door told this can say "some results were
+// lost" rather than quietly showing an incomplete league table.
+func (s *Store) DoorEventsSince(ctx context.Context, area record.AreaTag, game string, after int64, limit int) (events []DeliveredDoorEvent, cursor int64, truncated bool, err error) {
+	if limit <= 0 {
+		limit = 200
+	}
+
+	// The oldest record still held for this area. If the caller is behind it,
+	// something it had not read has already been pruned.
+	var oldest sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT MIN(local_seq) FROM records WHERE area = ? AND type = ?`,
+		area[:], int(record.TypeDoorEvent)).Scan(&oldest); err != nil {
+		return nil, after, false, fmt.Errorf("find the oldest door event: %w", err)
+	}
+	if oldest.Valid && after > 0 && after < oldest.Int64-1 {
+		truncated = true
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT local_seq, origin, ts, body
+		FROM records
+		WHERE area = ? AND type = ? AND local_seq > ?
+		ORDER BY local_seq
+		LIMIT ?`,
+		area[:], int(record.TypeDoorEvent), after, limit)
+	if err != nil {
+		return nil, after, truncated, fmt.Errorf("read door events: %w", err)
+	}
+	defer rows.Close()
+
+	cursor = after
+	for rows.Next() {
+		var local, ts int64
+		var origin, body []byte
+		if err := rows.Scan(&local, &origin, &ts, &body); err != nil {
+			return nil, after, truncated, err
+		}
+		cursor = local
+
+		decoded, err := record.UnmarshalDoorEventBody(body)
+		if err != nil {
+			// Stored records were validated on the way in, so this is a
+			// corrupt database rather than a hostile peer. Skip the record and
+			// keep the cursor moving: stopping here would wedge every future
+			// poll behind one bad row.
+			continue
+		}
+		if game != "" && decoded.Game != game {
+			continue
+		}
+		var id identity.NodeID
+		copy(id[:], origin)
+		for _, ev := range decoded.Events {
+			events = append(events, DeliveredDoorEvent{
+				Cursor: local, Origin: id, At: ts,
+				Kind: ev.Kind, Actor: ev.Actor,
+				Target: ev.Target, TargetNode: ev.TargetNode,
+				Payload: ev.Payload,
+			})
+		}
+	}
+	return events, cursor, truncated, rows.Err()
 }

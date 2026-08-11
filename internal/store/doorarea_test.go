@@ -1,12 +1,14 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
-	"github.com/aghman/meshbbs/internal/blobstore"
 	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/record"
@@ -17,81 +19,123 @@ import (
 // If foreign keys are enforced during that rebuild, the DROP takes every file
 // row with it — silently, because a cascade is not an error.
 //
-// This is the test that would have caught that, and it is written against the
-// real migration runner rather than against a hand-rolled rebuild, because the
-// thing being tested is that Store.migrate suspends enforcement at all.
+// # Why this builds an old database rather than rewinding a new one
+//
+// The obvious version applies every migration, then deletes the bookkeeping for
+// the ones under test and re-runs them. It does not work and it does not stay
+// working: ALTER TABLE ADD COLUMN is not idempotent, and every migration added
+// after 0007 has to be hand-undone in the test or it fails with a confusing
+// duplicate-column error. That is a treadmill, and the sort that gets a test
+// deleted rather than fixed.
+//
+// So this constructs the database as it was at 0006 — before the rebuild
+// existed — puts real rows in it, and then runs the migrator forward exactly
+// as an upgrade would. Nothing needs touching when migration 0011 is written.
 func TestMigrationRebuildKeepsFileRowsAndTheirAreas(t *testing.T) {
 	ctx := context.Background()
-	st, err := OpenMemory(ctx, clock.NewReal())
+	db, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(ON)")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	st := &Store{db: db, clock: clock.NewReal()}
 
-	area, err := st.CreateFileArea(ctx, "utils", "tools", false)
-	if err != nil {
+	applyMigrationsThrough(t, st, "0006")
+
+	// Raw SQL, because the Store's own helpers project columns that later
+	// migrations add and this database does not have yet.
+	hash := bytes.Repeat([]byte{0x22}, 32)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO areas (name, tag, description, federated, read_only, retention_days, kind, created_at)
+		 VALUES ('utils', X'054F38AE', 'tools', 0, 0, 0, 'file', 1)`); err != nil {
 		t.Fatal(err)
 	}
-	var h blobstore.Hash
-	for i := range h {
-		h[i] = 0x22
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO blobs (hash, size, created_at) VALUES (?, 12, 1)`, hash); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := st.PutFile(ctx, "utils", File{
-		Name: "readme.txt", Hash: h, Size: 12, Uploader: "austin",
-	}); err != nil {
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO files (area_id, name, hash, uploader, uploaded_at)
+		 VALUES ((SELECT id FROM areas WHERE name = 'utils'), 'readme.txt', ?, 'austin', 1)`,
+		hash); err != nil {
 		t.Fatal(err)
 	}
 
-	// Force the rebuild to run AGAIN, now that there is data to lose.
-	//
-	// Without this the test is vacuous: OpenMemory applies every migration
-	// before the first row exists, so the rebuild happens on an empty table and
-	// a cascade has nothing to delete. Forgetting it and re-running is what a
-	// real upgrade looks like — an existing database, with files in it, meeting
-	// this migration for the first time.
-	//
-	// Rewinding means undoing the schema, not just the bookkeeping. Replaying
-	// from 0007 forgets that `areas` was rebuilt, so everything a later
-	// migration added to it has to come back too — and ALTER TABLE ADD COLUMN
-	// is not idempotent, so those later migrations cannot simply be re-run over
-	// their own results.
-	//
-	// None of this is a production concern: migrations run forward, once, in
-	// order. It is the price of testing the one migration that matters here
-	// against a database that already has rows in it.
-	for _, stmt := range []string{
-		`DELETE FROM schema_migrations WHERE name >= '0007'`,
-		`DROP TABLE IF EXISTS door_event_queue`,
-		`ALTER TABLE doors DROP COLUMN league_area`,
-		`ALTER TABLE doors DROP COLUMN league_per_hour`,
-		// areas.airtime_share needs no undoing: 0007 drops the whole table and
-		// recreates it from the columns it knew about, and 0008 re-adds it.
-	} {
-		if _, err := st.db.ExecContext(ctx, stmt); err != nil {
-			t.Fatalf("rewinding the schema (%s): %v", stmt, err)
-		}
+	var areaID int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT id FROM areas WHERE name = 'utils'`).Scan(&areaID); err != nil {
+		t.Fatal(err)
 	}
+
+	// The upgrade itself.
 	if err := st.migrate(ctx); err != nil {
-		t.Fatalf("re-running the rebuild over existing data: %v", err)
+		t.Fatalf("upgrading a populated database: %v", err)
 	}
 
-	files, err := st.ListAreaContents(ctx, "utils")
-	if err != nil {
+	var files int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM files WHERE name = 'readme.txt'`).Scan(&files); err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0].Name != "readme.txt" {
-		t.Fatalf("the file area rebuild lost its contents: %+v", files)
+	if files != 1 {
+		t.Fatalf("the file area rebuild lost its contents: %d rows left", files)
 	}
+
 	got, err := st.GetFileArea(ctx, "utils")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != area.ID {
+	if got.ID != areaID {
 		t.Errorf("area id changed across the rebuild: %d -> %d; files.area_id "+
-			"references it, so this would orphan every row", area.ID, got.ID)
+			"references it, so this would orphan every row", areaID, got.ID)
 	}
-	if got.Tag != area.Tag {
-		t.Errorf("area tag changed across the rebuild: %x -> %x", area.Tag[:], got.Tag[:])
+}
+
+// applyMigrationsThrough runs the migrations up to and including limit, and
+// records them, so a later migrate() picks up exactly where this left off.
+func applyMigrationsThrough(t *testing.T, s *Store, limit string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			name       TEXT PRIMARY KEY NOT NULL,
+			applied_at INTEGER NOT NULL
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := migrationFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+
+	applied := 0
+	for _, name := range names {
+		if name > limit && !strings.HasPrefix(name, limit) {
+			continue
+		}
+		body, err := migrationFS.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.ExecContext(ctx, string(body)); err != nil {
+			t.Fatalf("applying %s: %v", name, err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO schema_migrations (name, applied_at) VALUES (?, 1)`, name); err != nil {
+			t.Fatal(err)
+		}
+		applied++
+	}
+	if applied == 0 {
+		t.Fatalf("no migrations matched %q; has the numbering changed?", limit)
 	}
 }
 

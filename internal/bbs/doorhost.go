@@ -2,6 +2,7 @@ package bbs
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 
 	"github.com/aghman/meshbbs/internal/door"
@@ -177,4 +178,49 @@ func (h *DoorHost) QueueDoorEvent(ctx context.Context, ev door.DoorEventRequest)
 	}
 
 	return h.svc.store.QueueDoorEvent(ctx, queued)
+}
+
+// PollDoorEvents reads a league back for a door.
+//
+// The area check is the same one QueueDoorEvent makes, and it is repeated
+// rather than shared with it: reading and reporting are separate operations
+// that could be granted apart one day, and a check written once and reached
+// from two places is the kind of thing that gets moved to the wrong side.
+//
+// Node IDs are rendered rather than raw. A door gets a string it can print and
+// compare, and never has to know how eight bytes become a name (§6.1.4.1 —
+// aliases are local, so the ID is what is portable between boards).
+func (h *DoorHost) PollDoorEvents(ctx context.Context, p door.DoorEventPoll) (door.DoorEventBatch, error) {
+	area, err := h.svc.store.GetAnyArea(ctx, p.Area)
+	if err != nil {
+		return door.DoorEventBatch{}, fmt.Errorf("%w: %s", door.ErrNotALeague, p.Area)
+	}
+	if area.Kind != store.KindDoor {
+		return door.DoorEventBatch{}, fmt.Errorf("%w: %s is %s",
+			door.ErrNotALeague, area.Name, area.Kind.Describe())
+	}
+
+	events, cursor, truncated, err := h.svc.store.DoorEventsSince(ctx, area.Tag, p.Game, p.After, 0)
+	if err != nil {
+		return door.DoorEventBatch{}, err
+	}
+
+	out := door.DoorEventBatch{Cursor: cursor, Truncated: truncated}
+	for _, ev := range events {
+		polled := door.PolledDoorEvent{
+			Origin: ev.Origin.Compact(),
+			At:     ev.At,
+			Kind:   ev.Kind,
+			Actor:  ev.Actor,
+			Target: ev.Target,
+		}
+		if ev.Target != "" {
+			polled.TargetNode = ev.TargetNode.Compact()
+		}
+		if len(ev.Payload) > 0 {
+			polled.Payload = base64.StdEncoding.EncodeToString(ev.Payload)
+		}
+		out.Events = append(out.Events, polled)
+	}
+	return out, nil
 }

@@ -44,6 +44,10 @@ type fakeHost struct {
 	// somebody who is not on any board we know.
 	knownTargets map[string]string
 	queueFull    bool
+	// delivered is what a poll returns; At doubles as the cursor here, which
+	// the real store takes from a record's local arrival number.
+	delivered     []PolledDoorEvent
+	pollTruncated bool
 }
 
 func newFakeHost() *fakeHost {
@@ -1089,4 +1093,21 @@ func (h *fakeHost) QueueDoorEvent(ctx context.Context, ev DoorEventRequest) erro
 	}
 	h.events = append(h.events, ev)
 	return nil
+}
+
+func (h *fakeHost) PollDoorEvents(ctx context.Context, p DoorEventPoll) (DoorEventBatch, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.leagues[p.Area] {
+		return DoorEventBatch{}, fmt.Errorf("%w: %s", ErrNotALeague, p.Area)
+	}
+	out := DoorEventBatch{Cursor: p.After, Truncated: h.pollTruncated}
+	for _, ev := range h.delivered {
+		if ev.At <= p.After {
+			continue
+		}
+		out.Cursor = ev.At
+		out.Events = append(out.Events, ev)
+	}
+	return out, nil
 }

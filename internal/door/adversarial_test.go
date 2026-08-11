@@ -574,3 +574,74 @@ func TestEmitSaysQueuedAndNotSent(t *testing.T) {
 		}
 	})
 }
+
+// Polling is gated on the same league grant as emitting: a league a door may
+// report to is one it may read, and one it has no grant for is neither.
+func TestPollNeedsTheSameLeagueGrant(t *testing.T) {
+	t.Run("no grant", func(t *testing.T) {
+		rig := newAPIRig(t, 3, nil)
+		c := rig.hello(t)
+		res := c.send(t, request{ID: 1, Op: opEventPoll})
+		if res.OK || res.Code != codeForbidden {
+			t.Errorf("ok=%v code=%q, want forbidden", res.OK, res.Code)
+		}
+	})
+
+	t.Run("below level 3", func(t *testing.T) {
+		rig := newAPIRig(t, 2, func(spec *Spec, _ *Session) {
+			spec.Grant.LeagueArea = "lordleague"
+		})
+		c := rig.hello(t)
+		res := c.send(t, request{ID: 1, Op: opEventPoll})
+		if res.OK || res.Code != codeForbidden {
+			t.Errorf("ok=%v code=%q, want forbidden", res.OK, res.Code)
+		}
+	})
+
+	t.Run("a negative cursor", func(t *testing.T) {
+		rig := leagueRig(t, nil)
+		c := rig.hello(t)
+		res := c.send(t, request{ID: 1, Op: opEventPoll, After: -1})
+		if res.OK || res.Code != codeBadRequest {
+			t.Errorf("ok=%v code=%q, want bad_request", res.OK, res.Code)
+		}
+	})
+}
+
+// A guest may READ a league. Emitting needs a name to attribute a result to;
+// reading a public scoreboard does not, and refusing would mean a door could
+// not show the standings to somebody browsing.
+func TestAGuestMayPollButNotEmit(t *testing.T) {
+	rig := leagueRig(t, func(_ *Spec, sess *Session) { sess.Nick = "" })
+	rig.host.snapshot(func(h *fakeHost) {
+		h.delivered = []PolledDoorEvent{{Origin: "K7QM4X2P", At: 1, Actor: "alice"}}
+	})
+	c := rig.hello(t)
+
+	if res := c.send(t, request{ID: 1, Op: opEventEmit, Game: "lord"}); res.OK {
+		t.Error("a guest emitted")
+	}
+	res := c.send(t, request{ID: 2, Op: opEventPoll})
+	if !res.OK {
+		t.Fatalf("a guest could not read the league: %s", res.Error)
+	}
+	if len(res.Events) != 1 {
+		t.Errorf("poll returned %d events", len(res.Events))
+	}
+}
+
+// The truncation flag has to reach the door, or it shows an incomplete league
+// table and calls it complete.
+func TestPollPassesTruncationThrough(t *testing.T) {
+	rig := leagueRig(t, nil)
+	rig.host.snapshot(func(h *fakeHost) { h.pollTruncated = true })
+	c := rig.hello(t)
+
+	res := c.send(t, request{ID: 1, Op: opEventPoll, After: 5})
+	if !res.OK {
+		t.Fatalf("poll refused: %s", res.Error)
+	}
+	if !res.Truncated {
+		t.Error("the door was not told that events had been pruned before it read them")
+	}
+}

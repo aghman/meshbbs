@@ -1,6 +1,7 @@
 package bbs
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -158,5 +159,86 @@ func TestDequeueRemovesOnlyWhatWasSent(t *testing.T) {
 				t.Errorf("event %d was sent and is still queued", ev.ID)
 			}
 		}
+	}
+}
+
+// The full local round trip through the host: a door reports, the batch is
+// published, and a poll reads it back with node IDs rendered as strings.
+func TestADoorCanReadBackWhatItReported(t *testing.T) {
+	svc, st, ctx := testService(t)
+	h := svc.Doors()
+	if _, err := st.CreateDoorArea(ctx, "lordleague", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, store.CreateUserOptions{
+		Nick: "bob", DisplayName: "Bob", CanLogin: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.QueueDoorEvent(ctx, door.DoorEventRequest{
+		Door: "lord", Area: "lordleague", Game: "lord", Kind: 3,
+		Actor: "alice", Target: "bob", Payload: []byte{9, 9},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := st.QueuedDoorEvents(ctx, "lordleague", "lord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.PublishDoorEvents(ctx, "lordleague", "lord", queued); err != nil {
+		t.Fatal(err)
+	}
+
+	batch, err := h.PollDoorEvents(ctx, door.DoorEventPoll{
+		Door: "lord", Area: "lordleague", Game: "lord",
+	})
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(batch.Events) != 1 {
+		t.Fatalf("poll returned %d events", len(batch.Events))
+	}
+	ev := batch.Events[0]
+	if ev.Actor != "alice" || ev.Target != "bob" || ev.Kind != 3 {
+		t.Errorf("polled %+v", ev)
+	}
+	if ev.Origin == "" {
+		t.Error("the event carries no origin, so a door cannot tell which board it came from")
+	}
+	if ev.TargetNode == "" {
+		t.Error("a targeted event carries no target node")
+	}
+	if ev.Payload == "" {
+		t.Error("the payload did not survive the round trip")
+	}
+	if batch.Cursor == 0 {
+		t.Error("poll returned no cursor to continue from")
+	}
+	if batch.Truncated {
+		t.Error("a complete league was reported as truncated")
+	}
+
+	// Polling again from the cursor returns nothing rather than repeating.
+	next, err := h.PollDoorEvents(ctx, door.DoorEventPoll{
+		Door: "lord", Area: "lordleague", Game: "lord", After: batch.Cursor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.Events) != 0 {
+		t.Errorf("polling at the cursor repeated %d events", len(next.Events))
+	}
+}
+
+// A forum is not a league in either direction.
+func TestPollRefusesAnAreaThatIsNotALeague(t *testing.T) {
+	svc, st, ctx := testService(t)
+	h := svc.Doors()
+	if _, err := st.CreateArea(ctx, "chatter", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.PollDoorEvents(ctx, door.DoorEventPoll{Door: "lord", Area: "chatter"}); !errors.Is(err, door.ErrNotALeague) {
+		t.Errorf("got %v, want ErrNotALeague", err)
 	}
 }

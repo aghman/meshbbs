@@ -83,6 +83,40 @@ type Host interface {
 	// The typed errors below are how the caller tells a refusal from a fault
 	// without parsing prose.
 	QueueDoorEvent(ctx context.Context, ev DoorEventRequest) error
+
+	// PollDoorEvents reads the league back, in the order records reached this
+	// node. Paired with QueueDoorEvent rather than separate, because a league a
+	// door may report to is one it may read: the grant is the league, not a
+	// direction.
+	PollDoorEvents(ctx context.Context, p DoorEventPoll) (DoorEventBatch, error)
+}
+
+// DoorEventPoll asks for everything on a league since a cursor.
+type DoorEventPoll struct {
+	Door  string
+	Area  string
+	Game  string
+	After int64
+}
+
+// DoorEventBatch is what a poll returned.
+type DoorEventBatch struct {
+	Cursor int64
+	Events []PolledDoorEvent
+	// Truncated says retention pruned records this cursor had not reached, so
+	// there is a gap no further polling will fill.
+	Truncated bool
+}
+
+// PolledDoorEvent is one event as a door sees it.
+type PolledDoorEvent struct {
+	Origin     string `json:"origin"`
+	At         int64  `json:"at"`
+	Kind       uint8  `json:"kind"`
+	Actor      string `json:"actor"`
+	Target     string `json:"target,omitempty"`
+	TargetNode string `json:"target_node,omitempty"`
+	Payload    string `json:"payload,omitempty"`
 }
 
 // DoorEventRequest is one event a door wants on its league (§9.5).
@@ -362,6 +396,7 @@ const (
 	opStateKeys   = "state.keys"
 	opAnnounce    = "announce"
 	opEventEmit   = "event.emit"
+	opEventPoll   = "event.poll"
 	opUserPost    = "user.post"
 	opUserDM      = "user.dm"
 )
@@ -379,6 +414,7 @@ var levelFor = map[string]int{
 	// is act_as_user; a fifth above impersonation would claim that reporting a
 	// game result is more authority than posting as the user.
 	opEventEmit: 3,
+	opEventPoll: 3,
 	opUserPost:  4,
 	opUserDM:    4,
 }
@@ -414,6 +450,8 @@ func (a *apiServer) dispatch(req request) response {
 		return a.announce(ctx, req)
 	case opEventEmit:
 		return a.eventEmit(ctx, req)
+	case opEventPoll:
+		return a.eventPoll(ctx, req)
 	case opUserPost:
 		return a.userPost(ctx, req)
 	case opUserDM:
@@ -640,6 +678,46 @@ func (a *apiServer) eventEmit(ctx context.Context, req request) response {
 	return response{ID: req.ID, OK: true, Queued: true, Notice: a.noticeFor(ctx)}
 }
 
+// eventPoll reads the league back for a door.
+//
+// # Why a door polls rather than being called
+//
+// Doors are not servers. A door process exists only while somebody is playing,
+// so there is nothing to deliver to between invocations — an event that crosses
+// the mesh at 3am arrives at a board where the game is not running. The log is
+// the delivery mechanism, and a door drains it on next launch.
+//
+// The cursor is the door's to keep, in its own level-2 state. The BBS does not
+// track per-door read positions, which keeps this operation stateless and means
+// two invocations of the same door cannot fight over one position.
+func (a *apiServer) eventPoll(ctx context.Context, req request) response {
+	area := strings.TrimSpace(a.spec.Grant.LeagueArea)
+	if area == "" {
+		return response{ID: req.ID, OK: false, Code: codeForbidden,
+			Error: "this door has no league area; the sysop has not chosen one"}
+	}
+	if req.After < 0 {
+		return badRequest(req, errors.New("a cursor cannot be negative"))
+	}
+
+	batch, err := a.host.PollDoorEvents(ctx, DoorEventPoll{
+		Door:  a.spec.Name,
+		Area:  area,
+		Game:  strings.TrimSpace(req.Game),
+		After: req.After,
+	})
+	if err != nil {
+		if errors.Is(err, ErrNotALeague) {
+			return response{ID: req.ID, OK: false, Code: codeForbidden, Error: err.Error()}
+		}
+		return internal(req, err)
+	}
+	return response{
+		ID: req.ID, OK: true,
+		Cursor: batch.Cursor, Events: batch.Events, Truncated: batch.Truncated,
+	}
+}
+
 // isQueueFull matches the store's queue ceiling on its message, the same way
 // isQuota matches the state allowance: the rule is the store's and this package
 // does not get to redefine it.
@@ -811,6 +889,10 @@ type request struct {
 	Game    string `json:"game,omitempty"`
 	Kind    uint8  `json:"kind,omitempty"`
 	Payload string `json:"payload,omitempty"`
+
+	// After is event.poll's cursor: the last local arrival number this door
+	// has already seen. Zero starts from the beginning of what is held.
+	After int64 `json:"after,omitempty"`
 }
 
 type response struct {
@@ -834,6 +916,13 @@ type response struct {
 	// has been signed yet, and §6.5 is explicit that a promise nothing will
 	// keep is worse than saying less.
 	Queued bool `json:"queued,omitempty"`
+
+	// event.poll's answer. Cursor is what to pass as `after` next time.
+	Cursor int64             `json:"cursor,omitempty"`
+	Events []PolledDoorEvent `json:"events,omitempty"`
+	// Truncated says events were pruned before this door read them. A door that
+	// ignores it shows an incomplete league table and calls it complete.
+	Truncated bool `json:"truncated,omitempty"`
 
 	// Notice is the §9.1.1 one-time message the door must show the user.
 	Notice string `json:"notice,omitempty"`
