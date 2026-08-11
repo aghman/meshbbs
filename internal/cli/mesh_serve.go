@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/aghman/meshbbs/internal/airtime"
+	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/bsmp"
 	"github.com/aghman/meshbbs/internal/bundle"
 	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/config"
+	"github.com/aghman/meshbbs/internal/doorevent"
 	"github.com/aghman/meshbbs/internal/gossip"
 	"github.com/aghman/meshbbs/internal/governor"
 	"github.com/aghman/meshbbs/internal/identity"
@@ -36,9 +38,15 @@ type federation struct {
 	outbox *bsmp.Outbox
 	gstore *store.GossipStore
 	st     *store.Store
-	ctx    context.Context
-	clk    clock.Clock
-	log    *slog.Logger
+	svc    *bbs.Service
+	events *doorevent.Policy
+	// eventWindow is nil when the window is derived, and holds the sysop's
+	// explicit value otherwise.
+	eventWindow *time.Duration
+	eventMaxAge time.Duration
+	ctx         context.Context
+	clk         clock.Clock
+	log         *slog.Logger
 }
 
 // startFederation brings up the mesh side of a running BBS.
@@ -46,7 +54,7 @@ type federation struct {
 // The radio is connected synchronously so that a missing device, a wrong
 // channel or a ham-mode violation is an error the sysop sees at startup rather
 // than a silent federation outage. Everything after that is supervised.
-func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *store.Store, log *slog.Logger) (*federation, error) {
+func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *store.Store, svc *bbs.Service, log *slog.Logger) (*federation, error) {
 	cfg := e.cfg.Mesh
 
 	gstore, err := store.NewGossipStore(ctx, st, func(err error) {
@@ -169,12 +177,36 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 
 	f := &federation{
 		link: ml, gov: gov, engine: engine,
-		inbox: inbox, outbox: outbox, gstore: gstore, st: st, ctx: ctx,
+		inbox: inbox, outbox: outbox, gstore: gstore, st: st, svc: svc, ctx: ctx,
 		clk: e.clock, log: log,
 	}
 	// Load the caps once before the first tick, so a restart does not leave
 	// every area uncapped for a whole tick interval.
 	f.refreshAreaShares()
+
+	// §9.5's batch window. "auto" is the default and derives per area from what
+	// its share buys, so a measured R reaches this without a config edit; an
+	// explicit value is the sysop overriding that, usually for testing.
+	window, explicit, err := e.cfg.DoorEventWindow()
+	if err != nil {
+		ml.Close()
+		return nil, err
+	}
+	if explicit {
+		clamped := doorevent.ClampWindow(window)
+		if clamped != window {
+			log.Warn("door event batch window clamped",
+				"asked", window, "using", clamped,
+				"why", "below the floor batching stops paying for itself, above the ceiling events expire unsent")
+		}
+		f.eventWindow = &clamped
+	}
+	if f.eventMaxAge, err = e.cfg.DoorEventMaxAge(); err != nil {
+		ml.Close()
+		return nil, err
+	}
+	// A single policy proves the config parsed; policyFor rebuilds per area.
+	f.events = doorevent.New(doorevent.Config{Clock: e.clock, MaxAge: f.eventMaxAge})
 
 	go f.run(ctx)
 	return f, nil
@@ -296,6 +328,116 @@ const statusInterval = 5 * time.Minute
 // §12.1. That constraint is usually about the simulator being replayable, but
 // it earns its keep here too: a test can drive this loop through a day of
 // federation without waiting for one.
+// flushDoorEvents turns queued league events into records (§9.5).
+//
+// Driven from the federation tick rather than a timer of its own, for the
+// reason §12.1 gives: this loop already runs on the injected clock, so a test
+// can drive a day of league play without waiting one out. A separate ticker
+// would be a second clock to keep honest.
+//
+// Every failure here is logged and skipped rather than propagated. A league is
+// the lowest-priority traffic on the mesh and the least important thing this
+// loop does; a game that cannot report must not stop anti-entropy.
+func (f *federation) flushDoorEvents() {
+	if f.svc == nil || f.events == nil {
+		return
+	}
+	groups, err := f.st.DoorEventGroups(f.ctx)
+	if err != nil {
+		f.log.Warn("listing door event groups", "err", err)
+		return
+	}
+
+	for _, g := range groups {
+		area, game := g[0], g[1]
+		queued, err := f.st.QueuedDoorEvents(f.ctx, area, game)
+		if err != nil {
+			f.log.Warn("reading queued door events", "area", area, "game", game, "err", err)
+			continue
+		}
+
+		policy := f.policyFor(area)
+		items := make([]doorevent.Event, 0, len(queued))
+		for _, q := range queued {
+			items = append(items, doorevent.Event{ID: q.ID, QueuedAt: time.Unix(q.QueuedAt, 0)})
+		}
+		d := policy.Consider(doorevent.Group{Area: area, Game: game, Events: items})
+
+		if len(d.Expire) > 0 {
+			// Never silent: the door was told these were queued, so a sysop who
+			// wonders why a league went quiet has one line that says it.
+			ids := idsOf(d.Expire)
+			f.log.Warn("dropping door events that waited too long to send",
+				"area", area, "game", game, "count", len(ids), "max_age", policy.MaxAge())
+			if err := f.st.DeleteQueuedDoorEvents(f.ctx, ids); err != nil {
+				f.log.Warn("removing expired door events", "err", err)
+			}
+		}
+		if len(d.Flush) == 0 {
+			continue
+		}
+
+		batch := pickQueued(queued, d.Flush)
+		id, err := f.svc.PublishDoorEvents(f.ctx, area, game, batch)
+		if err != nil {
+			// Left in the queue deliberately: the next tick tries again, and
+			// the age rule is what eventually gives up. Deleting on a failure
+			// would lose a league night to a transient error.
+			f.log.Warn("publishing door events", "area", area, "game", game, "err", err)
+			continue
+		}
+		if err := f.st.DeleteQueuedDoorEvents(f.ctx, idsOf(d.Flush)); err != nil {
+			// The record is already signed and published, so the events are on
+			// the air; failing to forget them would resend them next tick.
+			// Worth an error rather than a warning.
+			f.log.Error("door events were published but not dequeued; they may repeat",
+				"record", id, "err", err)
+		}
+		f.log.Info("door events published", "area", area, "game", game,
+			"events", len(batch), "record", id, "window", policy.Window())
+	}
+}
+
+// policyFor builds the flush policy for one area.
+//
+// Rebuilt per area per tick rather than cached, because the window depends on
+// the area's share and R, and both change while the node runs — a cached policy
+// would keep a window derived from a flood multiplier that has since been
+// measured.
+func (f *federation) policyFor(area string) *doorevent.Policy {
+	cfg := doorevent.Config{Clock: f.clk, MaxAge: f.eventMaxAge}
+	if f.eventWindow != nil {
+		cfg.Window = *f.eventWindow
+	} else {
+		tag := record.AreaTagFor(area)
+		cfg.Window = doorevent.DeriveWindow(f.gov.AreaPacketsPerDay(tag))
+	}
+	return doorevent.New(cfg)
+}
+
+func idsOf(events []doorevent.Event) []int64 {
+	out := make([]int64, 0, len(events))
+	for _, e := range events {
+		out = append(out, e.ID)
+	}
+	return out
+}
+
+// pickQueued selects the store rows the policy chose, preserving its order.
+func pickQueued(queued []store.QueuedDoorEvent, chosen []doorevent.Event) []store.QueuedDoorEvent {
+	byID := make(map[int64]store.QueuedDoorEvent, len(queued))
+	for _, q := range queued {
+		byID[q.ID] = q
+	}
+	out := make([]store.QueuedDoorEvent, 0, len(chosen))
+	for _, e := range chosen {
+		if q, ok := byID[e.ID]; ok {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
 // refreshAreaShares reloads the per-area caps into the governor (§6.3).
 //
 // A read failure leaves the previous shares in place rather than clearing them.
@@ -347,6 +489,7 @@ func (f *federation) run(ctx context.Context) {
 			// noisy league without a restart, and a cap that needed one is a
 			// cap nobody would reach for while the mesh was actually busy.
 			f.refreshAreaShares()
+			f.flushDoorEvents()
 			if err := f.engine.Tick(); err != nil {
 				f.log.Error("sync engine", "err", err)
 			}

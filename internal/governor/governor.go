@@ -762,6 +762,31 @@ func (g *Governor) Explain() string {
 	return out
 }
 
+// AreaPacketsPerDay reports how many full packets an area's share buys per day.
+//
+// Exported for the door-event flusher, which derives its batch window from it
+// (§9.5). Everything that makes this number what it is — the ceiling, the
+// instance count, R, and the area's own share — lives here, so a caller that
+// computed it itself would be a second copy of the arithmetic that drifts the
+// first time any of them changes.
+//
+// An area with no configured share gets the node's whole rate, which is the
+// truth: nothing is capping it.
+func (g *Governor) AreaPacketsPerDay(area [4]byte) float64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	perDay := 86400 * g.shareFraction()
+	if share, ok := g.areaShares[area]; ok && share > 0 {
+		perDay *= share
+	}
+	full := float64(g.cfg.Preset.Packet(233)) * g.r / float64(time.Second)
+	if full <= 0 {
+		return 0
+	}
+	return perDay / full
+}
+
 func (g *Governor) rNote() string {
 	if g.cfg.FloodMultiplierOverride {
 		return " pinned"

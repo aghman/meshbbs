@@ -181,6 +181,9 @@ type Mesh struct {
 	FloodMultiplierOverride bool    `toml:"flood_multiplier_override" default:"false" doc:"Pin flood_multiplier and disable live refinement. Testing only: it stops the node correcting a value that is too low."`
 	QuietHours              string  `toml:"quiet_hours" default:"" doc:"Comma-separated local-time windows of zero transmission, e.g. '22:00-06:00'. Windows may wrap midnight."`
 
+	DoorEventBatchWindow string `toml:"door_event_batch_window" default:"auto" doc:"How long a partial batch of door-league events waits before it is sent (§9.5). 'auto' derives it from what the area's airtime share actually buys, so a measured flood multiplier propagates without a config edit. An explicit Go duration like '30m' overrides, and is clamped to 5m-12h."`
+	DoorEventMaxAge      string `toml:"door_event_max_age" default:"24h" doc:"How long a queued door-league event may wait before it is dropped unsent (§9.5). Generous on purpose: it exists to stop a node that has been offline for a week spending its whole budget on a game that finished, not to tighten latency."`
+
 	HamModeOverride string `toml:"ham_mode_override" default:"" doc:"Set to 'i_accept_part97_responsibility' to transmit encrypted traffic while the radio reports a licensed operator. FCC Part 97 prohibits obscuring the meaning of amateur transmissions; the licence at risk is yours (§8.3)."`
 }
 
@@ -265,6 +268,13 @@ func (c *Config) Validate() error {
 	case "text", "json":
 	default:
 		problems = append(problems, fmt.Sprintf("log.format is %q, want text or json", c.Log.Format))
+	}
+
+	if _, _, err := c.DoorEventWindow(); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if _, err := c.DoorEventMaxAge(); err != nil {
+		problems = append(problems, err.Error())
 	}
 
 	switch c.Users.RegistrationMode {
@@ -522,6 +532,41 @@ func isLoopbackHost(host string) bool {
 
 func (c *Config) AcceptsPart97Responsibility() bool {
 	return strings.TrimSpace(c.Mesh.HamModeOverride) == HamModeOverridePhrase
+}
+
+// DoorEventWindow parses mesh.door_event_batch_window.
+//
+// Returns ok=false for "auto", which is not an error — it is the caller being
+// told to derive the window from the governor rather than being handed one.
+func (c *Config) DoorEventWindow() (d time.Duration, ok bool, err error) {
+	raw := strings.TrimSpace(c.Mesh.DoorEventBatchWindow)
+	if raw == "" || strings.EqualFold(raw, "auto") {
+		return 0, false, nil
+	}
+	d, err = time.ParseDuration(raw)
+	if err != nil {
+		return 0, false, fmt.Errorf("mesh.door_event_batch_window %q is not a duration like 30m (or \"auto\"): %w", raw, err)
+	}
+	if d <= 0 {
+		return 0, false, fmt.Errorf("mesh.door_event_batch_window must be positive, got %s", d)
+	}
+	return d, true, nil
+}
+
+// DoorEventMaxAge parses mesh.door_event_max_age.
+func (c *Config) DoorEventMaxAge() (time.Duration, error) {
+	raw := strings.TrimSpace(c.Mesh.DoorEventMaxAge)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("mesh.door_event_max_age %q is not a duration like 24h: %w", raw, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("mesh.door_event_max_age must be positive, got %s", d)
+	}
+	return d, nil
 }
 
 // QuietHourWindows parses mesh.quiet_hours into governor windows.

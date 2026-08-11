@@ -125,3 +125,52 @@ func (s *Store) CountQueuedDoorEvents(ctx context.Context, door string) (int, er
 	}
 	return n, nil
 }
+
+// DeleteQueuedDoorEvents removes events by id, after they have been sent or
+// expired.
+//
+// Takes ids rather than a predicate because the flusher decided which ones, on
+// a snapshot it read a moment ago. Deleting by "everything older than X" would
+// re-derive that decision against a table another goroutine may have added to,
+// and would eventually delete something that was never sent.
+func (s *Store) DeleteQueuedDoorEvents(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM door_event_queue WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("delete queued door event %d: %w", id, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// DoorEventGroups lists the (area, game) pairs that have anything waiting.
+//
+// One record is about one game, so this is the set of records that could be
+// built right now, and it is what the flusher iterates.
+func (s *Store) DoorEventGroups(ctx context.Context) ([][2]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT area, game FROM door_event_queue GROUP BY area, game ORDER BY area, game`)
+	if err != nil {
+		return nil, fmt.Errorf("list door event groups: %w", err)
+	}
+	defer rows.Close()
+
+	var out [][2]string
+	for rows.Next() {
+		var area, game string
+		if err := rows.Scan(&area, &game); err != nil {
+			return nil, err
+		}
+		out = append(out, [2]string{area, game})
+	}
+	return out, rows.Err()
+}
