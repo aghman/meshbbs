@@ -88,6 +88,14 @@ jobs:
             -o "$out" ./cmd/meshbbs
           ls -la "$out"
 
+          # The tier-3 DM helper (§8.2) ships for every target the server does,
+          # and then some: it runs on the USER's machine, which is the one place
+          # the server's platform says nothing about.
+          key="meshbbs-key-${GOOS}-${GOARCH}"
+          [ "$GOOS" = "windows" ] && key="${key}.exe"
+          go build -trimpath -ldflags "-s -w" -o "$key" ./cmd/meshbbs-key
+          ls -la "$key"
+
       - name: Assert the binary is not dynamically linked
         # §4 calls cgo-free non-negotiable, so assert it rather than trusting
         # CGO_ENABLED to have been honoured. A cgo build would pull in libc and
