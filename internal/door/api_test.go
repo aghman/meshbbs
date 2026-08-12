@@ -1033,6 +1033,136 @@ func TestClientSpeaksTheProtocol(t *testing.T) {
 	}
 }
 
+// The league half of the client, against the real server (§9.5).
+//
+// The reference arena door is written against exactly these two calls, so a
+// break here is a league that silently stops reporting — and the encoding is
+// the part worth pinning: a payload is bytes to the door, base64 on the wire,
+// and bytes again at the far end. A door author who has to know that has been
+// handed the protocol rather than a client.
+func TestClientReportsAndReadsALeague(t *testing.T) {
+	rig := leagueRig(t, nil)
+	t.Setenv("MESHBBS_DOOR_DESCRIPTOR", envValue(rig.spec.Env, "MESHBBS_DOOR_DESCRIPTOR"))
+
+	c, err := Open()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer c.Close()
+
+	queued, notice, err := c.EmitEvent("lord", 3, "bob@pnw", []byte{9, 9})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if !queued {
+		t.Error("the client reported the event was not queued")
+	}
+	if notice == "" {
+		// The one-time notice rides on the emit response for the same reason it
+		// rides on a level-4 post: a door putting a player's nick on other
+		// people's mesh has to say so, and a client that dropped it would make
+		// that impossible to honour.
+		t.Error("the first emit carried no notice for the client to show")
+	}
+
+	rig.host.snapshot(func(h *fakeHost) {
+		if len(h.events) != 1 {
+			t.Fatalf("the host queued %d events, want 1", len(h.events))
+		}
+		ev := h.events[0]
+		if ev.Actor != "alice" {
+			t.Errorf("the event was attributed to %q, want the session's nick", ev.Actor)
+		}
+		if ev.Target != "bob" {
+			t.Errorf("the target resolved to %q, want bob", ev.Target)
+		}
+		if ev.Kind != 3 || len(ev.Payload) != 2 || ev.Payload[0] != 9 {
+			t.Errorf("the event arrived at the host as %+v", ev)
+		}
+	})
+
+	rig.host.snapshot(func(h *fakeHost) {
+		h.delivered = []PolledDoorEvent{
+			{Origin: "K7QM4X2P", At: 4, Kind: 1, Actor: "alice", Payload: "AwE="},
+			{Origin: "K7QM4X2P", At: 9, Kind: 2, Actor: "bob"},
+		}
+	})
+
+	batch, err := c.PollEvents("lord", 0)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(batch.Events) != 2 {
+		t.Fatalf("poll returned %d events, want 2", len(batch.Events))
+	}
+	if batch.Cursor != 9 {
+		t.Errorf("poll returned cursor %d, want the last event's, 9", batch.Cursor)
+	}
+	payload, err := batch.Events[0].PayloadBytes()
+	if err != nil {
+		t.Fatalf("decoding a payload: %v", err)
+	}
+	if len(payload) != 2 || payload[0] != 3 || payload[1] != 1 {
+		t.Errorf("a payload decoded to %v, want [3 1]", payload)
+	}
+	// An absent payload decodes to nothing rather than to an error: absent and
+	// empty are the same single zero length on the wire, and a door that treated
+	// "no payload" as a fault would refuse to show half a league.
+	if p, err := batch.Events[1].PayloadBytes(); err != nil || len(p) != 0 {
+		t.Errorf("an empty payload decoded to %v (err %v)", p, err)
+	}
+
+	// Reading from the returned cursor shows nothing twice, which is what makes
+	// the door's saved cursor worth saving.
+	next, err := c.PollEvents("lord", batch.Cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.Events) != 0 {
+		t.Errorf("polling from the returned cursor replayed %d events", len(next.Events))
+	}
+
+	// And truncation reaches the client, or a door draws an incomplete league
+	// table and calls it complete.
+	rig.host.snapshot(func(h *fakeHost) { h.pollTruncated = true })
+	pruned, err := c.PollEvents("lord", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pruned.Truncated {
+		t.Error("the client did not surface that events had been pruned before it read them")
+	}
+}
+
+// A door with no league area gets an answer it can act on, not a fault.
+//
+// The distinction matters more here than for announce: a board that is not in a
+// league is the NORMAL case — most boards are not — so an arena door has to be
+// able to say "this board is not in a league" and carry on rather than crash in
+// front of the player.
+func TestClientLeagueRefusalIsAnAnswer(t *testing.T) {
+	rig := newAPIRig(t, 3, nil) // level 3, and no league area
+	t.Setenv("MESHBBS_DOOR_DESCRIPTOR", envValue(rig.spec.Env, "MESHBBS_DOOR_DESCRIPTOR"))
+
+	c, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	var apiErr *APIError
+	if _, _, err := c.EmitEvent("lord", 1, "", nil); !errors.As(err, &apiErr) {
+		t.Fatalf("emit without a league returned %T: %v", err, err)
+	} else if !apiErr.Forbidden() {
+		t.Errorf("the refusal is not marked forbidden: %+v", apiErr)
+	}
+	if _, err := c.PollEvents("lord", 0); !errors.As(err, &apiErr) {
+		t.Fatalf("poll without a league returned %T: %v", err, err)
+	} else if !apiErr.Forbidden() {
+		t.Errorf("the poll refusal is not marked forbidden: %+v", apiErr)
+	}
+}
+
 // A refusal and a fault must be distinguishable, or a door retries the one
 // thing that will never succeed.
 func TestClientDistinguishesRefusalFromFailure(t *testing.T) {
