@@ -193,6 +193,9 @@ type Manager struct {
 	// limit. Per door rather than per invocation: a limit that reset on every
 	// relaunch would be no limit at all for a door that announces on startup.
 	announces map[string][]time.Time
+	// leagueEmits is the same thing for §9.5's league grant, on its own bucket
+	// so the two limits cannot spend each other.
+	leagueEmits map[string][]time.Time
 }
 
 type nodeKey struct {
@@ -209,11 +212,12 @@ func New(clk clock.Clock, log *slog.Logger) *Manager {
 		log = slog.Default()
 	}
 	return &Manager{
-		clock:     clk,
-		log:       log,
-		running:   map[string]int{},
-		nodes:     map[nodeKey]bool{},
-		announces: map[string][]time.Time{},
+		clock:       clk,
+		log:         log,
+		running:     map[string]int{},
+		nodes:       map[nodeKey]bool{},
+		announces:   map[string][]time.Time{},
+		leagueEmits: map[string][]time.Time{},
 	}
 }
 

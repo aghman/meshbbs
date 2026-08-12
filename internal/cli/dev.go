@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/aghman/meshbbs/internal/record"
@@ -32,6 +33,7 @@ command that explains why it will not run is not.`,
 	}
 	cmd.AddCommand(newDevSeedCmd(e))
 	cmd.AddCommand(newDevDoorRunCmd(e))
+	cmd.AddCommand(newDevVectorCmd(e))
 	return cmd
 }
 
@@ -80,7 +82,37 @@ all.`,
 				}
 				fmt.Fprintf(out, "Created %d users\n", created)
 
+				// The seeder creates the areas it posts into rather than
+				// assuming SeedDefaultAreas made them.
+				//
+				// It did not. That function creates general, tech and SYSOP,
+				// this list has always ended in SWAP, and the mismatch is not
+				// visible anywhere a seed run would show it: NextSeq and
+				// PutRecord are per-tag and neither consults the areas table, so
+				// a third of the posts landed with a valid tag, a valid
+				// signature and no row behind them. GossipStore.Refresh lists
+				// only areas WHERE federated = 1, so those records could never
+				// be offered to a peer and never counted toward convergence —
+				// a seeded instance quietly holding a third less than it
+				// reported, which is precisely the kind of arithmetic a bench
+				// run gets wrong for days.
+				//
+				// Creating them here also makes the seeder self-contained, which
+				// matters more than the bug: `dev seed` is what populates the
+				// simulator harness and both sides of a two-node bring-up, and
+				// requiring an out-of-band `area create` first is the footgun
+				// that produced this in the first place.
 				areas := []string{"general", "tech", "swap"}
+				for _, name := range areas {
+					// Local-only, per §6.3: a seed must not start spending mesh
+					// airtime because of a default. The bench federates the
+					// areas it wants explicitly.
+					_, err := st.CreateArea(ctx, name, "seeded by dev seed", false)
+					if err != nil && !errors.Is(err, store.ErrAreaExists) {
+						return err
+					}
+				}
+
 				for i := 0; i < posts; i++ {
 					// The area is chosen FIRST, because sequences are allocated
 					// per area (migration 0003) and a number drawn from the

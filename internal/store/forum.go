@@ -9,13 +9,13 @@ import (
 	"github.com/aghman/meshbbs/internal/record"
 )
 
-// Area is a federatable namespace: a forum message base (§6.3) or a file area
-// (§6.5).
+// Area is a federatable namespace: a forum message base (§6.3), a file area
+// (§6.5), or an inter-BBS door league (§9.5).
 //
-// Both kinds share this table and this type because at the protocol layer they
+// All three share this table and this type because at the protocol layer they
 // are the same thing — an AreaTag with a version vector — and because the tag
-// namespace is global, so letting the two kinds be named independently would
-// let a message area and a file area collide into one tag. See migration 0005.
+// namespace is global, so letting the kinds be named independently would let
+// two of them collide into one tag. See migrations 0005 and 0007.
 type Area struct {
 	ID            int64
 	Name          string
@@ -25,7 +25,10 @@ type Area struct {
 	Federated     bool
 	ReadOnly      bool
 	RetentionDays int
-	CreatedAt     int64
+	// AirtimeShare caps what this area may spend, as a fraction of the
+	// instance's whole budget (§6.3). Zero means no cap.
+	AirtimeShare float64
+	CreatedAt    int64
 }
 
 // AreaKind says what an area holds.
@@ -36,7 +39,29 @@ const (
 	KindMessage AreaKind = "message"
 	// KindFile is a file area (§6.5).
 	KindFile AreaKind = "file"
+	// KindDoor is an inter-BBS door league (§9.5): it carries DOOR_EVENT
+	// records and nothing else.
+	KindDoor AreaKind = "door"
 )
+
+// Describe names the kind in the words an error message wants.
+//
+// It exists because the two-kind era let error strings say "is a file area" by
+// simply naming the other one, and with three kinds that phrasing became a
+// guess — one that would have been wrong for door areas in the two places a
+// sysop is most likely to meet it.
+func (k AreaKind) Describe() string {
+	switch k {
+	case KindMessage:
+		return "a message area"
+	case KindFile:
+		return "a file area"
+	case KindDoor:
+		return "a door league"
+	default:
+		return fmt.Sprintf("an area of unknown kind %q", string(k))
+	}
+}
 
 // Scope returns a human label for the area's reach.
 //
@@ -69,6 +94,16 @@ func (s *Store) CreateArea(ctx context.Context, name, description string, federa
 // everything above it.
 func (s *Store) CreateFileArea(ctx context.Context, name, description string, federated bool) (Area, error) {
 	return s.createArea(ctx, name, description, federated, KindFile)
+}
+
+// CreateDoorArea creates an inter-BBS door league (§9.5).
+//
+// Same opt-in rule as the other kinds, and the sharpest reason of the three:
+// door events sit at the bottom of the priority order (§1.1), a league is the
+// chattiest thing the design contemplates, and a federated one nobody wanted
+// spends the commons on a game nobody here is playing.
+func (s *Store) CreateDoorArea(ctx context.Context, name, description string, federated bool) (Area, error) {
+	return s.createArea(ctx, name, description, federated, KindDoor)
 }
 
 func (s *Store) createArea(ctx context.Context, name, description string, federated bool, kind AreaKind) (Area, error) {
@@ -134,7 +169,7 @@ func ValidateAreaName(name string) error {
 
 // areaColumns is the projection every area scan uses, so the SELECT list and
 // scanArea cannot drift apart.
-const areaColumns = `id, name, tag, kind, description, federated, read_only, retention_days, created_at`
+const areaColumns = `id, name, tag, kind, description, federated, read_only, retention_days, airtime_share, created_at`
 
 // scanArea reads one area row from the areaColumns projection.
 func scanArea(sc interface{ Scan(...any) error }) (Area, error) {
@@ -143,7 +178,7 @@ func scanArea(sc interface{ Scan(...any) error }) (Area, error) {
 	var kind string
 	var fed, ro int
 	if err := sc.Scan(&a.ID, &a.Name, &tag, &kind, &a.Description, &fed, &ro,
-		&a.RetentionDays, &a.CreatedAt); err != nil {
+		&a.RetentionDays, &a.AirtimeShare, &a.CreatedAt); err != nil {
 		return Area{}, err
 	}
 	copy(a.Tag[:], tag)
@@ -163,7 +198,7 @@ func (s *Store) GetArea(ctx context.Context, name string) (Area, error) {
 		return Area{}, err
 	}
 	if a.Kind != KindMessage {
-		return Area{}, fmt.Errorf("%w: %s is a file area", ErrWrongAreaKind, a.Name)
+		return Area{}, fmt.Errorf("%w: %s is %s", ErrWrongAreaKind, a.Name, a.Kind.Describe())
 	}
 	return a, nil
 }
@@ -175,7 +210,19 @@ func (s *Store) GetFileArea(ctx context.Context, name string) (Area, error) {
 		return Area{}, err
 	}
 	if a.Kind != KindFile {
-		return Area{}, fmt.Errorf("%w: %s is a message area", ErrWrongAreaKind, a.Name)
+		return Area{}, fmt.Errorf("%w: %s is %s", ErrWrongAreaKind, a.Name, a.Kind.Describe())
+	}
+	return a, nil
+}
+
+// GetDoorArea loads a DOOR league by name.
+func (s *Store) GetDoorArea(ctx context.Context, name string) (Area, error) {
+	a, err := s.GetAnyArea(ctx, name)
+	if err != nil {
+		return Area{}, err
+	}
+	if a.Kind != KindDoor {
+		return Area{}, fmt.Errorf("%w: %s is %s", ErrWrongAreaKind, a.Name, a.Kind.Describe())
 	}
 	return a, nil
 }
@@ -208,6 +255,11 @@ func (s *Store) ListFileAreas(ctx context.Context) ([]Area, error) {
 	return s.listAreas(ctx, KindFile)
 }
 
+// ListDoorAreas returns the door leagues, ordered by name.
+func (s *Store) ListDoorAreas(ctx context.Context) ([]Area, error) {
+	return s.listAreas(ctx, KindDoor)
+}
+
 func (s *Store) listAreas(ctx context.Context, kind AreaKind) ([]Area, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+areaColumns+` FROM areas WHERE kind = ? ORDER BY name`, string(kind))
@@ -223,6 +275,88 @@ func (s *Store) listAreas(ctx context.Context, kind AreaKind) ([]Area, error) {
 			return nil, err
 		}
 		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ErrShareOverBudget is returned when the per-area shares would sum past one.
+var ErrShareOverBudget = errors.New("area airtime shares would exceed the whole budget")
+
+// SetAreaShare caps what one area may spend, as a fraction of this instance's
+// budget (§6.3). Zero removes the cap.
+//
+// The sum rule is enforced here because this is the only path that writes the
+// column and SQLite cannot express "these rows add up" as a CHECK. It is a real
+// refusal rather than a warning: an instance that has promised away 130% of its
+// budget has not made a decision about throughput, it has made one it cannot
+// keep, and the failure would show up as areas mysteriously starving each other
+// weeks later.
+//
+// Only FEDERATED areas count toward the sum. A local-only area spends no mesh
+// airtime, so capping it is harmless and reserving budget for it would take
+// that budget from areas that actually transmit.
+func (s *Store) SetAreaShare(ctx context.Context, name string, share float64, actor string) error {
+	if share < 0 || share > 1 {
+		return fmt.Errorf("airtime share must be between 0 and 1, got %v", share)
+	}
+	area, err := s.GetAnyArea(ctx, name)
+	if err != nil {
+		return err
+	}
+
+	if share > 0 && area.Federated {
+		total, err := s.totalAirtimeShare(ctx, area.ID)
+		if err != nil {
+			return err
+		}
+		if total+share > 1 {
+			return fmt.Errorf("%w: %s would take %.0f%% on top of %.0f%% already allocated",
+				ErrShareOverBudget, name, share*100, total*100)
+		}
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE areas SET airtime_share = ? WHERE id = ?`, share, area.ID); err != nil {
+		return fmt.Errorf("set airtime share: %w", err)
+	}
+	return s.audit(ctx, actor, "area.share", name, fmt.Sprintf("%.2f of this node's budget", share))
+}
+
+// totalAirtimeShare sums the shares of every federated area except one.
+func (s *Store) totalAirtimeShare(ctx context.Context, exceptID int64) (float64, error) {
+	var total float64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(airtime_share), 0) FROM areas WHERE federated = 1 AND id != ?`,
+		exceptID).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("sum airtime shares: %w", err)
+	}
+	return total, nil
+}
+
+// AreaShares maps every federated area with a cap to its share, for the
+// governor.
+func (s *Store) AreaShares(ctx context.Context) (map[record.AreaTag]float64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tag, airtime_share FROM areas WHERE federated = 1 AND airtime_share > 0`)
+	if err != nil {
+		return nil, fmt.Errorf("read airtime shares: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[record.AreaTag]float64{}
+	for rows.Next() {
+		var tag []byte
+		var share float64
+		if err := rows.Scan(&tag, &share); err != nil {
+			return nil, err
+		}
+		if len(tag) != 4 {
+			continue
+		}
+		var a record.AreaTag
+		copy(a[:], tag)
+		out[a] = share
 	}
 	return out, rows.Err()
 }

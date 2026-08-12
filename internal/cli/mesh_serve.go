@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/aghman/meshbbs/internal/airtime"
+	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/bsmp"
 	"github.com/aghman/meshbbs/internal/bundle"
 	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/config"
+	"github.com/aghman/meshbbs/internal/doorevent"
 	"github.com/aghman/meshbbs/internal/gossip"
 	"github.com/aghman/meshbbs/internal/governor"
 	"github.com/aghman/meshbbs/internal/identity"
@@ -35,8 +37,16 @@ type federation struct {
 	inbox  *bsmp.Inbox
 	outbox *bsmp.Outbox
 	gstore *store.GossipStore
-	clk    clock.Clock
-	log    *slog.Logger
+	st     *store.Store
+	svc    *bbs.Service
+	events *doorevent.Policy
+	// eventWindow is nil when the window is derived, and holds the sysop's
+	// explicit value otherwise.
+	eventWindow *time.Duration
+	eventMaxAge time.Duration
+	ctx         context.Context
+	clk         clock.Clock
+	log         *slog.Logger
 }
 
 // startFederation brings up the mesh side of a running BBS.
@@ -44,7 +54,7 @@ type federation struct {
 // The radio is connected synchronously so that a missing device, a wrong
 // channel or a ham-mode violation is an error the sysop sees at startup rather
 // than a silent federation outage. Everything after that is supervised.
-func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *store.Store, log *slog.Logger) (*federation, error) {
+func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *store.Store, svc *bbs.Service, log *slog.Logger) (*federation, error) {
 	cfg := e.cfg.Mesh
 
 	gstore, err := store.NewGossipStore(ctx, st, func(err error) {
@@ -139,7 +149,7 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 	// ham mode is what the radio reports and a sysop can turn it on without
 	// restarting the BBS.
 	outbox, err := federationOutbox(key.ID(), ml, dict,
-		gstore.IsFileArea,
+		gstore,
 		func() bool { return ml.Part97().AllowsEncryptedDMs() }, log)
 	if err != nil {
 		ml.Close()
@@ -167,8 +177,37 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 
 	f := &federation{
 		link: ml, gov: gov, engine: engine,
-		inbox: inbox, outbox: outbox, gstore: gstore, clk: e.clock, log: log,
+		inbox: inbox, outbox: outbox, gstore: gstore, st: st, svc: svc, ctx: ctx,
+		clk: e.clock, log: log,
 	}
+	// Load the caps once before the first tick, so a restart does not leave
+	// every area uncapped for a whole tick interval.
+	f.refreshAreaShares()
+
+	// §9.5's batch window. "auto" is the default and derives per area from what
+	// its share buys, so a measured R reaches this without a config edit; an
+	// explicit value is the sysop overriding that, usually for testing.
+	window, explicit, err := e.cfg.DoorEventWindow()
+	if err != nil {
+		ml.Close()
+		return nil, err
+	}
+	if explicit {
+		clamped := doorevent.ClampWindow(window)
+		if clamped != window {
+			log.Warn("door event batch window clamped",
+				"asked", window, "using", clamped,
+				"why", "below the floor batching stops paying for itself, above the ceiling events expire unsent")
+		}
+		f.eventWindow = &clamped
+	}
+	if f.eventMaxAge, err = e.cfg.DoorEventMaxAge(); err != nil {
+		ml.Close()
+		return nil, err
+	}
+	// A single policy proves the config parsed; policyFor rebuilds per area.
+	f.events = doorevent.New(doorevent.Config{Clock: e.clock, MaxAge: f.eventMaxAge})
+
 	go f.run(ctx)
 	return f, nil
 }
@@ -182,13 +221,13 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 // article over a fake link and check that they are, which is exactly what was
 // missing when the classifier was left unset.
 func federationOutbox(self identity.NodeID, sender bsmp.Sender, dict *bundle.Dictionary,
-	isFileArea func(record.AreaTag) bool,
+	kinds areaKinds,
 	allowEncryptedDMs func() bool, log *slog.Logger) (*bsmp.Outbox, error) {
 	return bsmp.NewOutbox(bsmp.Config{
 		Self:              self,
 		Link:              sender,
 		Dictionary:        dict,
-		Classify:          classifierFor(isFileArea),
+		Classify:          classifierFor(kinds),
 		AllowEncryptedDMs: allowEncryptedDMs,
 		OnRefusedDM: func(area record.AreaTag) {
 			log.Warn("mail held back", "area", area,
@@ -211,17 +250,30 @@ func federationOutbox(self identity.NodeID, sender bsmp.Sender, dict *bundle.Dic
 // Mail does not federate yet (record.DMArea), so today the DM arm is a policy
 // that is in place before the traffic is, rather than dead code — it is what
 // makes the ham-mode block correct the moment mail does go on the wire.
-// classifierFor builds the production classifier over a file-area lookup.
+// areaKinds is what the classifier needs to know about an area beyond its tag.
+//
+// An interface rather than one lookup function per kind, because there are
+// three kinds now and the next one would be a fourth parameter threaded through
+// federationOutbox to every caller. *store.GossipStore satisfies it already:
+// both methods read the cache it refreshes whenever the area list changes, so
+// an area created while the node is running gets the right price without a
+// restart.
+type areaKinds interface {
+	IsFileArea(record.AreaTag) bool
+	IsDoorArea(record.AreaTag) bool
+}
+
+// classifierFor builds the production classifier over an area-kind lookup.
 //
 // An area tag is a hash of a name and says nothing about what the area holds,
-// so the file-catalog arm cannot be a pure function of the tag — it has to ask
-// something that tracks the areas. The lookup is the gossip store's, which is
-// already refreshed whenever the area list changes, so a file area created
-// while the node is running gets the right price without a restart.
+// so neither the file-catalog arm nor the door arm can be a pure function of
+// the tag — both have to ask something that tracks the areas.
 //
-// A nil lookup means "no file areas", which is what a caller with no store
-// wants and never silently misprices anything else.
-func classifierFor(isFileArea func(record.AreaTag) bool) bsmp.Classifier {
+// A nil lookup means "message areas only", which is what a caller with no store
+// wants. It under-prices catalog and door traffic and never misprices anything
+// else: forum is the safe middle, and the two arms below it are throughput
+// questions where the roster and mail arms are correctness ones.
+func classifierFor(kinds areaKinds) bsmp.Classifier {
 	return func(area record.AreaTag) governor.Class {
 		switch area {
 		case store.RosterArea:
@@ -229,12 +281,19 @@ func classifierFor(isFileArea func(record.AreaTag) bool) bsmp.Classifier {
 		case record.DMArea:
 			return governor.ClassDM
 		}
-		// §7.5: a file area's records are catalog entries, and §7.6 puts them at
-		// the bottom of the priority order — below forum posts, because a file
-		// listing that arrives an hour late costs nobody anything, and under
-		// backpressure the classes are dropped from the bottom.
-		if isFileArea != nil && isFileArea(area) {
-			return governor.ClassFileCatalog
+		if kinds != nil {
+			// §7.5: a file area's records are catalog entries, and §7.6 puts
+			// them near the bottom of the priority order — below forum posts,
+			// because a file listing that arrives an hour late costs nobody
+			// anything, and under backpressure classes drop from the bottom.
+			if kinds.IsFileArea(area) {
+				return governor.ClassFileCatalog
+			}
+			// And a door league is below even that. See ClassDoorEvent: a
+			// stale catalog entry is still true, a stale battle report is not.
+			if kinds.IsDoorArea(area) {
+				return governor.ClassDoorEvent
+			}
 		}
 		// Forums, and the user directory with them.
 		return governor.ClassForum
@@ -269,6 +328,135 @@ const statusInterval = 5 * time.Minute
 // §12.1. That constraint is usually about the simulator being replayable, but
 // it earns its keep here too: a test can drive this loop through a day of
 // federation without waiting for one.
+// flushDoorEvents turns queued league events into records (§9.5).
+//
+// Driven from the federation tick rather than a timer of its own, for the
+// reason §12.1 gives: this loop already runs on the injected clock, so a test
+// can drive a day of league play without waiting one out. A separate ticker
+// would be a second clock to keep honest.
+//
+// Every failure here is logged and skipped rather than propagated. A league is
+// the lowest-priority traffic on the mesh and the least important thing this
+// loop does; a game that cannot report must not stop anti-entropy.
+func (f *federation) flushDoorEvents() {
+	if f.svc == nil || f.events == nil {
+		return
+	}
+	groups, err := f.st.DoorEventGroups(f.ctx)
+	if err != nil {
+		f.log.Warn("listing door event groups", "err", err)
+		return
+	}
+
+	for _, g := range groups {
+		area, game := g[0], g[1]
+		queued, err := f.st.QueuedDoorEvents(f.ctx, area, game)
+		if err != nil {
+			f.log.Warn("reading queued door events", "area", area, "game", game, "err", err)
+			continue
+		}
+
+		policy := f.policyFor(area)
+		items := make([]doorevent.Event, 0, len(queued))
+		for _, q := range queued {
+			items = append(items, doorevent.Event{ID: q.ID, QueuedAt: time.Unix(q.QueuedAt, 0)})
+		}
+		d := policy.Consider(doorevent.Group{Area: area, Game: game, Events: items})
+
+		if len(d.Expire) > 0 {
+			// Never silent: the door was told these were queued, so a sysop who
+			// wonders why a league went quiet has one line that says it.
+			ids := idsOf(d.Expire)
+			f.log.Warn("dropping door events that waited too long to send",
+				"area", area, "game", game, "count", len(ids), "max_age", policy.MaxAge())
+			if err := f.st.DeleteQueuedDoorEvents(f.ctx, ids); err != nil {
+				f.log.Warn("removing expired door events", "err", err)
+			}
+		}
+		if len(d.Flush) == 0 {
+			continue
+		}
+
+		batch := pickQueued(queued, d.Flush)
+		id, err := f.svc.PublishDoorEvents(f.ctx, area, game, batch)
+		if err != nil {
+			// Left in the queue deliberately: the next tick tries again, and
+			// the age rule is what eventually gives up. Deleting on a failure
+			// would lose a league night to a transient error.
+			f.log.Warn("publishing door events", "area", area, "game", game, "err", err)
+			continue
+		}
+		if err := f.st.DeleteQueuedDoorEvents(f.ctx, idsOf(d.Flush)); err != nil {
+			// The record is already signed and published, so the events are on
+			// the air; failing to forget them would resend them next tick.
+			// Worth an error rather than a warning.
+			f.log.Error("door events were published but not dequeued; they may repeat",
+				"record", id, "err", err)
+		}
+		f.log.Info("door events published", "area", area, "game", game,
+			"events", len(batch), "record", id, "window", policy.Window())
+	}
+}
+
+// policyFor builds the flush policy for one area.
+//
+// Rebuilt per area per tick rather than cached, because the window depends on
+// the area's share and R, and both change while the node runs — a cached policy
+// would keep a window derived from a flood multiplier that has since been
+// measured.
+func (f *federation) policyFor(area string) *doorevent.Policy {
+	cfg := doorevent.Config{Clock: f.clk, MaxAge: f.eventMaxAge}
+	if f.eventWindow != nil {
+		cfg.Window = *f.eventWindow
+	} else {
+		tag := record.AreaTagFor(area)
+		cfg.Window = doorevent.DeriveWindow(f.gov.AreaPacketsPerDay(tag))
+	}
+	return doorevent.New(cfg)
+}
+
+func idsOf(events []doorevent.Event) []int64 {
+	out := make([]int64, 0, len(events))
+	for _, e := range events {
+		out = append(out, e.ID)
+	}
+	return out
+}
+
+// pickQueued selects the store rows the policy chose, preserving its order.
+func pickQueued(queued []store.QueuedDoorEvent, chosen []doorevent.Event) []store.QueuedDoorEvent {
+	byID := make(map[int64]store.QueuedDoorEvent, len(queued))
+	for _, q := range queued {
+		byID[q.ID] = q
+	}
+	out := make([]store.QueuedDoorEvent, 0, len(chosen))
+	for _, e := range chosen {
+		if q, ok := byID[e.ID]; ok {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// refreshAreaShares reloads the per-area caps into the governor (§6.3).
+//
+// A read failure leaves the previous shares in place rather than clearing them.
+// Clearing would UNCAP every area, so a transient database error would turn a
+// budget the sysop set into no budget at all — the one direction this must
+// never fail in.
+func (f *federation) refreshAreaShares() {
+	shares, err := f.st.AreaShares(f.ctx)
+	if err != nil {
+		f.log.Warn("refreshing area airtime shares", "err", err)
+		return
+	}
+	raw := make(map[[4]byte]float64, len(shares))
+	for tag, share := range shares {
+		raw[tag] = share
+	}
+	f.gov.SetAreaShares(raw)
+}
+
 func (f *federation) run(ctx context.Context) {
 	tick := f.clk.After(tickInterval)
 	telemetry := f.clk.After(telemetryInterval)
@@ -296,6 +484,12 @@ func (f *federation) run(ctx context.Context) {
 			if err := f.gstore.Refresh(); err != nil {
 				f.log.Warn("refreshing federated areas", "err", err)
 			}
+			// Shares travel with the area list for the same reason: §6.3 puts
+			// airtime_share on the area row precisely so a sysop can re-tune a
+			// noisy league without a restart, and a cap that needed one is a
+			// cap nobody would reach for while the mesh was actually busy.
+			f.refreshAreaShares()
+			f.flushDoorEvents()
 			if err := f.engine.Tick(); err != nil {
 				f.log.Error("sync engine", "err", err)
 			}

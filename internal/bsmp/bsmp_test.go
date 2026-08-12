@@ -28,16 +28,18 @@ type fakeLink struct {
 	refuseAfter int
 	loseEvery   int
 	classes     []governor.Class
+	areas       [][4]byte
 	err         error
 }
 
 func (f *fakeLink) MTU() int { return f.mtu }
 
 func (f *fakeLink) Send(ctx context.Context, to identity.NodeID, payload []byte) error {
-	return f.SendClass(ctx, to, payload, governor.ClassForum)
+	return f.SendCharged(ctx, to, payload, governor.Charge{Class: governor.ClassForum})
 }
 
-func (f *fakeLink) SendClass(ctx context.Context, to identity.NodeID, payload []byte, class governor.Class) error {
+func (f *fakeLink) SendCharged(ctx context.Context, to identity.NodeID, payload []byte, ch governor.Charge) error {
+	class := ch.Class
 	if f.err != nil {
 		return f.err
 	}
@@ -45,6 +47,7 @@ func (f *fakeLink) SendClass(ctx context.Context, to identity.NodeID, payload []
 		return link.ErrNoBudget
 	}
 	f.classes = append(f.classes, class)
+	f.areas = append(f.areas, ch.Area)
 	// Copy: the outbox reuses its frame buffer's backing array.
 	cp := append([]byte(nil), payload...)
 	f.sent = append(f.sent, link.Datagram{From: f.from, Data: cp})

@@ -30,6 +30,11 @@ type Governor interface {
 	// the last of a node's budget belongs to the control traffic that keeps
 	// the federation converging, not to a file catalog.
 	Allow(n int, class governor.Class) bool
+	// AllowCharge is Allow with an area sub-budget applied (§6.3). withArea
+	// distinguishes traffic that belongs to an area — including the roster,
+	// whose tag is the zero value — from the link's own frames, which belong
+	// to none and must not inherit a cap meant for the roster.
+	AllowCharge(n int, ch governor.Charge, withArea bool) bool
 	// Budget reports the current allowance, for callers deciding whether to
 	// start work at all.
 	Budget() link.Budget
@@ -58,6 +63,8 @@ type InboundLimiter interface {
 type Unmetered struct{}
 
 func (Unmetered) Allow(int, governor.Class) bool { return true }
+
+func (Unmetered) AllowCharge(int, governor.Charge, bool) bool { return true }
 
 func (Unmetered) Budget() link.Budget {
 	return link.Budget{Available: time.Hour, PerDatagram: 0}

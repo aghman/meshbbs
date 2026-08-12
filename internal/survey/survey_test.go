@@ -362,3 +362,99 @@ func TestCensusCountsDirectAndRelayed(t *testing.T) {
 		t.Errorf("SNR range not tracked: %+v", got.Neighbours[0])
 	}
 }
+
+// A mesh that gets busier while we transmit inflates R, and the survey has to
+// say so.
+//
+// This is the failure the closing baseline exists for and the one most likely
+// to happen in practice: ambient traffic climbs through the evening as people
+// get home, every point it climbs by is attributed to rebroadcasts of our own
+// packets, and nothing in a single-baseline run can tell the two apart. The
+// AbortRise guard does not catch it — that trips at 15 points, and half a point
+// against a one-point load is already a doubled answer.
+func TestDriftIsMeasuredAndFlagged(t *testing.T) {
+	clk := clock.NewVirtual(time.Unix(0, 0))
+	node := newFakeNode(clk, 2, 2.0)
+
+	// Ambient climbs steadily for the whole run: +1.5 points between the two
+	// baselines' midpoints.
+	const rate = 6.0 / 2400.0
+	node.ambientF = func(now time.Time) float64 {
+		return 2.0 + rate*now.Sub(time.Unix(0, 0)).Seconds()
+	}
+
+	rep, err := runVirtual(t, node, Config{
+		Baseline:   20 * time.Minute,
+		Load:       20 * time.Minute,
+		Sample:     time.Minute,
+		HopLimits:  []uint32{3},
+		TargetDuty: 1.5,
+	}, clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	drift, ok := rep.Drift()
+	if !ok {
+		t.Fatal("no closing baseline was measured")
+	}
+	if drift <= 0 {
+		t.Fatalf("ambient rose through the run but drift = %+.2f", drift)
+	}
+
+	var flagged bool
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "busier over this run") {
+			flagged = true
+		}
+	}
+	if !flagged {
+		t.Errorf("drift of %+.2f points was not flagged in the notes:\n%v", drift, rep.Notes)
+	}
+
+	// The conservative floor must not exceed the raw difference, or the two
+	// ends of the range have swapped and the report reads as nonsense.
+	raw, _ := rep.DriftRaw()
+	if drift > raw {
+		t.Errorf("drift floor %+.2f exceeds raw drift %+.2f", drift, raw)
+	}
+
+	// And the shareable report must carry it, since that is the artefact a
+	// sysop sends to someone else who cannot see these notes.
+	var sb strings.Builder
+	rep.Write(&sb, DefaultInstanceCount)
+	if !strings.Contains(sb.String(), "closing") {
+		t.Errorf("report does not show the closing baseline:\n%s", sb.String())
+	}
+}
+
+// A steady mesh must NOT be flagged, or the warning becomes noise everyone
+// learns to skip past.
+func TestSteadyMeshIsNotFlaggedForDrift(t *testing.T) {
+	clk := clock.NewVirtual(time.Unix(0, 0))
+	node := newFakeNode(clk, 4, 3.0)
+
+	rep, err := runVirtual(t, node, Config{
+		Baseline:   20 * time.Minute,
+		Load:       20 * time.Minute,
+		Sample:     time.Minute,
+		HopLimits:  []uint32{3},
+		TargetDuty: 1.5,
+	}, clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	drift, ok := rep.Drift()
+	if !ok {
+		t.Fatal("no closing baseline was measured")
+	}
+	if math.Abs(drift) > 0.2 {
+		t.Errorf("steady mesh drifted %+.2f points", drift)
+	}
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "over this run") {
+			t.Errorf("steady mesh was flagged for drift: %q", n)
+		}
+	}
+}

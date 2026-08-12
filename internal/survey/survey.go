@@ -259,10 +259,95 @@ type Report struct {
 	Preset         airtime.Preset
 	Region         string
 	Baseline       Phase
-	Loads          []Phase
-	Estimates      []REstimate
-	Census         Census
-	Notes          []string
+	// BaselineEnd repeats the baseline after the load phases, with the radio
+	// silent again. See Drift.
+	BaselineEnd Phase
+	Loads       []Phase
+	Estimates   []REstimate
+	Census      Census
+	Notes       []string
+}
+
+// Drift is how much the ambient channel moved between the opening and closing
+// baselines, in percentage points.
+//
+// # Why one baseline is not enough
+//
+// R is computed as (rise in channel utilization) ÷ (rise in our own transmit),
+// against a baseline measured once, up to two hours before the last load phase
+// ends. That arithmetic silently assumes the mesh was equally busy the whole
+// time. On a community mesh it is not: traffic climbs through the evening as
+// people get home, and every point it climbs by is attributed to rebroadcasts
+// of OUR packets — inflating R with no signal that anything is wrong. The
+// existing AbortRise guard is 15 points, which is a runaway-channel tripwire,
+// not a drift detector; a 0.5-point drift against a 1-point load is invisible
+// to it and doubles the answer.
+//
+// Measuring the baseline again at the end does not correct for this — the
+// correction would need to know WHEN the drift happened — but it does make it
+// visible, which is the difference between an R with an error bar and an R with
+// a bias nobody can see. Positive means the mesh got busier and R is
+// over-stated.
+//
+// # Why the two baselines are not compared directly
+//
+// The obvious implementation — closing mean minus opening mean — reports drift
+// on a mesh that did not move, and the estimator test proved it: a steady
+// synthetic mesh came back at +3.17 points. The cause is our OWN transmissions.
+// air_util_tx is a rolling average, so when the closing baseline starts the
+// node is still carrying the load phase that just ended, and channel
+// utilization still carries its rebroadcasts. The closing baseline is therefore
+// biased upward by exactly the thing the survey was measuring.
+//
+// Waiting for the average to decay would work and would cost another hour of
+// silence. Subtracting the residual is free and uses a quantity already
+// sampled: each phase knows its own mean transmit, and channel utilization is
+// ambient + transmit × R by the same identity §7.8.1 inverts to get R. So both
+// baselines are reduced to their ambient component before being compared, and
+// what remains is the mesh's own traffic.
+//
+// # Why this returns a floor and not an answer
+//
+// Using the measured R to subtract the residual has feedback in it, and the
+// direction is unhelpful: drift inflates R, an inflated R subtracts more than
+// the residual is worth, and the drift shrinks. Measured on the synthetic mesh,
+// a true ambient rise of 1.50 points reported as 0.31 — the correction ate 80%
+// of the signal it was there to expose.
+//
+// So this is deliberately the CONSERVATIVE end. DriftRaw is the other end, with
+// nothing subtracted, biased upward by however much of our own load average had
+// not yet decayed. The truth is between them, and the report prints both rather
+// than choosing: a warning that fires on the floor cannot cry wolf on a steady
+// mesh, and a reader who sees a wide gap between the two knows the closing
+// baseline started too soon after the load.
+//
+// Correcting this properly means waiting for air_util_tx to decay before
+// sampling — Meshtastic averages it over an hour, so that is an hour of extra
+// silence per run. Worth doing if drift ever turns out to be the thing limiting
+// a measurement; not worth it before that is known.
+func (r *Report) Drift() (float64, bool) {
+	if len(r.BaselineEnd.Samples) == 0 {
+		return 0, false
+	}
+	// Without a confident estimate, assume no multiplication: that subtracts
+	// the least, so an unmeasurable run cannot manufacture a drift warning.
+	rr := 1.0
+	if best, ok := r.Best(); ok {
+		rr = best.R
+	}
+	ambient := func(p Phase) float64 { return p.MeanChannel() - rr*p.MeanTx() }
+	return ambient(r.BaselineEnd) - ambient(r.Baseline), true
+}
+
+// DriftRaw is the uncorrected difference between the two baselines.
+//
+// The upper end of the range Drift floors: it still contains whatever part of
+// our own load the node's rolling transmit average had not yet forgotten.
+func (r *Report) DriftRaw() (float64, bool) {
+	if len(r.BaselineEnd.Samples) == 0 {
+		return 0, false
+	}
+	return r.BaselineEnd.MeanChannel() - r.Baseline.MeanChannel(), true
 }
 
 // Run performs a survey.
@@ -313,6 +398,23 @@ func Run(ctx context.Context, node Node, cfg Config) (*Report, error) {
 		rep.Estimates = append(rep.Estimates, est)
 		progress(cfg, fmt.Sprintf("hop %d: R ≈ %.1f (%.1f–%.1f) — %s",
 			hop, est.R, est.Low, est.High, est.Explain))
+	}
+
+	// The closing baseline runs for as long as the opening one, deliberately: a
+	// shorter phase would have a wider standard error than the drift it is
+	// trying to detect, which would answer the question with a shrug.
+	progress(cfg, fmt.Sprintf("baseline: listening again for %s to measure ambient drift", cfg.Baseline))
+	tail, err := measure(ctx, node, cfg, "baseline (closing)", 0, nil)
+	if err != nil {
+		// The estimates are already computed and are the point of the run, so a
+		// failure here costs the drift check and nothing else. Returning the
+		// report alongside the error lets the caller keep what was measured.
+		return rep, err
+	}
+	rep.BaselineEnd = tail
+	if drift, ok := rep.Drift(); ok {
+		progress(cfg, fmt.Sprintf("baseline: closed at %.2f%% busy, %+.2f points against the opening baseline",
+			tail.MeanChannel(), drift))
 	}
 
 	stop()

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -22,6 +23,25 @@ var ErrSeqConflict = errors.New("a different record already occupies this (origi
 // The caller must have verified the signature first. PutRecord persists the
 // signed bytes verbatim (§6.2.1 rule 1) so later verification never depends on
 // re-encoding.
+// nextLocalSeq advances the arrival counter inside the caller's transaction.
+//
+// In the same transaction as the insert, so a rolled-back put does not burn a
+// number and a committed one cannot be missing it. Gaps would be harmless — the
+// cursor only needs order — but a number handed out twice would not be, and
+// doing this outside the transaction is how that happens.
+func nextLocalSeq(ctx context.Context, tx *sql.Tx) (int64, error) {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE counters SET value = value + 1 WHERE name = 'record_local_seq'`); err != nil {
+		return 0, fmt.Errorf("advance the arrival counter: %w", err)
+	}
+	var n int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT value FROM counters WHERE name = 'record_local_seq'`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("read the arrival counter: %w", err)
+	}
+	return n, nil
+}
+
 func (s *Store) PutRecord(ctx context.Context, r *record.Record) error {
 	id := r.ID()
 	origin := r.Origin
@@ -64,13 +84,22 @@ func (s *Store) PutRecord(ctx context.Context, r *record.Record) error {
 		parent = p[:]
 	}
 
+	// The local arrival number, from a counter that only ever goes up. See
+	// migration 0010: this cannot be the rowid, because deleting the newest
+	// record would make the next insert reuse its number and a door polling on
+	// it would silently miss everything in between.
+	local, err := nextLocalSeq(ctx, tx)
+	if err != nil {
+		return err
+	}
+
 	area := r.Area
 	sig := r.Signature()
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO records (id, origin, seq, ts, type, area, parent, body, signed, sig, received_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO records (id, origin, seq, ts, type, area, parent, body, signed, sig, received_at, local_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id[:], origin[:], r.Seq, r.TS, uint8(r.Type), area[:], parent,
-		r.Body, r.SignedBytes(), sig, s.now()); err != nil {
+		r.Body, r.SignedBytes(), sig, s.now(), local); err != nil {
 		return fmt.Errorf("insert record: %w", err)
 	}
 	return tx.Commit()

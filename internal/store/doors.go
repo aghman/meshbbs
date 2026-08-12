@@ -50,6 +50,12 @@ type Door struct {
 	AnnouncePerHour int
 	StateQuota      int64
 
+	// LeagueArea is the federated door area this door reports game events to
+	// (§9.5), and the mirror image of AnnounceArea: that one must be local,
+	// this one must be federated.
+	LeagueArea    string
+	LeaguePerHour int
+
 	Enabled   bool
 	CreatedAt int64
 }
@@ -154,6 +160,15 @@ func (d Door) MayAnnounce() bool {
 	return d.APILevel >= APIAnnounce && strings.TrimSpace(d.AnnounceArea) != ""
 }
 
+// MayEmitEvents reports whether this door has a league to report to (§9.5).
+//
+// Same shape as MayAnnounce and the same distinction: no league area means the
+// sysop has not chosen one, which the door should be told rather than being
+// rate-limited against nothing.
+func (d Door) MayEmitEvents() bool {
+	return d.APILevel >= APIAnnounce && strings.TrimSpace(d.LeagueArea) != ""
+}
+
 // PutDoor inserts or replaces a door.
 func (s *Store) PutDoor(ctx context.Context, d Door, actor string) error {
 	if err := d.validate(); err != nil {
@@ -178,8 +193,9 @@ func (s *Store) PutDoor(ctx context.Context, d Door, actor string) error {
 			max_concurrent, node_lock, cpu_limit_secs, mem_limit_bytes,
 			wall_clock_secs, required_capability, api_level,
 			announce_area, announce_per_hour, state_quota_bytes,
+			league_area, league_per_hour,
 			enabled, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			path = excluded.path,
 			args = excluded.args,
@@ -196,12 +212,15 @@ func (s *Store) PutDoor(ctx context.Context, d Door, actor string) error {
 			announce_area = excluded.announce_area,
 			announce_per_hour = excluded.announce_per_hour,
 			state_quota_bytes = excluded.state_quota_bytes,
+			league_area = excluded.league_area,
+			league_per_hour = excluded.league_per_hour,
 			enabled = excluded.enabled`,
 		d.Name, d.Path, string(args), d.Cwd, string(env), d.DropfileType,
 		d.MaxConcurrent, boolToInt(d.NodeLock),
 		int64(d.CPULimit/time.Second), d.MemLimit,
 		int64(d.WallClock/time.Second), d.RequiredCapability, d.APILevel,
 		d.AnnounceArea, d.AnnouncePerHour, d.StateQuota,
+		d.LeagueArea, d.LeaguePerHour,
 		boolToInt(d.Enabled), created)
 	if err != nil {
 		return fmt.Errorf("save door: %w", err)
@@ -254,6 +273,7 @@ func (s *Store) queryDoors(ctx context.Context, where string, args ...any) ([]Do
 		       max_concurrent, node_lock, cpu_limit_secs, mem_limit_bytes,
 		       wall_clock_secs, required_capability, api_level,
 		       announce_area, announce_per_hour, state_quota_bytes,
+		       league_area, league_per_hour,
 		       enabled, created_at
 		FROM doors `+where, args...)
 	if err != nil {
@@ -275,6 +295,7 @@ func (s *Store) queryDoors(ctx context.Context, where string, args ...any) ([]Do
 			&d.MaxConcurrent, &nodeLock, &cpuSecs, &memBytes,
 			&wallSecs, &d.RequiredCapability, &d.APILevel,
 			&d.AnnounceArea, &d.AnnouncePerHour, &stateQuotaByte,
+			&d.LeagueArea, &d.LeaguePerHour,
 			&enabled, &d.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan door: %w", err)

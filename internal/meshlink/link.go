@@ -1079,6 +1079,15 @@ func (l *Link) Name() string { return "mesh" }
 // a truncation — it is total, silent, and looks exactly like a quiet mesh.
 const mtuReserve = 8
 
+// MaxPayload is the largest payload that actually crosses the air.
+//
+// Exported because the reserve is a property of the RADIO, not of this link.
+// Anything that puts a frame on the mesh is bound by it, including code that
+// holds no Link at all — `mesh survey` transmits its own load packets and would
+// otherwise have to restate the number, which is how two copies of a
+// hard-measured constant start disagreeing.
+const MaxPayload = meshtastic.MTU - mtuReserve
+
 // MTU is what a payload may actually be.
 //
 // The link adds no header of its own: it reads the frame-type byte the layer
@@ -1086,24 +1095,24 @@ const mtuReserve = 8
 // byte per fountain symbol — about 15 per bundle at K=15 — for no gain the
 // design's byte budget (§12.7) would forgive. The reserve below is not that
 // kind of header; it is room the FIRMWARE needs and does not ask for.
-func (l *Link) MTU() int { return meshtastic.MTU - mtuReserve }
+func (l *Link) MTU() int { return MaxPayload }
 
 // Send transmits one datagram, subject to the governor.
 //
 // The priority class is inferred from the frame type, which is all this layer
 // can see: a control frame is control traffic, and anything else is bulk. The
 // sync engine knows more — whether a bundle is mail or a forum post — and says
-// so through SendClass.
+// so through SendCharged.
 func (l *Link) Send(ctx context.Context, to identity.NodeID, payload []byte) error {
 	class := governor.ClassForum
 	if len(payload) > 0 && payload[0] == FrameControl {
 		class = governor.ClassControl
 	}
-	return l.SendClass(ctx, to, payload, class)
+	return l.SendCharged(ctx, to, payload, governor.Charge{Class: class})
 }
 
-// SendClass transmits one datagram at an explicit priority.
-func (l *Link) SendClass(ctx context.Context, to identity.NodeID, payload []byte, class governor.Class) error {
+// SendCharged transmits one datagram, billed to an explicit class and area.
+func (l *Link) SendCharged(ctx context.Context, to identity.NodeID, payload []byte, ch governor.Charge) error {
 	if len(payload) > l.MTU() {
 		return link.ErrTooLarge
 	}
@@ -1135,7 +1144,10 @@ func (l *Link) SendClass(ctx context.Context, to identity.NodeID, payload []byte
 	if !l.Connected() {
 		return ErrNotConnected
 	}
-	if !gov.Allow(len(payload), class) {
+	// withArea is true here and false in Send: the link's own control frames
+	// belong to no area, and the roster's tag is the zero value, so passing the
+	// zero tag as "no area" would silently apply a roster cap to them.
+	if !gov.AllowCharge(len(payload), ch, true) {
 		l.refused.Add(1)
 		return link.ErrNoBudget
 	}

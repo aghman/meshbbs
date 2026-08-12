@@ -2,9 +2,11 @@ package bbs
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 
 	"github.com/aghman/meshbbs/internal/door"
+	"github.com/aghman/meshbbs/internal/record"
 	"github.com/aghman/meshbbs/internal/store"
 )
 
@@ -109,4 +111,116 @@ func (h *DoorHost) NoticeNeeded(ctx context.Context, d, nick string) (bool, erro
 
 func (h *DoorHost) Audit(ctx context.Context, actor, action, target, detail string) error {
 	return h.svc.store.Audit(ctx, actor, action, target, detail)
+}
+
+// ---------------------------------------------------------------------------
+// Level 3 + a league grant — inter-BBS door events (§9.5)
+// ---------------------------------------------------------------------------
+
+// QueueDoorEvent records one game event for the league's next batch.
+//
+// Three refusals happen here rather than in the door package, and all three are
+// the same shape: the door API knows what a door asked for, and only the BBS
+// knows whether it was possible.
+//
+// The area must be a FEDERATED door league. Not merely federated — a door
+// pointed at a forum would put DOOR_EVENT records where readers cannot
+// interpret them, and GossipStore.Apply refuses those from peers, so accepting
+// them locally would mean originating traffic the network is designed to drop.
+//
+// The target is resolved through ResolveRecipient, the same call SendDM uses,
+// so "bob@pnw" means here exactly what it means there and aliases never travel
+// (§6.1.4.1: the wire carries the node ID).
+//
+// And the event has to encode. Validation runs through the real codec rather
+// than a copy of its rules, because a queued event that cannot become a record
+// is one the flusher would have to drop later — silently, after this call
+// already told the door it was queued.
+func (h *DoorHost) QueueDoorEvent(ctx context.Context, ev door.DoorEventRequest) error {
+	area, err := h.svc.store.GetAnyArea(ctx, ev.Area)
+	if err != nil {
+		return fmt.Errorf("%w: %s", door.ErrNotALeague, ev.Area)
+	}
+	if area.Kind != store.KindDoor {
+		return fmt.Errorf("%w: %s is %s", door.ErrNotALeague, area.Name, area.Kind.Describe())
+	}
+	if !area.Federated {
+		// Not an error the door can fix, and worth saying so: a local-only
+		// league is a sysop decision, and the door has nowhere else to report.
+		return fmt.Errorf("%w: %s is local only, so a league cannot cross boards from it",
+			door.ErrNotALeague, area.Name)
+	}
+
+	queued := store.QueuedDoorEvent{
+		Door: ev.Door, Area: area.Name, Game: ev.Game,
+		Kind: ev.Kind, Actor: ev.Actor, Payload: ev.Payload,
+	}
+	if ev.Target != "" {
+		nick, node, err := h.svc.ResolveRecipient(ctx, ev.Target)
+		if err != nil {
+			return fmt.Errorf("%w: %s", door.ErrUnknownTarget, ev.Target)
+		}
+		queued.Target, queued.TargetNode = nick, node
+	}
+
+	// The codec is the authority on what fits, so ask it rather than restating
+	// its bounds. A door that trips this gets a bad_request naming the field.
+	body := record.DoorEventBody{
+		Game: queued.Game,
+		Events: []record.DoorEvent{{
+			Kind: queued.Kind, Actor: queued.Actor,
+			Target: queued.Target, TargetNode: queued.TargetNode,
+			Payload: queued.Payload,
+		}},
+	}
+	if _, err := record.MarshalDoorEventBody(body); err != nil {
+		return fmt.Errorf("%w: %s", door.ErrInvalidEvent, err)
+	}
+
+	return h.svc.store.QueueDoorEvent(ctx, queued)
+}
+
+// PollDoorEvents reads a league back for a door.
+//
+// The area check is the same one QueueDoorEvent makes, and it is repeated
+// rather than shared with it: reading and reporting are separate operations
+// that could be granted apart one day, and a check written once and reached
+// from two places is the kind of thing that gets moved to the wrong side.
+//
+// Node IDs are rendered rather than raw. A door gets a string it can print and
+// compare, and never has to know how eight bytes become a name (§6.1.4.1 —
+// aliases are local, so the ID is what is portable between boards).
+func (h *DoorHost) PollDoorEvents(ctx context.Context, p door.DoorEventPoll) (door.DoorEventBatch, error) {
+	area, err := h.svc.store.GetAnyArea(ctx, p.Area)
+	if err != nil {
+		return door.DoorEventBatch{}, fmt.Errorf("%w: %s", door.ErrNotALeague, p.Area)
+	}
+	if area.Kind != store.KindDoor {
+		return door.DoorEventBatch{}, fmt.Errorf("%w: %s is %s",
+			door.ErrNotALeague, area.Name, area.Kind.Describe())
+	}
+
+	events, cursor, truncated, err := h.svc.store.DoorEventsSince(ctx, area.Tag, p.Game, p.After, 0)
+	if err != nil {
+		return door.DoorEventBatch{}, err
+	}
+
+	out := door.DoorEventBatch{Cursor: cursor, Truncated: truncated}
+	for _, ev := range events {
+		polled := door.PolledDoorEvent{
+			Origin: ev.Origin.Compact(),
+			At:     ev.At,
+			Kind:   ev.Kind,
+			Actor:  ev.Actor,
+			Target: ev.Target,
+		}
+		if ev.Target != "" {
+			polled.TargetNode = ev.TargetNode.Compact()
+		}
+		if len(ev.Payload) > 0 {
+			polled.Payload = base64.StdEncoding.EncodeToString(ev.Payload)
+		}
+		out.Events = append(out.Events, polled)
+	}
+	return out, nil
 }

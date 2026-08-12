@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aghman/meshbbs/internal/airtime"
+	"github.com/aghman/meshbbs/internal/meshlink"
 	"github.com/aghman/meshbbs/internal/meshtastic"
 	"github.com/aghman/meshbbs/internal/rng"
 	"github.com/aghman/meshbbs/internal/survey"
@@ -63,6 +64,25 @@ metrics update interval to 60s in the Meshtastic app first.`,
 			hopList, err := parseHops(hops)
 			if err != nil {
 				return err
+			}
+
+			// A load packet larger than the radio will actually send does not
+			// fail loudly — it fails in the one way that corrupts the result.
+			//
+			// Above meshlink.MaxPayload the firmware never puts the frame on the
+			// air (see the mtuReserve comment: eight consecutive 233-byte
+			// broadcasts, none of which arrived, nothing reported anywhere).
+			// But air_util_tx still rises, because the radio charges us for the
+			// attempt. So the survey would measure its own transmit time going
+			// up, see no answering rise in channel utilization, and conclude
+			// R ≈ 1 — with a tight confidence interval, because the samples
+			// really are that consistent. A confidently wrong number is worse
+			// than a refusal, and worse than a wide one.
+			if payload < 1 || payload > meshlink.MaxPayload {
+				return fmt.Errorf(
+					"--bytes must be between 1 and %d: above that the firmware silently drops the frame "+
+						"while still charging it to airtime, and the survey would measure R as 1",
+					meshlink.MaxPayload)
 			}
 
 			ctx, cancel := context.WithCancel(cmd.Context())
@@ -147,7 +167,7 @@ metrics update interval to 60s in the Meshtastic app first.`,
 	cmd.Flags().DurationVar(&sample, "sample", time.Minute, "how often to read the node's metrics")
 	cmd.Flags().StringVar(&hops, "hops", "1,3,5", "hop limits to sweep")
 	cmd.Flags().Float64Var(&duty, "duty", 1.0, "percentage of airtime to use during load")
-	cmd.Flags().IntVar(&payload, "bytes", 200, "size of each load packet")
+	cmd.Flags().IntVar(&payload, "bytes", 200, fmt.Sprintf("size of each load packet (1-%d)", meshlink.MaxPayload))
 	cmd.Flags().IntVar(&instances, "instances", survey.DefaultInstanceCount, "instances to divide the budget between")
 	cmd.Flags().StringVar(&out, "out", "", "write the shareable report here")
 	cmd.Flags().BoolVar(&confirm, "yes", false, "confirm that this may transmit")
@@ -165,7 +185,9 @@ func planFor(p airtime.Preset, cfg survey.Config) string {
 	if hopCount == 0 {
 		hopCount = 3
 	}
-	total := cfg.Baseline + time.Duration(hopCount)*cfg.Load
+	// Two baselines: one before the load phases and one after, so ambient drift
+	// over the run is visible rather than folded into R.
+	total := 2*cfg.Baseline + time.Duration(hopCount)*cfg.Load
 
 	one := p.Packet(cfg.PayloadBytes)
 	perPhase := 0
@@ -179,7 +201,7 @@ func planFor(p airtime.Preset, cfg survey.Config) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Survey plan\n")
 	fmt.Fprintf(&sb, "  radio          %s\n", p)
-	fmt.Fprintf(&sb, "  baseline       %s, silent\n", cfg.Baseline)
+	fmt.Fprintf(&sb, "  baseline       %s, silent — twice, before and after\n", cfg.Baseline)
 	fmt.Fprintf(&sb, "  load           %s at each of hop %v\n", cfg.Load, cfg.HopLimits)
 	fmt.Fprintf(&sb, "  total time     %s\n", total)
 	fmt.Fprintf(&sb, "  transmits      about %d packets of %d bytes\n", packets, cfg.PayloadBytes)

@@ -141,7 +141,7 @@ Serves SSH on the configured port. Users connect with:
 			// and silently federates nothing.
 			var fed *federation
 			if e.cfg.Mesh.Enabled {
-				fed, err = startFederation(ctx, e, key, st, log)
+				fed, err = startFederation(ctx, e, key, st, svc, log)
 				if err != nil {
 					return fmt.Errorf("mesh: %w", err)
 				}

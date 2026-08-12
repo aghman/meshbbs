@@ -48,6 +48,10 @@ type GossipStore struct {
 	// The governor prices the two differently (§7.6), and the tag alone does
 	// not say which is which — the tag is a hash of a name.
 	fileAreas map[record.AreaTag]bool
+	// doorAreas is the subset that carries door leagues (§9.5). Same problem,
+	// same shape: the tag says nothing about what the area holds, and both the
+	// governor and Apply have to ask something that knows.
+	doorAreas map[record.AreaTag]bool
 }
 
 // NewGossipStore builds the adapter. The context bounds every query it makes,
@@ -60,6 +64,7 @@ func NewGossipStore(ctx context.Context, st *Store, onError func(error)) (*Gossi
 		st: st, ctx: ctx, onError: onError,
 		keys:      map[identity.NodeID][]byte{},
 		fileAreas: map[record.AreaTag]bool{},
+		doorAreas: map[record.AreaTag]bool{},
 	}
 	if err := g.Refresh(); err != nil {
 		return nil, err
@@ -82,6 +87,7 @@ func (g *GossipStore) Refresh() error {
 
 	var out []record.AreaTag
 	files := map[record.AreaTag]bool{}
+	doors := map[record.AreaTag]bool{}
 	for rows.Next() {
 		var tag []byte
 		var kind string
@@ -102,8 +108,11 @@ func (g *GossipStore) Refresh() error {
 			continue
 		}
 		out = append(out, a)
-		if AreaKind(kind) == KindFile {
+		switch AreaKind(kind) {
+		case KindFile:
 			files[a] = true
+		case KindDoor:
+			doors[a] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -113,6 +122,7 @@ func (g *GossipStore) Refresh() error {
 	g.mu.Lock()
 	g.areas = out
 	g.fileAreas = files
+	g.doorAreas = doors
 	g.mu.Unlock()
 	return nil
 }
@@ -129,6 +139,18 @@ func (g *GossipStore) IsFileArea(tag record.AreaTag) bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.fileAreas[tag]
+}
+
+// IsDoorArea reports whether a federated area carries a door league (§9.5).
+//
+// Exists for the same two callers IsFileArea does: the governor, which prices
+// door events below everything else, and Apply, which has to know that a
+// DOOR_EVENT belongs here and a POST does not. Asking the refreshed cache means
+// a league created while the node is running is classified without a restart.
+func (g *GossipStore) IsDoorArea(tag record.AreaTag) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.doorAreas[tag]
 }
 
 // RosterArea is the area NODE and SUCCESSION records live in.
@@ -213,7 +235,7 @@ func (g *GossipStore) Vector(area record.AreaTag) *vv.Vector {
 	rows, err := g.st.db.QueryContext(g.ctx,
 		`SELECT origin, seq FROM records WHERE area = ?`+filter+` ORDER BY origin, seq`, args...)
 	if err != nil {
-		g.onError(fmt.Errorf("read version vector for area %s: %w", area, err))
+		g.onError(fmt.Errorf("read version vector for area %x: %w", area[:], err))
 		return v
 	}
 	defer rows.Close()
@@ -319,7 +341,7 @@ func (g *GossipStore) Apply(area record.AreaTag, recs []*record.Record) (int, er
 			// A bundle claims one area in its header; a record inside it
 			// claiming another is either a bug or an attempt to write into an
 			// area the sender is not federating.
-			g.onError(fmt.Errorf("record %s claims area %s inside a %s bundle", r.ID(), r.Area, area))
+			g.onError(fmt.Errorf("record %s claims area %x inside a %x bundle", r.ID(), r.Area[:], area[:]))
 			continue
 		}
 		if isNotReplicated(r.Type) {
@@ -329,6 +351,27 @@ func (g *GossipStore) Apply(area record.AreaTag, recs []*record.Record) (int, er
 			// park a record in an area whose vector then stops advancing at it.
 			g.onError(fmt.Errorf("refusing a %s record from %s: mail does not federate",
 				r.Type, r.Origin.Short()))
+			continue
+		}
+		// A league carries door events and nothing else, and door events go
+		// nowhere else. Both halves are enforced because each catches a
+		// different mistake: the first is a peer whose league area shares a name
+		// with somebody's forum — the AreaTag collision migration 0007's header
+		// is about, arriving from the one direction a UNIQUE constraint cannot
+		// see — and the second is a door event addressed to an area whose
+		// readers have no idea what to do with it.
+		//
+		// Refusing rather than storing matters more than it looks. A record
+		// accepted here is a record this node will RELAY, so a single confused
+		// peer would otherwise put its mistake on everyone else's airtime.
+		if isDoorEvent := r.Type == record.TypeDoorEvent; isDoorEvent != g.IsDoorArea(area) {
+			if isDoorEvent {
+				g.onError(fmt.Errorf("refusing a DOOR_EVENT from %s: area %x is not a door league here",
+					r.Origin.Short(), area[:]))
+			} else {
+				g.onError(fmt.Errorf("refusing a %s record from %s: area %x is a door league, which carries only door events",
+					r.Type, r.Origin.Short(), area[:]))
+			}
 			continue
 		}
 		// A NODE record is verified WITHOUT a prior key, because it carries the

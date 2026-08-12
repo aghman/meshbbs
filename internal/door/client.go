@@ -2,6 +2,7 @@ package door
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -190,6 +191,102 @@ func (c *Client) Announce(subject, text string) (string, error) {
 		return "", err
 	}
 	return res.Record, nil
+}
+
+// EmitEvent reports one game event to the door's league (§9.5).
+//
+// Level 3 plus a league grant, which is why it can be refused on a door that
+// announces perfectly well: the sysop chose an announce area and not a league
+// area, and those are separate decisions. Treat a Forbidden here as "this board
+// is not in a league" rather than as a fault.
+//
+// # What the two return values are for, and why neither is a record ID
+//
+// queued says the BBS wrote the event down for a later batch. It is not a
+// promise that anything was transmitted, and there is deliberately no ID to
+// print: the batch goes out when the league area's share of the airtime budget
+// allows, which may be hours away, and nothing has been signed yet. A door that
+// tells a player "sent" here is making a promise the mesh never made.
+//
+// notice is §9.1.1's one-time message, and carries the same obligation PostAs
+// describes — a door putting a player's nick on other people's mesh is the same
+// category of surprise as one posting as them. Show it.
+//
+// The actor is NOT a parameter. It is the session's nick, chosen by the BBS, so
+// that a door cannot attribute a result to somebody who did not play. `to` may
+// name somebody on another board ("bob@pnw"); the BBS resolves it, and the door
+// never learns a node ID it did not already have.
+//
+// The payload's 48-byte ceiling is not restated here. It belongs to the record
+// codec and is enforced on the server, and a bound copied into two places is a
+// bound that will eventually disagree with itself — this client holds no
+// authority the door does not already have.
+func (c *Client) EmitEvent(game string, kind uint8, to string, payload []byte) (queued bool, notice string, err error) {
+	req := request{Op: opEventEmit, Game: game, Kind: kind, To: to}
+	if len(payload) > 0 {
+		// Base64 because the payload is arbitrary bytes and JSON strings are
+		// text. Empty stays empty rather than becoming "": absent and empty are
+		// the same thing on the wire, and sending one for the other would put a
+		// zero-length payload where the door meant none.
+		req.Payload = base64.StdEncoding.EncodeToString(payload)
+	}
+	res, err := c.do(req)
+	if err != nil {
+		return false, "", err
+	}
+	return res.Queued, res.Notice, nil
+}
+
+// PollEvents reads the league back from a cursor (§9.5).
+//
+// # The cursor is the door's to keep
+//
+// after is the Cursor a previous poll returned, and zero means "everything this
+// node still holds". The BBS tracks no per-door read position on purpose: the
+// operation stays stateless, and two invocations of the same door — two players
+// at once — cannot fight over one position. A door that wants to resume where it
+// left off saves the returned Cursor in its own level-2 state.
+//
+// It is a LOCAL ARRIVAL number, not a timestamp and not a sequence. Records
+// arrive out of order on a mesh as a matter of course, so a door that invented
+// its own ordering from At would step past a result repaired an hour late.
+//
+// # Check Truncated
+//
+// It says retention pruned records this cursor had not reached: there is a gap
+// no further polling will fill. A door that ignores it prints an incomplete
+// league table and calls it complete, which is the one thing a league table must
+// not do.
+func (c *Client) PollEvents(game string, after int64) (DoorEventBatch, error) {
+	res, err := c.do(request{Op: opEventPoll, Game: game, After: after})
+	if err != nil {
+		return DoorEventBatch{}, err
+	}
+	// The same type the host side returns, rather than a client-shaped copy of
+	// it: a poll's answer is one thing, and two structs with the same three
+	// fields would be two places to add the fourth.
+	return DoorEventBatch{
+		Cursor:    res.Cursor,
+		Events:    res.Events,
+		Truncated: res.Truncated,
+	}, nil
+}
+
+// PayloadBytes decodes a polled event's door-defined payload.
+//
+// A method rather than a decoded field, because the wire type is shared with the
+// host side and the host has the bytes already — only a door receives the
+// base64. It is the reading half of what EmitEvent encoded, so it lives beside
+// it rather than with the wire types.
+func (e PolledDoorEvent) PayloadBytes() ([]byte, error) {
+	if e.Payload == "" {
+		return nil, nil
+	}
+	b, err := base64.StdEncoding.DecodeString(e.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("event payload is not base64: %w", err)
+	}
+	return b, nil
 }
 
 // PostAs posts as the player (level 4).

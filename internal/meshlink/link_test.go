@@ -566,7 +566,9 @@ func TestNoGovernorMeansNoTransmission(t *testing.T) {
 type refusing struct{}
 
 func (refusing) Allow(int, governor.Class) bool { return false }
-func (refusing) Budget() link.Budget            { return link.Budget{Backpressure: true} }
+
+func (refusing) AllowCharge(int, governor.Charge, bool) bool { return false }
+func (refusing) Budget() link.Budget                         { return link.Budget{Backpressure: true} }
 
 func TestGovernorRefusalIsReportedAndCounted(t *testing.T) {
 	m := newFakeMesh(t)

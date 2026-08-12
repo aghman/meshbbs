@@ -1,0 +1,39 @@
+-- Per-area airtime shares (§6.3).
+--
+-- ---------------------------------------------------------------------------
+-- WHY A COLUMN AND NOT A CONFIG KEY
+-- ---------------------------------------------------------------------------
+--
+-- §11.5 lists airtime_share under the per-area settings, which is where it has
+-- to live: areas are created and re-tuned by a sysop while the BBS is running,
+-- and a share that needed a config edit and a restart would be a share nobody
+-- adjusts. The governor re-reads these from the federation loop, alongside the
+-- federated-area list it already refreshes.
+--
+-- ---------------------------------------------------------------------------
+-- WHY THE CHECK IS ONLY A RANGE
+-- ---------------------------------------------------------------------------
+--
+-- The rule a sysop cares about is that the shares SUM to no more than one — an
+-- instance cannot give away more of its budget than it has. That is a
+-- statement about the whole table and SQLite cannot express it in a column
+-- CHECK, so it lives in SetAreaShare, which is the one path that writes here.
+--
+-- It is a refusal there, not a warning: an instance that has promised away 130%
+-- of its budget has not made a throughput decision, it has made one it cannot
+-- keep, and it would surface weeks later as areas mysteriously starving each
+-- other.
+--
+-- What the rule checks is the CONFIGURED fractions rather than the buckets they
+-- produce. An area's bucket is floored at one full packet however small its
+-- share, because a bucket that cannot hold a packet is an area switched off
+-- rather than slowed — so the running shares never exactly sum, and claiming
+-- otherwise would be a precision this does not have.
+--
+-- 0 means "no cap": draw from the general pool, bounded only by the priority
+-- class. That is the default because §6.3's opt-in principle cuts both ways —
+-- a sysop who has not thought about shares should get the behaviour they had
+-- before this column existed.
+
+ALTER TABLE areas ADD COLUMN airtime_share REAL NOT NULL DEFAULT 0
+    CHECK (airtime_share >= 0 AND airtime_share <= 1);

@@ -157,6 +157,8 @@ func specFor(d store.Door) (door.Spec, error) {
 		Grant: door.Grant{
 			Level:           d.APILevel,
 			AnnounceArea:    d.AnnounceArea,
+			LeagueArea:      d.LeagueArea,
+			LeaguePerHour:   d.LeaguePerHour,
 			AnnouncePerHour: d.AnnouncePerHour,
 			StateQuota:      d.StateQuota,
 		},

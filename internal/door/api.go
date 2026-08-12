@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -70,7 +71,79 @@ type Host interface {
 
 	// Audit records an action taken under level 4.
 	Audit(ctx context.Context, actor, action, target, detail string) error
+
+	// QueueDoorEvent records one game event for the league's next batch (§9.5).
+	//
+	// One method rather than three — "is this a league", "who is bob@pnw", and
+	// "write it down" — because this interface IS the authority a door has, and
+	// three entries would widen that list to say a door may interrogate the
+	// area table and resolve arbitrary aliases. It may do neither. It may
+	// report an event, and the host decides whether that was possible.
+	//
+	// The typed errors below are how the caller tells a refusal from a fault
+	// without parsing prose.
+	QueueDoorEvent(ctx context.Context, ev DoorEventRequest) error
+
+	// PollDoorEvents reads the league back, in the order records reached this
+	// node. Paired with QueueDoorEvent rather than separate, because a league a
+	// door may report to is one it may read: the grant is the league, not a
+	// direction.
+	PollDoorEvents(ctx context.Context, p DoorEventPoll) (DoorEventBatch, error)
 }
+
+// DoorEventPoll asks for everything on a league since a cursor.
+type DoorEventPoll struct {
+	Door  string
+	Area  string
+	Game  string
+	After int64
+}
+
+// DoorEventBatch is what a poll returned.
+type DoorEventBatch struct {
+	Cursor int64
+	Events []PolledDoorEvent
+	// Truncated says retention pruned records this cursor had not reached, so
+	// there is a gap no further polling will fill.
+	Truncated bool
+}
+
+// PolledDoorEvent is one event as a door sees it.
+type PolledDoorEvent struct {
+	Origin     string `json:"origin"`
+	At         int64  `json:"at"`
+	Kind       uint8  `json:"kind"`
+	Actor      string `json:"actor"`
+	Target     string `json:"target,omitempty"`
+	TargetNode string `json:"target_node,omitempty"`
+	Payload    string `json:"payload,omitempty"`
+}
+
+// DoorEventRequest is one event a door wants on its league (§9.5).
+type DoorEventRequest struct {
+	Door  string
+	Area  string
+	Game  string
+	Kind  uint8
+	Actor string
+	// Target may be empty, or a nick, or nick@node in any form
+	// ResolveRecipient accepts. The host resolves it; the door never learns a
+	// node ID it did not already have.
+	Target  string
+	Payload []byte
+}
+
+// Errors a host returns from QueueDoorEvent, so the API can answer with the
+// right code rather than turning every refusal into an internal error.
+var (
+	// ErrNotALeague means the configured area is not a federated door area.
+	ErrNotALeague = errors.New("not a federated door league")
+	// ErrUnknownTarget means the target could not be resolved to a user.
+	ErrUnknownTarget = errors.New("unknown target")
+	// ErrInvalidEvent means the event would not encode (record.DoorEvent's
+	// bounds). A door's mistake, not the BBS's.
+	ErrInvalidEvent = errors.New("invalid door event")
+)
 
 // Grant is the per-door half of §9.1.1: what the sysop allowed.
 type Grant struct {
@@ -81,6 +154,17 @@ type Grant struct {
 	AnnounceArea string
 	// AnnouncePerHour bounds level 3.
 	AnnouncePerHour int
+	// LeagueArea is the federated door area this door reports game events to
+	// (§9.5). Empty means it may not emit, which is a different thing from a
+	// rate limit of zero — the same distinction AnnounceArea draws.
+	//
+	// The mirror image of AnnounceArea, deliberately: announce requires a
+	// LOCAL area because a door must not spend the mesh's airtime on its own
+	// say-so, and this requires a FEDERATED one because spending it is the
+	// feature. §11.4's asymmetry, visible in the grant.
+	LeagueArea string
+	// LeaguePerHour bounds how often this door may emit.
+	LeaguePerHour int
 	// StateQuota bounds level 2, in bytes across the whole door.
 	StateQuota int64
 }
@@ -311,6 +395,8 @@ const (
 	opStateDelete = "state.delete"
 	opStateKeys   = "state.keys"
 	opAnnounce    = "announce"
+	opEventEmit   = "event.emit"
+	opEventPoll   = "event.poll"
 	opUserPost    = "user.post"
 	opUserDM      = "user.dm"
 )
@@ -324,8 +410,13 @@ var levelFor = map[string]int{
 	opStateDelete: 2,
 	opStateKeys:   2,
 	opAnnounce:    3,
-	opUserPost:    4,
-	opUserDM:      4,
+	// Level 3 plus a league grant, not a level of its own. Levels nest and 4
+	// is act_as_user; a fifth above impersonation would claim that reporting a
+	// game result is more authority than posting as the user.
+	opEventEmit: 3,
+	opEventPoll: 3,
+	opUserPost:  4,
+	opUserDM:    4,
 }
 
 func (a *apiServer) dispatch(req request) response {
@@ -357,6 +448,10 @@ func (a *apiServer) dispatch(req request) response {
 		return a.stateKeys(ctx, req)
 	case opAnnounce:
 		return a.announce(ctx, req)
+	case opEventEmit:
+		return a.eventEmit(ctx, req)
+	case opEventPoll:
+		return a.eventPoll(ctx, req)
 	case opUserPost:
 		return a.userPost(ctx, req)
 	case opUserDM:
@@ -498,6 +593,139 @@ func (a *apiServer) announce(ctx context.Context, req request) response {
 }
 
 // ---------------------------------------------------------------------------
+// Level 3 + a league grant — inter-BBS door events (§9.5)
+// ---------------------------------------------------------------------------
+
+// eventEmit queues one game event for the door's league.
+//
+// # What it does not do
+//
+// It does not name the actor. There is no actor field on the request, for the
+// same reason state.get has no nick field: if the actor came from the door, a
+// door could attribute a kill to anybody on the board. The actor is the
+// session's nick, always.
+//
+// It does not transmit, and it does not claim to. The response says "queued",
+// because that is what happened — the batch goes out when the league area's
+// share of the budget allows, which may be hours. §6.5 spent a paragraph on
+// why a false promise is worse than a spinner, and returning a record ID here
+// would be exactly that: a door would print an id for something that has not
+// been signed yet.
+//
+// The TARGET is different from the actor and has to be. A league exists so
+// that "alice slew bob@pnw" can cross boards, so the door must be able to name
+// somebody who is not here. That is a CLAIM by this node, not a verified fact,
+// and §9.5 already says integrity against your own league members needs
+// game-level design rather than a signature layer.
+func (a *apiServer) eventEmit(ctx context.Context, req request) response {
+	area := strings.TrimSpace(a.spec.Grant.LeagueArea)
+	if area == "" {
+		return response{ID: req.ID, OK: false, Code: codeForbidden,
+			Error: "this door has no league area; the sysop has not chosen one"}
+	}
+	if a.sess.Nick == "" {
+		// A guest has no name to attribute a result to, and inventing one
+		// would put an unaccountable actor on other people's mesh.
+		return response{ID: req.ID, OK: false, Code: codeForbidden,
+			Error: "this session has no account, so there is nobody to report a result for"}
+	}
+	if strings.TrimSpace(req.Game) == "" {
+		return badRequest(req, errors.New("an event needs a game name"))
+	}
+
+	// Base64 in JSON because the payload is arbitrary bytes and JSON strings
+	// are text. Decoded here so an unencodable payload is the door's mistake
+	// rather than a mystery 48 bytes further down.
+	var payload []byte
+	if req.Payload != "" {
+		var err error
+		payload, err = base64.StdEncoding.DecodeString(req.Payload)
+		if err != nil {
+			return badRequest(req, fmt.Errorf("payload is not base64: %w", err))
+		}
+	}
+
+	if !a.mgr.allowLeague(a.spec.Name, a.spec.Grant.LeaguePerHour) {
+		return response{ID: req.ID, OK: false, Code: codeRateLimit,
+			Error: fmt.Sprintf("this door may report %d events an hour",
+				a.spec.Grant.LeaguePerHour)}
+	}
+
+	err := a.host.QueueDoorEvent(ctx, DoorEventRequest{
+		Door:    a.spec.Name,
+		Area:    area,
+		Game:    strings.TrimSpace(req.Game),
+		Kind:    req.Kind,
+		Actor:   a.sess.Nick,
+		Target:  strings.TrimSpace(req.To),
+		Payload: payload,
+	})
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrNotALeague):
+		return response{ID: req.ID, OK: false, Code: codeForbidden, Error: err.Error()}
+	case errors.Is(err, ErrUnknownTarget), errors.Is(err, ErrInvalidEvent):
+		return badRequest(req, err)
+	case isQueueFull(err):
+		return response{ID: req.ID, OK: false, Code: codeQuota, Error: err.Error()}
+	default:
+		return internal(req, err)
+	}
+
+	// The same one-time notice level 4 uses. A door putting a player's nick on
+	// other people's mesh is the same category of surprise as one posting as
+	// them, and the machinery for saying so once already exists.
+	return response{ID: req.ID, OK: true, Queued: true, Notice: a.noticeFor(ctx)}
+}
+
+// eventPoll reads the league back for a door.
+//
+// # Why a door polls rather than being called
+//
+// Doors are not servers. A door process exists only while somebody is playing,
+// so there is nothing to deliver to between invocations — an event that crosses
+// the mesh at 3am arrives at a board where the game is not running. The log is
+// the delivery mechanism, and a door drains it on next launch.
+//
+// The cursor is the door's to keep, in its own level-2 state. The BBS does not
+// track per-door read positions, which keeps this operation stateless and means
+// two invocations of the same door cannot fight over one position.
+func (a *apiServer) eventPoll(ctx context.Context, req request) response {
+	area := strings.TrimSpace(a.spec.Grant.LeagueArea)
+	if area == "" {
+		return response{ID: req.ID, OK: false, Code: codeForbidden,
+			Error: "this door has no league area; the sysop has not chosen one"}
+	}
+	if req.After < 0 {
+		return badRequest(req, errors.New("a cursor cannot be negative"))
+	}
+
+	batch, err := a.host.PollDoorEvents(ctx, DoorEventPoll{
+		Door:  a.spec.Name,
+		Area:  area,
+		Game:  strings.TrimSpace(req.Game),
+		After: req.After,
+	})
+	if err != nil {
+		if errors.Is(err, ErrNotALeague) {
+			return response{ID: req.ID, OK: false, Code: codeForbidden, Error: err.Error()}
+		}
+		return internal(req, err)
+	}
+	return response{
+		ID: req.ID, OK: true,
+		Cursor: batch.Cursor, Events: batch.Events, Truncated: batch.Truncated,
+	}
+}
+
+// isQueueFull matches the store's queue ceiling on its message, the same way
+// isQuota matches the state allowance: the rule is the store's and this package
+// does not get to redefine it.
+func isQueueFull(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "more queued events than the mesh can carry")
+}
+
+// ---------------------------------------------------------------------------
 // Level 4 — act as the user
 // ---------------------------------------------------------------------------
 
@@ -603,6 +831,19 @@ func (a *apiServer) sessionInfo() SessionInfo {
 // and a server is per invocation: a limit that reset every time a door was
 // relaunched would be no limit at all for a door that announces on startup.
 func (m *Manager) allowAnnounce(door string, perHour int) bool {
+	return m.allowPerHour(m.announces, door, perHour)
+}
+
+// allowLeague applies the per-door league emit rate limit, on its own bucket.
+//
+// Separate from announces rather than shared: they are separate grants with
+// separate limits, and one budget for both would let a chatty announcer
+// silence a league or the reverse.
+func (m *Manager) allowLeague(door string, perHour int) bool {
+	return m.allowPerHour(m.leagueEmits, door, perHour)
+}
+
+func (m *Manager) allowPerHour(buckets map[string][]time.Time, door string, perHour int) bool {
 	if perHour <= 0 {
 		return false
 	}
@@ -611,17 +852,17 @@ func (m *Manager) allowAnnounce(door string, perHour int) bool {
 
 	now := m.clock.Now()
 	cutoff := now.Add(-time.Hour)
-	kept := m.announces[door][:0]
-	for _, t := range m.announces[door] {
+	kept := buckets[door][:0]
+	for _, t := range buckets[door] {
 		if t.After(cutoff) {
 			kept = append(kept, t)
 		}
 	}
 	if len(kept) >= perHour {
-		m.announces[door] = kept
+		buckets[door] = kept
 		return false
 	}
-	m.announces[door] = append(kept, now)
+	buckets[door] = append(kept, now)
 	return true
 }
 
@@ -642,6 +883,16 @@ type request struct {
 	To      string `json:"to,omitempty"`
 	Subject string `json:"subject,omitempty"`
 	Text    string `json:"text,omitempty"`
+
+	// Game and Kind belong to event.emit (§9.5). Payload is base64: it is
+	// arbitrary door-defined bytes and JSON strings are text.
+	Game    string `json:"game,omitempty"`
+	Kind    uint8  `json:"kind,omitempty"`
+	Payload string `json:"payload,omitempty"`
+
+	// After is event.poll's cursor: the last local arrival number this door
+	// has already seen. Zero starts from the beginning of what is held.
+	After int64 `json:"after,omitempty"`
 }
 
 type response struct {
@@ -659,6 +910,19 @@ type response struct {
 	Found   bool         `json:"found,omitempty"`
 	Keys    []string     `json:"keys,omitempty"`
 	Record  string       `json:"record,omitempty"`
+
+	// Queued says an event was recorded for a later batch. There is
+	// deliberately no record ID to go with it and no estimate of when: nothing
+	// has been signed yet, and §6.5 is explicit that a promise nothing will
+	// keep is worse than saying less.
+	Queued bool `json:"queued,omitempty"`
+
+	// event.poll's answer. Cursor is what to pass as `after` next time.
+	Cursor int64             `json:"cursor,omitempty"`
+	Events []PolledDoorEvent `json:"events,omitempty"`
+	// Truncated says events were pruned before this door read them. A door that
+	// ignores it shows an incomplete league table and calls it complete.
+	Truncated bool `json:"truncated,omitempty"`
 
 	// Notice is the §9.1.1 one-time message the door must show the user.
 	Notice string `json:"notice,omitempty"`
