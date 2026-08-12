@@ -277,3 +277,118 @@ func (s *Store) DoorEventsSince(ctx context.Context, area record.AreaTag, game s
 	}
 	return events, cursor, truncated, rows.Err()
 }
+
+// LeagueSummary is one door area as a sysop needs to see it.
+type LeagueSummary struct {
+	Area      string
+	Federated bool
+	// Games are the game names that have actually arrived, whether or not
+	// anything here plays them.
+	Games []string
+	// Received counts DOOR_EVENT records held for this area, and Events the
+	// events inside them.
+	Received int
+	Events   int
+	// Waiting counts events queued locally that have not been sent.
+	Waiting int
+	// Doors are the installed doors pointed at this league. Empty means this
+	// node is carrying a league it does not play.
+	Doors []string
+}
+
+// Leagues summarises every door area on this node.
+//
+// Includes leagues with no door installed, deliberately: that is the case a
+// sysop most needs to see, because carrying a league costs airtime — this node
+// serves those records to peers on request — and nothing else would ever
+// mention it.
+func (s *Store) Leagues(ctx context.Context) ([]LeagueSummary, error) {
+	areas, err := s.ListDoorAreas(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]LeagueSummary, 0, len(areas))
+	for _, a := range areas {
+		sum := LeagueSummary{Area: a.Name, Federated: a.Federated}
+
+		records, _, _, err := s.DoorEventsSince(ctx, a.Tag, "", 0, 100000)
+		if err != nil {
+			return nil, err
+		}
+		seenGame := map[string]bool{}
+		seenCursor := map[int64]bool{}
+		for _, ev := range records {
+			sum.Events++
+			seenCursor[ev.Cursor] = true
+		}
+		sum.Received = len(seenCursor)
+
+		// The game names come from the bodies rather than from any table: a
+		// game is whatever a door called it, and nothing here registers one.
+		games, err := s.doorGamesIn(ctx, a.Tag)
+		if err != nil {
+			return nil, err
+		}
+		for _, g := range games {
+			if !seenGame[g] {
+				seenGame[g] = true
+				sum.Games = append(sum.Games, g)
+			}
+		}
+
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM door_event_queue WHERE area = ?`, a.Name).Scan(&sum.Waiting); err != nil {
+			return nil, fmt.Errorf("count waiting door events: %w", err)
+		}
+
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT name FROM doors WHERE league_area = ? ORDER BY name`, a.Name)
+		if err != nil {
+			return nil, fmt.Errorf("find doors for league %s: %w", a.Name, err)
+		}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			sum.Doors = append(sum.Doors, name)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
+		out = append(out, sum)
+	}
+	return out, nil
+}
+
+// doorGamesIn lists the distinct game names held in one league area.
+func (s *Store) doorGamesIn(ctx context.Context, area record.AreaTag) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT body FROM records WHERE area = ? AND type = ? ORDER BY local_seq`,
+		area[:], int(record.TypeDoorEvent))
+	if err != nil {
+		return nil, fmt.Errorf("read door event games: %w", err)
+	}
+	defer rows.Close()
+
+	seen := map[string]bool{}
+	var out []string
+	for rows.Next() {
+		var body []byte
+		if err := rows.Scan(&body); err != nil {
+			return nil, err
+		}
+		decoded, err := record.UnmarshalDoorEventBody(body)
+		if err != nil {
+			continue
+		}
+		if !seen[decoded.Game] {
+			seen[decoded.Game] = true
+			out = append(out, decoded.Game)
+		}
+	}
+	return out, rows.Err()
+}

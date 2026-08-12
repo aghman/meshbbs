@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/aghman/meshbbs/internal/clock"
 	"github.com/aghman/meshbbs/internal/identity"
@@ -219,5 +220,110 @@ func TestPollFiltersByGame(t *testing.T) {
 	}
 	if len(all) != 3 {
 		t.Errorf("polling for every game returned %d, want 3", len(all))
+	}
+}
+
+// A league event for a game nothing here plays is KEPT.
+//
+// This is the receive-side decision, and it is deliberate rather than
+// accidental. Two reasons to hold a record no local door can interpret: a door
+// installed tomorrow should be able to catch up, and an instance that carries a
+// league it does not play is how a multi-hop league reaches boards that cannot
+// hear each other — the FTN pass-through pattern.
+//
+// Nothing about it is free, which is why the cost is surfaced rather than
+// hidden: a record held is a record served to peers that ask.
+func TestEventsForAnUnplayedGameAreKept(t *testing.T) {
+	st, ctx, area := leagueStore(t)
+
+	// No door is installed at all, let alone one that knows "tw2002".
+	putDoorEventGame(t, st, ctx, 51, 1, area, "tw2002", "someone")
+
+	events, cursor, _, err := st.DoorEventsSince(ctx, area, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("an event for an unplayed game was discarded: %+v", events)
+	}
+	if cursor == 0 {
+		t.Error("no cursor was returned for a kept event")
+	}
+
+	// And a door installed later sees it, which is the point of keeping it.
+	later, _, _, err := st.DoorEventsSince(ctx, area, "tw2002", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(later) != 1 {
+		t.Errorf("a door arriving later could not catch up: %+v", later)
+	}
+}
+
+// The summary must show a league nobody plays, because that is the case a sysop
+// would otherwise never learn about.
+func TestLeaguesReportsCarriedButUnplayedLeagues(t *testing.T) {
+	st, ctx, area := leagueStore(t)
+	putDoorEventGame(t, st, ctx, 52, 1, area, "tw2002", "alice")
+	putDoorEventGame(t, st, ctx, 52, 2, area, "lord", "bob")
+
+	leagues, err := st.Leagues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leagues) != 1 {
+		t.Fatalf("summarised %d leagues", len(leagues))
+	}
+	l := leagues[0]
+	if l.Area != "lordleague" || !l.Federated {
+		t.Errorf("summary is %+v", l)
+	}
+	if len(l.Doors) != 0 {
+		t.Errorf("found doors %v for a league with none installed", l.Doors)
+	}
+	if l.Received != 2 || l.Events != 2 {
+		t.Errorf("received %d events in %d records, want 2 and 2", l.Events, l.Received)
+	}
+	// Both games are named, discovered from the record bodies rather than from
+	// any registry — nothing registers a game.
+	if len(l.Games) != 2 {
+		t.Errorf("games = %v, want both", l.Games)
+	}
+
+	// Once a door points at it, the league is no longer unplayed.
+	if err := st.PutDoor(ctx, Door{
+		Name: "lord", Path: "/bin/echo", Cwd: t.TempDir(), APILevel: 3,
+		LeagueArea: "lordleague", LeaguePerHour: 6, Enabled: true,
+		WallClock: time.Hour, DropfileType: "none",
+	}, "sysop"); err != nil {
+		t.Fatal(err)
+	}
+	leagues, err = st.Leagues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leagues[0].Doors) != 1 || leagues[0].Doors[0] != "lord" {
+		t.Errorf("doors = %v, want [lord]", leagues[0].Doors)
+	}
+}
+
+func putDoorEventGame(t *testing.T, st *Store, ctx context.Context, seed, seq uint64, area record.AreaTag, game, actor string) {
+	t.Helper()
+	key, err := identity.GenerateNodeKey(rng.TestSecret(seed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutNode(ctx, Node{ID: key.ID(), PublicKey: key.Public}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := record.NewDoorEventRecord(key, seq, 1_765_000_000, area, record.DoorEventBody{
+		Game:   game,
+		Events: []record.DoorEvent{{Kind: 1, Actor: actor}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutRecord(ctx, r); err != nil {
+		t.Fatal(err)
 	}
 }
