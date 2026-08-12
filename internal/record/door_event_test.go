@@ -249,7 +249,7 @@ func TestDoorEventFitsTheBudget(t *testing.T) {
 	together := DoorEventSize(batched)
 	if ratio := float64(separate) / float64(together); ratio < 3.0 {
 		t.Errorf("batching six events saves only %.1fx (%d bytes vs %d); "+
-			"§9.5's case for batching inside the record rests on about 3.3x",
+			"§9.5's case for batching inside the record rests on about 3.4x",
 			ratio, separate, together)
 	}
 }

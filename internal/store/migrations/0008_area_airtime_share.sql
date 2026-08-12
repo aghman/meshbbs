@@ -19,11 +19,16 @@
 -- statement about the whole table and SQLite cannot express it in a column
 -- CHECK, so it lives in SetAreaShare, which is the one path that writes here.
 --
--- It is also deliberately a warning rather than a hard constraint. An area's
--- bucket is floored at one full packet however small its share, because a
--- bucket that cannot hold a packet is an area that is switched off rather than
--- slowed — so the shares never exactly sum anyway, and a hard invariant would
--- be claiming a precision this does not have.
+-- It is a refusal there, not a warning: an instance that has promised away 130%
+-- of its budget has not made a throughput decision, it has made one it cannot
+-- keep, and it would surface weeks later as areas mysteriously starving each
+-- other.
+--
+-- What the rule checks is the CONFIGURED fractions rather than the buckets they
+-- produce. An area's bucket is floored at one full packet however small its
+-- share, because a bucket that cannot hold a packet is an area switched off
+-- rather than slowed — so the running shares never exactly sum, and claiming
+-- otherwise would be a precision this does not have.
 --
 -- 0 means "no cap": draw from the general pool, bounded only by the priority
 -- class. That is the default because §6.3's opt-in principle cuts both ways —

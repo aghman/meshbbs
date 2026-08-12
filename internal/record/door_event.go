@@ -32,7 +32,7 @@ const MaxDoorGameLen = 16
 //	the same six in one record:            197 bytes
 //
 // Eight is the cap because it keeps the worst possible body under a kilobyte
-// while capturing nearly all of that 3.3x. A ninth event saves proportionally
+// while capturing nearly all of that 3.4x. A ninth event saves proportionally
 // almost nothing and costs a bigger worst case on a link where the worst case
 // is what the governor must budget for.
 const MaxDoorEventsPerRecord = 8

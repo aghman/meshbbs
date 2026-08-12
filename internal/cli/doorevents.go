@@ -56,7 +56,7 @@ created the area and federated it.`,
 			defer st.Close()
 
 			if len(args) == 1 {
-				return listLeagueEvents(ctx, cmd, st, args[0], game, limit)
+				return listLeagueEvents(ctx, cmd, st, e.clock.Now(), args[0], game, limit)
 			}
 			return summariseLeagues(ctx, cmd, st)
 		},
@@ -114,7 +114,7 @@ func summariseLeagues(ctx context.Context, cmd *cobra.Command, st *store.Store) 
 	return nil
 }
 
-func listLeagueEvents(ctx context.Context, cmd *cobra.Command, st *store.Store, area, game string, limit int) error {
+func listLeagueEvents(ctx context.Context, cmd *cobra.Command, st *store.Store, now time.Time, area, game string, limit int) error {
 	a, err := st.GetDoorArea(ctx, area)
 	if err != nil {
 		return err
@@ -135,7 +135,7 @@ func listLeagueEvents(ctx context.Context, cmd *cobra.Command, st *store.Store, 
 		fmt.Fprintln(w, "WHEN\tFROM\tEVENT")
 		for _, ev := range events {
 			fmt.Fprintf(w, "%s\t%s\t%s\n",
-				sinceWhen(ev.At), ev.Origin.Short(), renderDoorEvent(ev))
+				sinceWhen(now, ev.At), ev.Origin.Short(), renderDoorEvent(ev))
 		}
 		if err := w.Flush(); err != nil {
 			return err
@@ -173,13 +173,19 @@ func renderDoorEvent(ev store.DeliveredDoorEvent) string {
 	return sb.String()
 }
 
-// sinceWhen renders an advisory timestamp as an age.
+// sinceWhen renders an advisory timestamp as an age, against an injected now.
 //
 // An age rather than a date because §6.2.1 makes a record's ts advisory: it was
 // written by another node's clock, and rendering it as a precise local time
 // implies an accuracy the protocol does not claim.
-func sinceWhen(ts int64) string {
-	d := time.Since(time.Unix(ts, 0))
+//
+// `now` is passed rather than read from the wall clock because §12.1 keeps
+// time.Now() out of domain code — and this is not pedantry here: a record's ts
+// comes from ANOTHER node, so "1h ago" is already the difference between two
+// clocks that were never synchronised. Sourcing our half of that subtraction
+// from the injected clock is what makes the rendering reproducible in a test.
+func sinceWhen(now time.Time, ts int64) string {
+	d := now.Sub(time.Unix(ts, 0))
 	switch {
 	case d < 0:
 		return "just now"

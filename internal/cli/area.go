@@ -248,9 +248,10 @@ The shares of federated areas must add up to no more than 1. Local-only areas
 do not count, because they spend no mesh airtime.
 
 The figure to check afterwards is not the fraction — it is what the fraction
-buys, which "meshbbs mesh status" prints in packets per day. At fifty instances
-a tenth of a share is about one packet a day, and that is the number that
-decides whether a league is playable.`,
+buys, which "meshbbs serve" prints per area at startup, in packets per day. At
+fifty instances a tenth of a share is about one packet a day, and that is the
+number that decides whether a league is playable. It scales with R, which is
+still a guess (§7.8).`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			share, err := strconv.ParseFloat(args[1], 64)
