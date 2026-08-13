@@ -42,22 +42,48 @@ type Exporter interface {
 // vectors say which areas they have, and an area absent from them is treated as
 // empty rather than skipped — a peer who has just created the area needs
 // everything, and that is indistinguishable from a peer who has never seen it.
-func Export(src Exporter, dict *bundle.Dictionary, self identity.NodeID, now uint32, reply *Carrier) (*Carrier, error) {
+// ExportOptions is what a sysop chose about this exchange.
+type ExportOptions struct {
+	Self identity.NodeID
+	Now  uint32
+	// Reply is a carrier that arrived; nil for the outward leg.
+	Reply *Carrier
+	// Areas restricts the exchange. Empty means every federated area.
+	//
+	// A sysop may want to carry the tech forum to a neighbouring board and not
+	// the swap board, and there is no other control for that: federation is a
+	// per-area decision about the MESH, and a stick is a different medium going
+	// to a different place.
+	Areas []record.AreaTag
+	// Blobs are the file bodies to carry, from BlobsToCarry.
+	Blobs []BlobRef
+}
+
+func Export(src Exporter, dict *bundle.Dictionary, opt ExportOptions) (*Carrier, error) {
 	c := &Carrier{
-		Origin:    self,
-		CreatedAt: now,
+		Origin:    opt.Self,
+		CreatedAt: opt.Now,
 		Vectors:   map[record.AreaTag]*vv.Vector{},
+		Blobs:     opt.Blobs,
+	}
+
+	want := map[record.AreaTag]bool{}
+	for _, a := range opt.Areas {
+		want[a] = true
 	}
 
 	for _, area := range src.Areas() {
+		if len(want) > 0 && !want[area] {
+			continue
+		}
 		mine := src.Vector(area)
 		c.Vectors[area] = mine
 
 		// What the other side lacks. An absent peer vector is an empty one,
 		// which asks for everything.
 		theirs := vv.New()
-		if reply != nil {
-			if v, ok := reply.Vectors[area]; ok {
+		if opt.Reply != nil {
+			if v, ok := opt.Reply.Vectors[area]; ok {
 				theirs = v
 			}
 		}

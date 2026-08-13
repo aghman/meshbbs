@@ -110,7 +110,7 @@ func TestATwoTripExchangeConvergesTwoBoards(t *testing.T) {
 	dict, set := dicts(t)
 
 	// Trip one: A writes a stick and it is carried to B.
-	out, err := Export(a.gs, dict, a.key.ID(), 1, nil)
+	out, err := Export(a.gs, dict, ExportOptions{Self: a.key.ID(), Now: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestATwoTripExchangeConvergesTwoBoards(t *testing.T) {
 
 	// Trip two: B answers using the vectors that arrived on the stick. No
 	// conversation happened — everything B knows about A came off the drive.
-	back, err := Export(b.gs, dict, b.key.ID(), 2, atB)
+	back, err := Export(b.gs, dict, ExportOptions{Self: b.key.ID(), Now: 2, Reply: atB})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestTheReturnLegSendsOnlyTheDifference(t *testing.T) {
 	dict, set := dicts(t)
 
 	// B already has 6 of A's 10.
-	out, _ := Export(a.gs, dict, a.key.ID(), 1, nil)
+	out, _ := Export(a.gs, dict, ExportOptions{Self: a.key.ID(), Now: 1})
 	first, err := Import(b.gs, set, out)
 	if err != nil || first.Records != 10 {
 		t.Fatalf("setup: %d records, %v", first.Records, err)
@@ -188,11 +188,11 @@ func TestTheReturnLegSendsOnlyTheDifference(t *testing.T) {
 
 	// A second exchange, now that B is level. B writes its own carrier — which
 	// is what states its vectors — and A answers it.
-	fromB, err := Export(b.gs, dict, b.key.ID(), 2, nil)
+	fromB, err := Export(b.gs, dict, ExportOptions{Self: b.key.ID(), Now: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	againAtB, err := Export(a.gs, dict, a.key.ID(), 3, fromB)
+	againAtB, err := Export(a.gs, dict, ExportOptions{Self: a.key.ID(), Now: 3, Reply: fromB})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestOneBadBundleDoesNotFailTheImport(t *testing.T) {
 	b.learn(t, a)
 	dict, set := dicts(t)
 
-	out, err := Export(a.gs, dict, a.key.ID(), 1, nil)
+	out, err := Export(a.gs, dict, ExportOptions{Self: a.key.ID(), Now: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestRecordsFromAnUnknownOriginAreStillRefused(t *testing.T) {
 	// b never learns a's key.
 	dict, set := dicts(t)
 
-	out, err := Export(a.gs, dict, a.key.ID(), 1, nil)
+	out, err := Export(a.gs, dict, ExportOptions{Self: a.key.ID(), Now: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

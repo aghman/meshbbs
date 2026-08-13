@@ -144,3 +144,21 @@ func (s *sliceReader) Read(p []byte) (int, error) {
 	s.b = s.b[n:]
 	return n, nil
 }
+
+// ReadManifest reads a carrier's manifest and stops there.
+//
+// For a caller that wants the vectors and nothing else — answering a carrier
+// needs to know what the other side holds, and has no business pulling their
+// file bodies in as a side effect of being asked a question.
+//
+// The bodies are not skipped so much as never reached: the manifest is
+// self-delimiting, so parsing stops at its end and whatever follows is left in
+// the reader.
+func ReadManifest(r io.Reader) (*Carrier, error) {
+	head, err := io.ReadAll(io.LimitReader(r, MaxCarrierBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read the carrier: %w", err)
+	}
+	c, _, err := decode(head, true)
+	return c, err
+}
