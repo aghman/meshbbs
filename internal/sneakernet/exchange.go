@@ -57,6 +57,13 @@ type ExportOptions struct {
 	Areas []record.AreaTag
 	// Blobs are the file bodies to carry, from BlobsToCarry.
 	Blobs []BlobRef
+	// Requests are the files this board wants back (§6.5 fetch path 2).
+	//
+	// They ride on both legs. Outward they are the opening ask; on the reply
+	// they are this board's own queue, answered by whoever writes the trip
+	// after that. A hand-off has no round trip in it, so every carrier is
+	// simultaneously an answer to the last one and a question for the next.
+	Requests []WireHash
 }
 
 func Export(src Exporter, dict *bundle.Dictionary, opt ExportOptions) (*Carrier, error) {
@@ -65,6 +72,7 @@ func Export(src Exporter, dict *bundle.Dictionary, opt ExportOptions) (*Carrier,
 		CreatedAt: opt.Now,
 		Vectors:   map[record.AreaTag]*vv.Vector{},
 		Blobs:     opt.Blobs,
+		Requests:  opt.Requests,
 	}
 
 	want := map[record.AreaTag]bool{}
@@ -178,6 +186,20 @@ func Import(dst Importer, dicts *bundle.DictionarySet, c *Carrier) (ImportResult
 	return res, nil
 }
 
+// BlobPlan is what a carrier will and will not take.
+type BlobPlan struct {
+	// Refs are the bodies to write, in order.
+	Refs []BlobRef
+	// Skipped are files left behind, with the reason, for the sysop who is
+	// about to walk out of the door with the stick.
+	Skipped []string
+	// Unanswered are hashes the other board asked for that this one cannot
+	// send. Reported rather than swallowed: "we sent you nothing" and "we do
+	// not have it" look identical on the receiving end a week later, and only
+	// one of them is worth asking a third board about.
+	Unanswered []WireHash
+}
+
 // BlobsToCarry selects which held files a carrier should take.
 //
 // Takes store.File — this node's OWN file rows — rather than the network-wide
@@ -187,20 +209,43 @@ func Import(dst Importer, dicts *bundle.DictionarySet, c *Carrier) (ImportResult
 // only carry bytes it actually has, so the local rows are exactly the candidate
 // set.
 //
-// Minus what the other side already has — which, on the return leg, is whatever
-// their carrier declared. There is no request queue yet (§6.5), so this is the
-// blunt version: take what they do not have and let the size ceilings decide.
+// # Why a request changes the rule rather than filtering it
+//
+// With wanted empty this is the blunt version — everything they do not have,
+// up to the size ceilings — which is all an opening carrier can do, because
+// nobody has asked for anything yet.
+//
+// With wanted set it carries THOSE AND NOTHING ELSE, which is §6.5's fetch
+// path 2 doing its job. Not a filter on top of the blunt set: a stick has a
+// size and the trip has a cost, and a board that asked for one file should not
+// receive forty because they happened to fit. That is the difference the queue
+// buys, and treating requests as a hint would spend it.
 //
 // Skipping a file that is too large is deliberate rather than an error. A stick
 // carrying nine files and refusing a tenth is more useful than one that refuses
 // to be written, and the sysop is told which.
-func BlobsToCarry(files []store.File, held *blobstore.Store, theyHave map[blobstore.Hash]bool) ([]BlobRef, []string) {
-	var refs []BlobRef
-	var skipped []string
+func BlobsToCarry(files []store.File, held *blobstore.Store, theyHave map[blobstore.Hash]bool, wanted []WireHash) BlobPlan {
+	var plan BlobPlan
 	seen := map[blobstore.Hash]bool{}
+
+	// Requests arrive as truncated hashes and the candidates carry full ones,
+	// so the match is made in the direction that works: truncate ours, look it
+	// up. Going the other way would mean a prefix scan per request.
+	want := make(map[WireHash]bool, len(wanted))
+	answered := make(map[WireHash]bool, len(wanted))
+	for _, h := range wanted {
+		want[h] = true
+	}
 
 	for _, f := range files {
 		if seen[f.Hash] || theyHave[f.Hash] {
+			continue
+		}
+		trunc, err := record.TruncateFileHash(f.Hash[:])
+		if err != nil {
+			continue
+		}
+		if len(want) > 0 && !want[trunc] {
 			continue
 		}
 		size, err := held.Size(f.Hash)
@@ -211,17 +256,25 @@ func BlobsToCarry(files []store.File, held *blobstore.Store, theyHave map[blobst
 			continue
 		}
 		if uint64(size) > MaxBlobBytes {
-			skipped = append(skipped,
+			plan.Skipped = append(plan.Skipped,
 				fmt.Sprintf("%s is %d bytes, over the %d-byte carrier limit", f.Name, size, MaxBlobBytes))
 			continue
 		}
-		if len(refs) >= MaxBlobRefs {
-			skipped = append(skipped,
+		if len(plan.Refs) >= MaxBlobRefs {
+			plan.Skipped = append(plan.Skipped,
 				fmt.Sprintf("%s and later files: a carrier holds at most %d", f.Name, MaxBlobRefs))
 			break
 		}
 		seen[f.Hash] = true
-		refs = append(refs, BlobRef{Hash: f.Hash, Size: uint64(size)})
+		answered[trunc] = true
+		plan.Refs = append(plan.Refs, BlobRef{Hash: f.Hash, Size: uint64(size)})
 	}
-	return refs, skipped
+
+	// In the order they were asked, so the report reads like the request did.
+	for _, h := range wanted {
+		if !answered[h] {
+			plan.Unanswered = append(plan.Unanswered, h)
+		}
+	}
+	return plan
 }

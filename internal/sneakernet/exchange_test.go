@@ -278,17 +278,112 @@ func TestBlobsToCarrySkipsWhatItCannotSend(t *testing.T) {
 		{Name: "duplicate.txt", Hash: present},
 	}
 
-	refs, skipped := BlobsToCarry(files, bs, nil)
-	if len(refs) != 1 || refs[0].Hash != present {
-		t.Fatalf("selected %+v", refs)
+	plan := BlobsToCarry(files, bs, nil, nil)
+	if len(plan.Refs) != 1 || plan.Refs[0].Hash != present {
+		t.Fatalf("selected %+v", plan.Refs)
 	}
-	if len(skipped) != 0 {
-		t.Errorf("skipped %v; a missing body and a duplicate are not worth reporting", skipped)
+	if len(plan.Skipped) != 0 {
+		t.Errorf("skipped %v; a missing body and a duplicate are not worth reporting", plan.Skipped)
 	}
 
 	// A file the far side already has is not carried twice.
-	refs, _ = BlobsToCarry(files, bs, map[blobstore.Hash]bool{present: true})
-	if len(refs) != 0 {
-		t.Errorf("carried %d files the other side already had", len(refs))
+	plan = BlobsToCarry(files, bs, map[blobstore.Hash]bool{present: true}, nil)
+	if len(plan.Refs) != 0 {
+		t.Errorf("carried %d files the other side already had", len(plan.Refs))
+	}
+}
+
+// The difference the request queue buys over the blunt version: a board that
+// asked for one file gets that one, not everything that happened to fit.
+func TestBlobsToCarryAnswersOnlyWhatWasAsked(t *testing.T) {
+	bs, err := blobstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wanted, _, err := bs.Put(bytes.NewReader([]byte("the one they asked for")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spare, _, err := bs.Put(bytes.NewReader([]byte("forty megabytes of something else")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []store.File{
+		{Name: "asked.txt", Hash: wanted},
+		{Name: "unasked.txt", Hash: spare},
+	}
+
+	ask, err := record.TruncateFileHash(wanted[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := BlobsToCarry(files, bs, nil, []WireHash{ask})
+	if len(plan.Refs) != 1 || plan.Refs[0].Hash != wanted {
+		t.Fatalf("carried %+v; a request is not a hint", plan.Refs)
+	}
+	if len(plan.Unanswered) != 0 {
+		t.Errorf("reported %x unanswered", plan.Unanswered)
+	}
+
+	// With no request the blunt version still applies, because an opening
+	// carrier has nobody's queue to work from.
+	plan = BlobsToCarry(files, bs, nil, nil)
+	if len(plan.Refs) != 2 {
+		t.Errorf("the blunt leg carried %d of 2 files", len(plan.Refs))
+	}
+}
+
+// "We sent you nothing" and "we do not have it" look identical a week later on
+// somebody else's desk, and only one of them is worth asking a third board
+// about.
+func TestBlobsToCarryReportsWhatItCannotAnswer(t *testing.T) {
+	bs, err := blobstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	have, _, err := bs.Put(bytes.NewReader([]byte("held")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine, err := record.TruncateFileHash(have[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var theirs WireHash
+	theirs[0] = 0xC4
+
+	plan := BlobsToCarry([]store.File{{Name: "held.txt", Hash: have}}, bs, nil,
+		[]WireHash{mine, theirs})
+	if len(plan.Refs) != 1 {
+		t.Fatalf("answered %d of the two requests", len(plan.Refs))
+	}
+	if len(plan.Unanswered) != 1 || plan.Unanswered[0] != theirs {
+		t.Errorf("unanswered = %x, want the one hash this node does not hold", plan.Unanswered)
+	}
+}
+
+// A request rides both legs. A hand-off has no round trip in it, so every
+// carrier is an answer to the last one and a question for the next.
+func TestExportCarriesTheQueueOnBothLegs(t *testing.T) {
+	a := newInstance(t, 11)
+	dict, _ := dicts(t)
+	ask := []WireHash{{0x01, 0x02}}
+
+	outward, err := Export(a.gs, dict, ExportOptions{Self: a.key.ID(), Now: 1, Requests: ask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outward.Requests) != 1 {
+		t.Errorf("the outward leg asked for %d files", len(outward.Requests))
+	}
+
+	reply, err := Export(a.gs, dict, ExportOptions{
+		Self: a.key.ID(), Now: 2, Reply: outward, Requests: ask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reply.Requests) != 1 {
+		t.Errorf("the reply leg asked for %d files", len(reply.Requests))
 	}
 }

@@ -8,8 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/blobstore"
 	"github.com/aghman/meshbbs/internal/clock"
+	"github.com/aghman/meshbbs/internal/identity"
+	"github.com/aghman/meshbbs/internal/record"
 	"github.com/aghman/meshbbs/internal/store"
 )
 
@@ -216,5 +219,240 @@ func TestAFailedExportLeavesNoCarrier(t *testing.T) {
 	}
 	if _, err := os.Stat(dst + ".partial"); err == nil {
 		t.Error("a .partial file was left behind")
+	}
+}
+
+// seedPublishedFile puts a real file in a FEDERATED area and announces it.
+//
+// Different from seedFileForCarry in the one way that matters here: it goes
+// through the file service, so a FILE record is minted. That record is what the
+// OTHER board's users see, and a request is made against a catalog entry — so
+// without it there is nothing to ask for.
+func seedPublishedFile(t *testing.T, dir, area, name string, content []byte) blobstore.Hash {
+	t.Helper()
+	ctx := context.Background()
+
+	bs, err := blobstore.Open(filepath.Join(dir, "files", "blobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, size, err := bs.Put(bytes.NewReader(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := store.Open(ctx, filepath.Join(dir, "bbs.db"), clock.NewReal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	key, err := identity.LoadNodeKey(filepath.Join(dir, "keys"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An empty uploader is the CLI's own authority rather than a user's, which
+	// is what keeps [N7]'s capability gate out of a fixture.
+	svc := bbs.New(st, key, clock.NewReal())
+	f, err := svc.AddFile(ctx, area, store.File{Name: name, Hash: h, Size: size})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.Published() {
+		t.Fatal("the fixture did not announce the file, so there is nothing to request")
+	}
+	return h
+}
+
+// The whole of §6.5's fetch path 2, through the built commands: a board sees a
+// file it cannot fetch, asks for it, and two hand-offs later holds the bytes.
+func TestSneakernetAnswersARequest(t *testing.T) {
+	a, b := initInstance(t), initInstance(t)
+	for _, dir := range []string{a, b} {
+		if _, err := run(t, "--data-dir", dir, "area", "create", "swap",
+			"--kind", "file", "--federated"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	content := []byte("the file the mesh will never carry")
+	hash := seedPublishedFile(t, b, "swap", "KERMIT.ZIP", content)
+
+	// B's catalog reaches A. No --files: the mesh half of this is a listing,
+	// and so is the first stick.
+	first := filepath.Join(t.TempDir(), "first.mbx")
+	if _, err := run(t, "--data-dir", b, "sneakernet", "export", first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "--data-dir", a, "sneakernet", "import", first); err != nil {
+		t.Fatal(err)
+	}
+
+	// A can see it and cannot have it. That is the situation the queue is for.
+	out, err := run(t, "--data-dir", a, "file", "request", "swap", "KERMIT.ZIP", "--for", "austin")
+	if err != nil {
+		t.Fatalf("request: %v (%s)", err, out)
+	}
+	out, err = run(t, "--data-dir", a, "file", "requests")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "KERMIT.ZIP") || !strings.Contains(out, "waiting") {
+		t.Fatalf("the queue does not show the request: %s", out)
+	}
+
+	// Trip out: the ask rides the carrier.
+	away := filepath.Join(t.TempDir(), "away.mbx")
+	out, err = run(t, "--data-dir", a, "sneakernet", "export", away)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "asking for 1 file(s)") {
+		t.Fatalf("the carrier did not ask: %s", out)
+	}
+
+	out, err = run(t, "--data-dir", b, "sneakernet", "import", away)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "asking for 1 file(s)") {
+		t.Errorf("B was not told it had been asked: %s", out)
+	}
+
+	// A reply without --files says so rather than quietly answering nothing.
+	empty := filepath.Join(t.TempDir(), "empty.mbx")
+	out, err = run(t, "--data-dir", b, "sneakernet", "export", "--reply-to", away, empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "re-run with --files") {
+		t.Errorf("an unanswered request went unmentioned: %s", out)
+	}
+
+	// Trip back, with the bytes.
+	back := filepath.Join(t.TempDir(), "back.mbx")
+	out, err = run(t, "--data-dir", b, "sneakernet", "export", "--reply-to", away, "--files", back)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "1 file(s)") {
+		t.Fatalf("the reply carried no bodies: %s", out)
+	}
+
+	out, err = run(t, "--data-dir", a, "sneakernet", "import", back)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "answered: swap/KERMIT.ZIP for austin") {
+		t.Fatalf("the arrival did not close the request: %s", out)
+	}
+
+	// The end of the path: A holds the file and can serve it.
+	out, err = run(t, "--data-dir", a, "file", "list", "swap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "KERMIT.ZIP") {
+		t.Fatalf("the arrival is not in A's catalog: %s", out)
+	}
+	bs, err := blobstore.Open(filepath.Join(a, "files", "blobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bs.Has(hash) {
+		t.Fatal("A has a catalog row for content it does not hold")
+	}
+
+	// And nothing asks again.
+	out, err = run(t, "--data-dir", a, "sneakernet", "export", filepath.Join(t.TempDir(), "again.mbx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "asking for") {
+		t.Errorf("an answered request is still being asked: %s", out)
+	}
+}
+
+// A request is precise, and answering it must not turn into a blunt --files
+// export that empties the shelf onto somebody's stick.
+func TestAnAnsweredCarrierTakesOnlyWhatWasAsked(t *testing.T) {
+	a, b := initInstance(t), initInstance(t)
+	for _, dir := range []string{a, b} {
+		if _, err := run(t, "--data-dir", dir, "area", "create", "swap",
+			"--kind", "file", "--federated"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedPublishedFile(t, b, "swap", "WANTED.ZIP", []byte("this one"))
+	seedPublishedFile(t, b, "swap", "SPARE.ZIP", []byte("not this one"))
+
+	first := filepath.Join(t.TempDir(), "first.mbx")
+	if _, err := run(t, "--data-dir", b, "sneakernet", "export", first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "--data-dir", a, "sneakernet", "import", first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "--data-dir", a, "file", "request", "swap", "WANTED.ZIP"); err != nil {
+		t.Fatal(err)
+	}
+
+	away := filepath.Join(t.TempDir(), "away.mbx")
+	if _, err := run(t, "--data-dir", a, "sneakernet", "export", away); err != nil {
+		t.Fatal(err)
+	}
+	back := filepath.Join(t.TempDir(), "back.mbx")
+	out, err := run(t, "--data-dir", b, "sneakernet", "export", "--reply-to", away, "--files", back)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "1 file(s)") || strings.Contains(out, "2 file(s)") {
+		t.Errorf("the reply carried more than was asked for: %s", out)
+	}
+
+	out, err = run(t, "--data-dir", a, "sneakernet", "import", back)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "SPARE.ZIP") {
+		t.Errorf("a file nobody asked for was filed: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(a, "files", "blobs")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A request for content this board does not hold is reported rather than
+// swallowed: "we sent nothing" and "we do not have it" are different answers.
+func TestAnUnanswerableRequestIsReported(t *testing.T) {
+	a, b := initInstance(t), initInstance(t)
+	if _, err := run(t, "--data-dir", a, "area", "create", "swap",
+		"--kind", "file", "--federated"); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(a, "bbs.db"), clock.NewReal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want [record.FileHashLen]byte
+	want[0] = 0xD1
+	if _, err := st.RequestFile(ctx, "swap", "GONE.ZIP", want, identity.NodeID{}, "austin"); err != nil {
+		st.Close()
+		t.Fatal(err)
+	}
+	st.Close()
+
+	away := filepath.Join(t.TempDir(), "away.mbx")
+	if _, err := run(t, "--data-dir", a, "sneakernet", "export", away); err != nil {
+		t.Fatal(err)
+	}
+	back := filepath.Join(t.TempDir(), "back.mbx")
+	out, err := run(t, "--data-dir", b, "sneakernet", "export", "--reply-to", away, "--files", back)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "cannot answer their request") {
+		t.Errorf("B answered nothing and said nothing: %s", out)
 	}
 }

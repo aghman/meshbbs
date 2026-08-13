@@ -195,6 +195,8 @@ func (m Model) handleFileAreaKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "d":
 		return m.startDescribe()
+	case "r":
+		return m.startRequest()
 	case "q", "esc":
 		m.screen = screenFileAreaList
 		m.setWhere("files")
@@ -209,13 +211,43 @@ func (m Model) handleFileAreaKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // purely a display, and it is why "d" needs a real handler here rather than
 // another arm of the dispatch: without one, pressing "d" on the screen showing
 // "(no description)" would navigate away, which is the opposite of what the
-// person pressing it wants.
+// person pressing it wants. "r" is here for the same reason, and more sharply
+// — this screen is where a user reads that the file is held by another BBS, so
+// it is the screen they are on when they decide to ask for it.
 func (m Model) handleFileInfoKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if strings.ToLower(msg.String()) == "d" {
+	switch strings.ToLower(msg.String()) {
+	case "d":
 		return m.startDescribe()
+	case "r":
+		return m.startRequest()
 	}
 	m.screen = screenFileArea
 	return m, nil
+}
+
+// startRequest queues the selected file for the next sneakernet exchange.
+//
+// Every refusal is answered here rather than by hiding the key, for the reason
+// startDescribe gives: the browser front end sends the same key names an SSH
+// user can type (webui.md §5), so "r" arrives whether or not a hint advertised
+// it. A hidden hint is not a permission check.
+func (m Model) startRequest() (tea.Model, tea.Cmd) {
+	if m.fileIdx < 0 || m.fileIdx >= len(m.files) {
+		return m, nil
+	}
+	f := m.files[m.fileIdx]
+	if m.guest {
+		return m, errs("Guests cannot request files — there would be no account to notify. " +
+			"Register with `ssh new@` for one.")
+	}
+	if f.Held {
+		return m, errs("This BBS already holds " + f.Name + ". Fetch it over SFTP.")
+	}
+	if m.requested[f.Hash] {
+		return m, errs("You have already asked for " + f.Name +
+			". Asking twice does not make a carrier come sooner.")
+	}
+	return m, m.requestFile(m.fileArea, f.Name)
 }
 
 // startDescribe opens the description editor for the selected file.

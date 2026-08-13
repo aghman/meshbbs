@@ -425,6 +425,16 @@ type CatalogEntry struct {
 	Size        int64
 	Description string
 
+	// Hash is the truncated content hash the FILE record carries, and is the
+	// whole of what a requester can name (§6.5 fetch path 2): this node does
+	// not hold the file, so it has never seen the full 32 bytes. It is also
+	// what tells a local row and an announced entry apart when they share a
+	// name — see ListAreaContents.
+	//
+	// Zero for a local file that has not been announced, where the local row
+	// is the only source and the full hash is in it.
+	Hash [record.FileHashLen]byte
+
 	// Origin is the BBS that announced the file, which is also the BBS holding
 	// it. There is no separate "held by" field on the wire because this IS it.
 	Origin identity.NodeID
@@ -498,7 +508,8 @@ func (s *Store) ListCatalog(ctx context.Context, areaName string) ([]CatalogEntr
 			continue
 		}
 		e := CatalogEntry{
-			Name: fb.Name, Size: int64(fb.Size), Description: fb.Description, TS: ts,
+			Name: fb.Name, Size: int64(fb.Size), Description: fb.Description,
+			Hash: fb.Hash, TS: ts,
 		}
 		if len(origin) == identity.NodeIDLen {
 			copy(e.Origin[:], origin)
@@ -549,10 +560,21 @@ func (e CatalogEntry) MayDescribe(nick string, sysop bool) bool {
 // carry — who uploaded it, and the full content hash.
 //
 // So this merges: every announced entry, plus every local file that has not
-// been announced, with local rows enriched from the table. A peer announcing a
-// name we also hold produces TWO rows, which is honest rather than tidy — they
-// are different files on different BBSes that happen to share a name, and the
-// holder column is what tells them apart.
+// been announced, with local rows enriched from the table.
+//
+// # Why the merge is on name AND content
+//
+// A peer announcing a name we also hold produces TWO rows, which is honest
+// rather than tidy — they are usually different files on different BBSes that
+// happen to share a name, and the holder column is what tells them apart.
+//
+// The exception is the one §6.5's fetch path 2 creates: a file requested off a
+// sneakernet carrier is filed under the name it was announced with, and its
+// content is by definition the announced content. Keying the merge on the name
+// alone would leave that as two rows for one file — the peer's entry, and ours
+// — with a user who just waited a week for it unable to tell which one to open.
+// Keying it on the pair collapses exactly that case and leaves the coincidental
+// one alone.
 func (s *Store) ListAreaContents(ctx context.Context, areaName string) ([]CatalogEntry, error) {
 	entries, err := s.ListCatalog(ctx, areaName)
 	if err != nil {
@@ -563,21 +585,35 @@ func (s *Store) ListAreaContents(ctx context.Context, areaName string) ([]Catalo
 		return nil, err
 	}
 
-	// Enrich our own announced entries, and collect the names so the loop below
-	// can tell an unannounced file from one already present.
-	announced := map[string]int{}
-	for i, e := range entries {
-		if e.Local {
-			announced[e.Name] = i
-		}
+	// Enrich the announced entries, and collect them so the loop below can tell
+	// an unannounced file from one already present.
+	type announcedKey struct {
+		name string
+		hash [record.FileHashLen]byte
 	}
-	for _, f := range local {
-		if i, ok := announced[f.Name]; ok {
-			entries[i].Uploader = f.Uploader
+	announced := map[announcedKey]int{}
+	for i, e := range entries {
+		k := announcedKey{e.Name, e.Hash}
+		// Our own entry wins a tie, because Uploader is a fact only the local
+		// row knows and only our own entry can carry it.
+		if j, seen := announced[k]; seen && entries[j].Local && !e.Local {
 			continue
 		}
+		announced[k] = i
+	}
+	for _, f := range local {
+		// A full hash is always wide enough to truncate, so the error here is
+		// unreachable; treating it as "no match" rather than failing keeps one
+		// impossible row from blanking a listing.
+		trunc, err := record.TruncateFileHash(f.Hash[:])
+		if err == nil {
+			if i, ok := announced[announcedKey{f.Name, trunc}]; ok {
+				entries[i].Uploader = f.Uploader
+				continue
+			}
+		}
 		entries = append(entries, CatalogEntry{
-			Name: f.Name, Size: f.Size, Description: f.Description,
+			Name: f.Name, Size: f.Size, Description: f.Description, Hash: trunc,
 			Local: true, Held: true, Uploader: f.Uploader, TS: f.UploadedAt,
 		})
 	}

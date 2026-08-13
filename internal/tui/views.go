@@ -77,6 +77,7 @@ func (m Model) buildMenu() Screen {
 		TextBlock{Lines: []Line{ident}},
 		ChoicesBlock{Items: items},
 	}
+	blocks = append(blocks, m.arrivalNotice()...)
 	if m.guest {
 		blocks = append(blocks, Say(LevelMuted,
 			"You are browsing as a guest. Run `ssh new@this-bbs` to register."))
@@ -86,6 +87,46 @@ func (m Model) buildMenu() Screen {
 		Kind: "menu", Title: "MeshBBS", Blocks: blocks, Status: m.statusLine(),
 		Help: []KeyHint{{Label: "Press a highlighted letter. Ctrl+C to disconnect."}},
 	}
+}
+
+// arrivalNotice tells a user that a file they asked for has landed (§6.5).
+//
+// # Why the menu, and why only once
+//
+// The bytes arrive during a `sneakernet import`, which is a sysop at a command
+// line on a day the requester is not connected. §6.5 asks for "the requesting
+// user notified when it lands", and the only place this BBS can reach somebody
+// who is not here is the next screen they see when they come back — which is
+// this one.
+//
+// Once, because the file is then in its area like any other and the listing is
+// where it belongs. A notice that repeated every login would be a second
+// inbox, and one nobody could clear.
+//
+// A file that arrived and could not be filed says so instead. That is the case
+// where "it landed" on its own would be the misleading half of the truth: the
+// bytes are here, the name was taken while the stick was in transit, and the
+// person who asked cannot see the file until a sysop sorts it out.
+func (m Model) arrivalNotice() []Block {
+	if len(m.arrivals) == 0 {
+		return nil
+	}
+
+	lines := make([]Line, 0, len(m.arrivals)+1)
+	lines = append(lines, Line{{
+		Text:  plural(len(m.arrivals), "file you asked for has", "files you asked for have") + " arrived:",
+		Level: LevelAccent,
+	}})
+	for _, r := range m.arrivals {
+		text := "    " + sanitizeLine(r.Area) + "/" + sanitizeLine(r.Name)
+		level := LevelBody
+		if !r.Filed() {
+			text += " — " + sanitizeLine(r.Note)
+			level = LevelMuted
+		}
+		lines = append(lines, Line{{Text: text, Level: level}})
+	}
+	return []Block{TextBlock{Lines: lines}}
 }
 
 func (m Model) buildAreaList() Screen {
@@ -524,6 +565,14 @@ func (m Model) buildFileAreaList() Screen {
 	}
 }
 
+// mayRequest reports whether "r" would do anything on this entry (§6.5).
+//
+// Advisory only — it decides whether a hint is drawn, and startRequest re-asks
+// every one of these questions at the keypress, because a hint is not a check.
+func (m Model) mayRequest(f store.CatalogEntry) bool {
+	return !m.guest && !f.Held && !m.requested[f.Hash]
+}
+
 // holderLabel names the BBS holding a file, as short as is still unambiguous.
 //
 // [D9] makes the sysop's petname the human-facing surface, so it wins when
@@ -574,23 +623,32 @@ func (m Model) buildFileArea() Screen {
 	}
 	if elsewhere > 0 {
 		// Said once, here, rather than repeated per row: the constraint is a
-		// property of the mesh, not of any particular file (§7.5).
+		// property of the mesh, not of any particular file (§7.5) — and so is
+		// the remedy, which is the second fetch path rather than a download.
 		blocks = append(blocks, Prose(LevelMuted, fmt.Sprintf(
 			"%s held by another BBS. File listings travel the mesh; the files "+
-				"themselves never do, so those are not downloadable from here.",
+				"themselves never do, so those cannot be downloaded from here — "+
+				"press r to ask for one and it comes on the next exchange.",
 			plural(elsewhere, "file is", "files are"))))
 	}
 
-	// Advertise "d" only on a row the user can actually edit. A hint for a key
+	// Advertise a key only on a row where it does something. A hint for a key
 	// that answers "you can only describe files you uploaded" is worse than no
 	// hint: it reads as a bug rather than as a rule. A peer's file is never
 	// editable by anyone here, sysop included — its description lives in their
-	// record, signed by their node.
-	help := hints("up/down", "move", "enter", "details", "q", "back")
-	if m.fileIdx >= 0 && m.fileIdx < len(m.files) &&
-		m.files[m.fileIdx].MayDescribe(m.nick, m.sysop) {
-		help = hints("up/down", "move", "enter", "details", "d", "describe", "q", "back")
+	// record, signed by their node — and conversely "r" is offered only on a
+	// file this BBS does not hold, since a held one is an SFTP command away.
+	pairs := []string{"up/down", "move", "enter", "details"}
+	if m.fileIdx >= 0 && m.fileIdx < len(m.files) {
+		f := m.files[m.fileIdx]
+		if f.MayDescribe(m.nick, m.sysop) {
+			pairs = append(pairs, "d", "describe")
+		}
+		if m.mayRequest(f) {
+			pairs = append(pairs, "r", "request")
+		}
 	}
+	help := hints(append(pairs, "q", "back")...)
 
 	return Screen{
 		Kind: "filearea", Title: "Files in " + sanitizeLine(m.fileArea), Status: m.statusLine(),
@@ -635,10 +693,14 @@ func (m Model) buildFileInfo() Screen {
 	}
 	blocks = append(blocks, m.fileAvailability(f)...)
 
-	help := hints("q", "back")
+	var pairs []string
 	if f.MayDescribe(m.nick, m.sysop) {
-		help = hints("d", "describe", "q", "back")
+		pairs = append(pairs, "d", "describe")
 	}
+	if m.mayRequest(f) {
+		pairs = append(pairs, "r", "request")
+	}
+	help := hints(append(pairs, "q", "back")...)
 
 	return Screen{
 		Kind: "fileinfo", Title: sanitizeLine(f.Name), Blocks: blocks,
@@ -687,19 +749,23 @@ func (m Model) buildFileDescribe() Screen {
 
 // fileAvailability says whether a file can be had, and how.
 //
-// # Why this does not promise a queue
+// # The line §6.5 asks for, and why it took until now to print it
 //
-// Design §6.5 and §7.5 both sketch this line as "queued for next exchange",
-// with the request satisfied at the next sneakernet bundle. That queue is a
-// Phase 5 deliverable and does not exist: nothing records a request and nothing
-// would satisfy one. Printing it would be exactly the dishonesty those two
-// sections are about — a promise the software has no intention of keeping is
-// worse than the spinner they warn against, because it does not even look like
-// it is still working.
+// Design §6.5 and §7.5 both sketch this as "available by request only — queued
+// for next exchange", with the requesting user notified when it lands. v0.17
+// shipped this screen WITHOUT that wording, deliberately: the queue is a Phase
+// 5 deliverable, nothing recorded a request and nothing would satisfy one, and
+// printing it would have been exactly the dishonesty those two sections are
+// about. A promise the software has no intention of keeping is worse than the
+// spinner they warn against, because it does not even look like it is still
+// working.
 //
-// So this says what is true today: which BBS holds it, and that the mesh will
-// never bring the bytes. The sysop's contact is the one actionable thing we
-// have, so it is offered when the holding node published one.
+// The queue exists now, so the wording returns — with the one qualification
+// the design's own text leaves out and a person holding a terminal needs. There
+// is no date. A sneakernet exchange happens when somebody carries a stick
+// somewhere, and nothing in this process knows when that is. "Queued" is the
+// whole of the promise, which is the same shape as a door event's answer
+// (doors.md §6.7): recorded, and going out when the medium allows.
 func (m Model) fileAvailability(f store.CatalogEntry) []Block {
 	if f.Held {
 		return []Block{
@@ -719,13 +785,30 @@ func (m Model) fileAvailability(f store.CatalogEntry) []Block {
 	blocks = append(blocks, Prose(LevelMuted,
 		"This BBS does not have the file, only its listing. File contents never "+
 			"travel the mesh, at any size, so there is nothing to download here."))
+
+	switch {
+	case m.guest:
+		blocks = append(blocks, Prose(LevelMuted,
+			"Registered users can ask for it, and it comes on the next exchange of "+
+				"records between boards. Run `ssh new@this-bbs` for an account."))
+	case m.requested[f.Hash]:
+		blocks = append(blocks, Say(LevelAccent,
+			"You have asked for this. It is queued for the next exchange."))
+		blocks = append(blocks, Prose(LevelMuted,
+			"There is no date: an exchange happens when somebody carries it. "+
+				"You will be told here when the file lands."))
+	default:
+		blocks = append(blocks, Prose(LevelMuted,
+			"Press r to ask for it. The request is written down and travels with "+
+				"the next exchange of records between boards — no date, because an "+
+				"exchange happens when somebody carries it — and you are told when "+
+				"the file lands."))
+	}
+
 	if f.HolderContact != "" {
 		blocks = append(blocks, Lines(LevelMuted,
 			"That BBS's sysop:",
 			"    "+sanitizeLine(f.HolderContact)))
-	} else {
-		blocks = append(blocks, Prose(LevelMuted,
-			"Ask your sysop if you need it — they can reach the other BBS directly."))
 	}
 	return blocks
 }
