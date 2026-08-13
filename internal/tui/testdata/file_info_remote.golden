@@ -11,7 +11,11 @@ Held by pnw (YJ05KC1W)
 This BBS does not have the file, only its listing. File contents never travel
 the mesh, at any size, so there is nothing to download here.
 
+Press r to ask for it. The request is written down and travels with the next
+exchange of records between boards — no date, because an exchange happens when
+somebody carries it — and you are told when the file lands.
+
 That BBS's sysop:
     sysop@pnw.example
 
-q back
+r request · q back

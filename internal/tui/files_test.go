@@ -351,7 +351,9 @@ func TestPeerFileWithoutAPetnameShowsTheID(t *testing.T) {
 	// No alias was set, so the node's own display name is what shows.
 	s.contains("Pacific NW")
 
-	s.enter().containsProse("Ask your sysop if you need it")
+	// The holding sysop published no contact, so the actionable thing on offer
+	// is the request queue rather than a person to email (§6.5).
+	s.enter().containsProse("Press r to ask for it")
 	if id.IsZero() {
 		t.Fatal("the peer has no ID")
 	}
@@ -501,4 +503,104 @@ func TestDescribeFromTheDetailScreen(t *testing.T) {
 	s := openFiles(t, f, "austin").enter()
 	s.contains("d describe")
 	s.typeRunes("d").contains("Describe ARCHIVE.ZIP")
+}
+
+// §6.5's fetch path 2 from the user's side: a file held elsewhere is not a dead
+// end any more, and "r" is what turns the listing into a request.
+func TestRequestingAFileHeldElsewhere(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+	seedPeerFile(t, f, "meshwide", "REMOTE.ZIP", 900_000, "pnw", "")
+
+	s := f.login(t, "austin").typeRunes("f").enter()
+	s.contains("r", "request")
+	s.enter().typeRunes("r")
+
+	// The promise is exactly what is now true, and no date: an exchange
+	// happens when somebody carries it.
+	s.containsProse("Asked for REMOTE.ZIP")
+	s.notContains("tomorrow", "shortly")
+
+	reqs, err := f.store.ListFileRequests(f.ctx, "austin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reqs) != 1 || reqs[0].Name != "REMOTE.ZIP" || reqs[0].Area != "meshwide" {
+		t.Fatalf("the queue holds %+v", reqs)
+	}
+
+	// The screen now says so, and stops offering the key.
+	s.containsProse("You have asked for this")
+	s.typeRunes("r").containsProse("already asked for REMOTE.ZIP")
+}
+
+// A guest has no account to notify, which is the reason rather than a policy
+// about guests — and the refusal says so where they can act on it.
+func TestAGuestCannotRequestAFile(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	seedPeerFile(t, f, "meshwide", "REMOTE.ZIP", 900_000, "pnw", "")
+
+	s := newSession(t, f.config(IntentGuest, "")).typeRunes("f").enter().enter()
+	s.notContains("Press r to ask")
+	s.typeRunes("r").containsProse("Guests cannot request files")
+
+	if reqs, _ := f.store.ListFileRequests(f.ctx, ""); len(reqs) != 0 {
+		t.Errorf("a guest queued %+v", reqs)
+	}
+}
+
+// A held file is an SFTP command away, so "r" would be a week's wait for
+// something already on disk.
+func TestRequestingAHeldFileIsRefused(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+
+	s := f.login(t, "austin").typeRunes("f").typeRunes("j").enter().enter()
+	s.typeRunes("r").containsProse("already holds")
+	if reqs, _ := f.store.ListFileRequests(f.ctx, ""); len(reqs) != 0 {
+		t.Errorf("a held file was queued: %+v", reqs)
+	}
+}
+
+// The other half of §6.5's promise: the person who asked was not there when a
+// sysop imported the stick, so the BBS tells them when they come back.
+func TestAnArrivalIsAnnouncedOnceAtTheMenu(t *testing.T) {
+	f := newFixture(t)
+	seedFiles(t, f)
+	f.user(t, "austin", "")
+	seedPeerFile(t, f, "meshwide", "REMOTE.ZIP", 900_000, "pnw", "")
+
+	entries, err := f.store.ListAreaContents(f.ctx, "meshwide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want store.CatalogEntry
+	for _, e := range entries {
+		if e.Name == "REMOTE.ZIP" {
+			want = e
+		}
+	}
+	if _, err := f.store.RequestFile(f.ctx, "meshwide", want.Name, want.Hash,
+		want.Origin, "austin"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing has arrived, so nothing is announced.
+	f.login(t, "austin").notContains("you asked for")
+
+	// The stick lands between sessions.
+	var full blobstore.Hash
+	full[0], full[1] = 0xAB, 0xCD
+	if _, err := f.store.SatisfyFileRequests(f.ctx, full, 900_000); err != nil {
+		t.Fatal(err)
+	}
+
+	f.login(t, "austin").containsProse("1 file you asked for has arrived", "meshwide/REMOTE.ZIP")
+
+	// Once. A notice that repeated every login would be an inbox nobody could
+	// clear.
+	f.login(t, "austin").notContains("you asked for")
 }

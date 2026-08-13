@@ -9,6 +9,7 @@ import (
 	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/dmkey"
 	"github.com/aghman/meshbbs/internal/keyring"
+	"github.com/aghman/meshbbs/internal/record"
 	"github.com/aghman/meshbbs/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -30,6 +31,19 @@ type (
 	filesLoadedMsg     struct {
 		area  string
 		files []store.CatalogEntry
+	}
+
+	// fileRequestsLoadedMsg carries this user's request queue (§6.5): what
+	// they have outstanding, and what has landed since they were last told.
+	fileRequestsLoadedMsg struct {
+		requested map[[record.FileHashLen]byte]bool
+		arrivals  []store.FileRequest
+	}
+
+	// fileRequestedMsg is one file joining the queue.
+	fileRequestedMsg struct {
+		hash   [record.FileHashLen]byte
+		status statusMsg
 	}
 
 	// fileDescribedMsg carries a write and the reload that follows it as ONE
@@ -88,6 +102,81 @@ func (m Model) loadFiles(area string) tea.Cmd {
 			return statusMsg{text: err.Error(), isErr: true}
 		}
 		return filesLoadedMsg{area: area, files: files}
+	}
+}
+
+// loadFileRequests reads this user's sneakernet queue (§6.5 fetch path 2).
+//
+// It marks the arrivals told in the same command that reads them. The notice is
+// rendered once, on the menu this session lands on, and a mark written later —
+// when the screen is drawn, say — would need a render to have a side effect.
+// The cost of being wrong is that somebody whose connection drops in the same
+// second misses one line about a file that is sitting in their file area
+// regardless; the cost of the other order is a notice that repeats every login
+// forever.
+func (m Model) loadFileRequests() tea.Cmd {
+	return func() tea.Msg {
+		reqs, err := m.cfg.Store.ListFileRequests(m.ctx, m.nick)
+		if err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+		msg := fileRequestsLoadedMsg{requested: map[[record.FileHashLen]byte]bool{}}
+		var told []int64
+		for _, r := range reqs {
+			if !r.Arrived() {
+				msg.requested[r.Hash] = true
+				continue
+			}
+			if r.NotifiedAt == 0 {
+				msg.arrivals = append(msg.arrivals, r)
+				told = append(told, r.ID)
+			}
+		}
+		if err := m.cfg.Store.MarkFileRequestsNotified(m.ctx, told); err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+		return msg
+	}
+}
+
+// requestFile queues a file held by another BBS (§6.5 fetch path 2).
+//
+// Re-reads the catalog rather than trusting the entry the keypress captured,
+// for the reason describeFile does: a tea.Cmd runs against a copy of the model,
+// and between "r" and this running the listing may have been replaced. Asking
+// for the file that is under the cursor NOW is the thing the user meant.
+func (m Model) requestFile(area, name string) tea.Cmd {
+	nick := m.nick
+	return func() tea.Msg {
+		entries, err := m.cfg.Store.ListAreaContents(m.ctx, area)
+		if err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+		var want store.CatalogEntry
+		var found bool
+		for _, e := range entries {
+			if e.Name == name && !e.Held {
+				want, found = e, true
+				break
+			}
+		}
+		if !found {
+			return statusMsg{text: "That file is not on request here any more.", isErr: true}
+		}
+
+		req, err := m.cfg.Store.RequestFile(m.ctx, area, want.Name, want.Hash, want.Origin, nick)
+		if err != nil {
+			return statusMsg{text: err.Error(), isErr: true}
+		}
+		return fileRequestedMsg{
+			hash: req.Hash,
+			// No date, because there is no date to give: a hand-off happens
+			// when somebody walks. §6.5 is emphatic that a promise nothing
+			// will keep is worse than a spinner, so this says what is now
+			// true and stops.
+			status: statusMsg{text: "Asked for " + req.Name +
+				". It goes out on the next exchange, and you will be told when it lands."},
+		}
 	}
 }
 
