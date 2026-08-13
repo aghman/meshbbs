@@ -143,6 +143,72 @@ func (s *Store) SetDMKey(ctx context.Context, nick string, pub keyring.PublicKey
 	return nil
 }
 
+// ErrWouldStrandExistingMail is returned when adopting a client-held key would
+// leave mail behind that nobody can read.
+//
+// The same loss ErrDMHistoryWouldBeLost describes, arriving from the other
+// direction: messages already in the inbox are sealed to the OLD public key, and
+// a new key cannot open them. The server cannot re-seal them either — it never
+// had the private half, which is the whole point of §8.2 — so they are gone the
+// moment the key changes.
+var ErrWouldStrandExistingMail = errors.New(
+	"this account already has a DM key, and messages already delivered are sealed to it; " +
+		"adopting a different key makes them permanently unreadable")
+
+// SetClientHeldDMKey adopts a public key whose private half lives on the user's
+// own machine (§8.2 tier 3).
+//
+// The wrapped column is set to NULL rather than left alone, and that is the
+// whole mechanism: a row with a public key and no wrapped key IS a tier-3 user.
+// Everything the server does — discovery, addressing, verification, delivery —
+// already works from the public half, so nothing else changes. Leaving a stale
+// wrapped key behind would be worse than untidy: OpenDM would find it, unwrap it
+// with the session passphrase, and hand back plaintext for a user who had been
+// told their key was theirs alone.
+//
+// replace guards the loss above. Without it an account that already has a key
+// keeps it, because the alternative is silently stranding mail.
+func (s *Store) SetClientHeldDMKey(ctx context.Context, nick string, pub keyring.PublicKey, replace bool) error {
+	u, err := s.GetUser(ctx, nick)
+	if err != nil {
+		return err
+	}
+	var existing string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT dm_public_key FROM users WHERE id = ?`, u.ID).Scan(&existing); err != nil {
+		return fmt.Errorf("check the existing DM key: %w", err)
+	}
+	if existing != "" && existing != pub.String() && !replace {
+		return ErrWouldStrandExistingMail
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE users SET dm_public_key = ?, dm_wrapped_key = NULL WHERE id = ?`,
+		pub.String(), u.ID); err != nil {
+		return fmt.Errorf("store the client-held DM key: %w", err)
+	}
+	return s.audit(ctx, "cli", "user.dm_key_client_held", nick, pub.String())
+}
+
+// DMKeyIsClientHeld reports whether a user holds their own private key.
+//
+// A public key with no wrapped private half. Distinguished from "no key at all"
+// because the two call for opposite behaviour: one gets an armoured block to
+// take away, the other gets a key generated for them at next login.
+func (s *Store) DMKeyIsClientHeld(ctx context.Context, nick string) (bool, error) {
+	var pub string
+	var wrapped []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT dm_public_key, dm_wrapped_key FROM users WHERE nick = ?`, nick).Scan(&pub, &wrapped)
+	if isNoRows(err) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("read DM key custody: %w", err)
+	}
+	return pub != "" && len(wrapped) == 0, nil
+}
+
 // DMPublicKey returns a user's DM public key.
 //
 // Encrypting to a user needs only this. Nothing in the send path ever needs

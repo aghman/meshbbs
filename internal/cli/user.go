@@ -29,6 +29,7 @@ register and use the BBS immediately, but spending the network's shared
 airtime is a grant the sysop makes deliberately.`,
 	}
 	cmd.AddCommand(
+		newUserDMKeyCmd(e),
 		newUserAddCmd(e), newUserListCmd(e),
 		newUserGrantCmd(e), newUserRevokeCmd(e), newUserShowCmd(e), newUserPasswdCmd(e),
 	)

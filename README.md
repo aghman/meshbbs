@@ -102,6 +102,28 @@ recovered, and the instance would have to re-establish with its peers as a new n
 - [Configuration reference](docs/config.md) — generated; run `meshbbs config reference` for the
   same content.
 
+### Keeping your own message key
+
+By default the BBS holds your message key, wrapped under a passphrase it sees only while you are
+logged in (§8.2 tier 2). If you would rather it never held the key at all, `meshbbs-key` keeps it
+on your machine:
+
+```
+meshbbs-key init                       # generates a key, prints the public half
+```
+
+Give the sysop the public half; they run `meshbbs user dm-key <your nick> <key>`. From then on the
+BBS seals your mail to that key and cannot read it. Reading becomes a copy and a paste:
+
+```
+meshbbs-key open                       # paste the block, press Ctrl-D
+```
+
+Two things to know before you do this. **Back the key file up** — it is the only copy, and without
+it every message ever sent to you is unreadable, including ones already in your inbox. And reading
+mail stops being something the BBS does for you: every message is a copy, a paste and a passphrase,
+on a machine that is not the one you are logged into. That is the trade.
+
 ## Development
 
 ```

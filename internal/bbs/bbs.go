@@ -419,6 +419,10 @@ func (s *Service) ResolveRecipient(ctx context.Context, ref string) (string, ide
 	return nick, node, nil
 }
 
+// ErrClientHeldKey means the user keeps their own private key (§8.2 tier 3),
+// so this server cannot decrypt for them and should hand over the sealed bytes.
+var ErrClientHeldKey = errors.New("this account's DM key is held by the user, not by this BBS")
+
 // OpenDM decrypts a message for display.
 //
 // This is the ONLY operation that needs a user's private key, and it takes the
@@ -426,6 +430,20 @@ func (s *Service) ResolveRecipient(ctx context.Context, ref string) (string, ide
 // deliberate: it keeps the set of code paths touching private material small
 // and visible, and it is exactly the operation tier 3 will move off the server.
 func (s *Service) OpenDM(ctx context.Context, nick, passphrase string, sealed []byte) (store.SealedPayload, error) {
+	// A tier-3 user's private key is not here and never was (§8.2). Answered as
+	// a distinct error rather than as "no DM key yet", because the two look the
+	// same in the database — no wrapped key — and call for opposite responses:
+	// this one gets the sealed bytes handed over, the other gets a key made for
+	// them. Conflating them would tell somebody who deliberately took custody of
+	// their key that they had not set one up.
+	clientHeld, err := s.store.DMKeyIsClientHeld(ctx, nick)
+	if err != nil {
+		return store.SealedPayload{}, err
+	}
+	if clientHeld {
+		return store.SealedPayload{}, ErrClientHeldKey
+	}
+
 	wrapped, err := s.store.WrappedDMKey(ctx, nick)
 	if err != nil {
 		return store.SealedPayload{}, err
@@ -468,6 +486,10 @@ func (s *Service) newRecord(ctx context.Context, typ record.Type, area record.Ar
 // Called at signup and at first login for accounts created by the CLI, which
 // cannot know a passphrase.
 func (s *Service) EnsureDMKey(ctx context.Context, nick, passphrase string) error {
+	// Already has a key, of either custody. For a tier-3 user this early return
+	// is load-bearing rather than an optimisation: generating here would replace
+	// a key whose private half is on their laptop, stranding every message
+	// already sent to them.
 	if _, err := s.store.DMPublicKey(ctx, nick); err == nil {
 		return nil
 	}

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/aghman/meshbbs/internal/auth"
+	"github.com/aghman/meshbbs/internal/bbs"
+	"github.com/aghman/meshbbs/internal/dmkey"
 	"github.com/aghman/meshbbs/internal/keyring"
 	"github.com/aghman/meshbbs/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
@@ -166,6 +168,22 @@ func (m Model) loadMail() tea.Cmd {
 func (m Model) openMail(dm store.DM) tea.Cmd {
 	return func() tea.Msg {
 		payload, err := m.cfg.Service.OpenDM(m.ctx, m.nick, m.passphrase, dm.SealedBytes)
+		if errors.Is(err, bbs.ErrClientHeldKey) {
+			// Tier 3 (§8.2): this server cannot read it, which is what the user
+			// asked for. Hand over the sealed block in the mail viewer they are
+			// already looking at, so copying it is a selection rather than a
+			// separate command — and mark it read, because they HAVE been given
+			// the message. Whether they decrypt it is between them and their
+			// own machine.
+			if markErr := m.cfg.Store.MarkDMRead(m.ctx, dm.ID); markErr != nil {
+				return statusMsg{text: markErr.Error(), isErr: true}
+			}
+			return mailOpenedMsg{
+				subject: "Encrypted — your key is on your own machine",
+				body: "Copy the block below and run:  meshbbs-key open\n\n" +
+					dmkey.Armour(dm.SealedBytes),
+			}
+		}
 		if err != nil {
 			return statusMsg{text: "Cannot open: " + err.Error(), isErr: true}
 		}
