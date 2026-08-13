@@ -59,6 +59,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/aghman/meshbbs/internal/blobstore"
 	"github.com/aghman/meshbbs/internal/identity"
 	"github.com/aghman/meshbbs/internal/record"
 	"github.com/aghman/meshbbs/internal/vv"
@@ -86,12 +87,23 @@ const (
 	MaxBundles = 1024
 	// MaxVectors is one per area the sender federates.
 	MaxVectors = 256
-	// MaxCarrierBytes bounds the whole file before anything is parsed.
+	// MaxBlobRefs bounds how many files one exchange carries.
+	MaxBlobRefs = 256
+	// MaxBlobBytes bounds one file's contents.
+	//
+	// Blobs are the one thing here that does not fit in memory and is not meant
+	// to: the bodies stream through blobstore.Put, which hashes as it writes. So
+	// this is a disk and patience bound rather than a memory one, and it is
+	// generous because the whole point of sneakernet is the files the mesh will
+	// never carry (§7.5).
+	MaxBlobBytes = 256 << 20
+	// MaxCarrierBytes bounds the MANIFEST before anything is parsed.
 	//
 	// 64 MiB is generous for records — the largest legal bundle is a megabyte
 	// decompressed and they compress hard — and deliberately not "whatever fits
-	// on the stick". A carrier is read into memory to be verified, so its
-	// ceiling is a memory ceiling.
+	// on the stick". The manifest is read into memory to be verified, so its
+	// ceiling is a memory ceiling. File bodies are NOT counted here; they never
+	// enter memory.
 	MaxCarrierBytes = 64 << 20
 )
 
@@ -119,6 +131,35 @@ type Carrier struct {
 	Vectors map[record.AreaTag]*vv.Vector
 	// Bundles are the records themselves, still in the mesh's own format.
 	Bundles [][]byte
+	// Blobs are the file bodies that FOLLOW this manifest, in this order.
+	//
+	// # Why file bytes may ride here and nowhere else
+	//
+	// §7.5 forbids file content in a record at the type level — a FILE record's
+	// body must parse as a catalog entry, and every field of one is bounded, so
+	// there is nowhere to put content and no threshold to relax. That rule is
+	// absolute and is not weakened here: a blob is not in a record and not in a
+	// bundle, it is a separate section of a file on a stick.
+	//
+	// Which is exactly what `[D8]` said: "catalogs replicate; bytes move over IP
+	// or sneakernet". This is the second of those two, and the asymmetry is the
+	// design's rather than an exception to it — a stick has no airtime.
+	//
+	// Only the REFERENCES are in the manifest. Declaring what follows before it
+	// arrives is what lets a receiver refuse a 200 GB stick without reading it,
+	// which is the streaming form of bounding a length before allocating.
+	Blobs []BlobRef
+}
+
+// BlobRef names a file body carried after the manifest.
+//
+// The hash is the identity, not a label: a receiver recomputes it while
+// streaming and refuses a mismatch. That is what makes an unsigned container
+// safe to take file bytes from — a carrier cannot lie about what a blob is,
+// only about which blobs it has.
+type BlobRef struct {
+	Hash blobstore.Hash
+	Size uint64
 }
 
 // Encode serialises a carrier.
@@ -139,6 +180,9 @@ func Encode(c *Carrier) ([]byte, error) {
 	}
 	if len(c.Bundles) > MaxBundles {
 		return nil, fmt.Errorf("%w: %d bundles, limit is %d", ErrTooMany, len(c.Bundles), MaxBundles)
+	}
+	if len(c.Blobs) > MaxBlobRefs {
+		return nil, fmt.Errorf("%w: %d blobs, limit is %d", ErrTooMany, len(c.Blobs), MaxBlobRefs)
 	}
 
 	var buf []byte
@@ -170,16 +214,42 @@ func Encode(c *Carrier) ([]byte, error) {
 		buf = append(buf, b...)
 	}
 
+	buf = binary.AppendUvarint(buf, uint64(len(c.Blobs)))
+	for _, b := range c.Blobs {
+		if b.Hash.IsZero() {
+			return nil, errors.New("carrier declares a blob with no hash")
+		}
+		if b.Size > MaxBlobBytes {
+			return nil, fmt.Errorf("%w: a blob declares %d bytes, limit is %d",
+				ErrTooMany, b.Size, MaxBlobBytes)
+		}
+		buf = append(buf, b.Hash[:]...)
+		buf = binary.AppendUvarint(buf, b.Size)
+	}
+
 	if len(buf) > MaxCarrierBytes {
 		return nil, fmt.Errorf("%w: %d bytes", ErrTooLarge, len(buf))
 	}
 	return buf, nil
 }
 
-// Decode parses a carrier, bounding every allocation before making it.
+// Decode parses a standalone carrier manifest, bounding every allocation before
+// making it. Trailing bytes are refused: one carrier, one wire form.
 func Decode(data []byte) (*Carrier, error) {
+	c, _, err := decode(data, false)
+	return c, err
+}
+
+// decode parses a manifest, optionally permitting bytes after it, and reports
+// how many it used.
+//
+// allowTrailing exists for exactly one caller: a carrier file, where the file
+// BODIES follow the manifest and trailing bytes are the point rather than a
+// defect. The canonical check still applies — to the prefix — so relaxing the
+// rule here does not relax it for the manifest itself.
+func decode(data []byte, allowTrailing bool) (*Carrier, int, error) {
 	if len(data) > MaxCarrierBytes {
-		return nil, fmt.Errorf("%w: %d bytes, limit is %d", ErrTooLarge, len(data), MaxCarrierBytes)
+		return nil, 0, fmt.Errorf("%w: %d bytes, limit is %d", ErrTooLarge, len(data), MaxCarrierBytes)
 	}
 	rest := data
 
@@ -205,58 +275,58 @@ func Decode(data []byte) (*Carrier, error) {
 
 	magic, err := take(4, "the magic")
 	if err != nil {
-		return nil, ErrNotACarrier
+		return nil, 0, ErrNotACarrier
 	}
 	if !bytes.Equal(magic, Magic[:]) {
-		return nil, fmt.Errorf("%w (magic is %x)", ErrNotACarrier, magic)
+		return nil, 0, fmt.Errorf("%w (magic is %x)", ErrNotACarrier, magic)
 	}
 	version, err := take(1, "the version")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if version[0] != FormatVersion {
-		return nil, fmt.Errorf("%w: carrier format version %d, this build speaks %d",
+		return nil, 0, fmt.Errorf("%w: carrier format version %d, this build speaks %d",
 			ErrNotACarrier, version[0], FormatVersion)
 	}
 
 	c := &Carrier{Vectors: map[record.AreaTag]*vv.Vector{}}
 	origin, err := take(identity.NodeIDLen, "the origin")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	copy(c.Origin[:], origin)
 	created, err := take(4, "the timestamp")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	c.CreatedAt = binary.BigEndian.Uint32(created)
 
 	vectorCount, err := uvarint("the vector count")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if vectorCount > MaxVectors {
-		return nil, fmt.Errorf("%w: claims %d vectors, limit is %d", ErrTooMany, vectorCount, MaxVectors)
+		return nil, 0, fmt.Errorf("%w: claims %d vectors, limit is %d", ErrTooMany, vectorCount, MaxVectors)
 	}
 	for i := uint64(0); i < vectorCount; i++ {
 		tag, err := take(4, "an area tag")
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		n, err := uvarint("a vector length")
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if n > uint64(len(rest)) {
-			return nil, fmt.Errorf("%w: a vector claims %d bytes, %d remain", ErrTruncated, n, len(rest))
+			return nil, 0, fmt.Errorf("%w: a vector claims %d bytes, %d remain", ErrTruncated, n, len(rest))
 		}
 		body, err := take(int(n), "a vector")
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		vec, err := vv.Decode(body)
 		if err != nil {
-			return nil, fmt.Errorf("carrier vector %d: %w", i, err)
+			return nil, 0, fmt.Errorf("carrier vector %d: %w", i, err)
 		}
 		var a record.AreaTag
 		copy(a[:], tag)
@@ -264,32 +334,32 @@ func Decode(data []byte) (*Carrier, error) {
 			// Two vectors for one area is not a thing a writer produces, and
 			// silently keeping the last would make the carrier's meaning depend
 			// on parse order.
-			return nil, fmt.Errorf("%w: area %x appears twice", ErrNotCanonical, a[:])
+			return nil, 0, fmt.Errorf("%w: area %x appears twice", ErrNotCanonical, a[:])
 		}
 		c.Vectors[a] = vec
 	}
 
 	bundleCount, err := uvarint("the bundle count")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if bundleCount > MaxBundles {
-		return nil, fmt.Errorf("%w: claims %d bundles, limit is %d", ErrTooMany, bundleCount, MaxBundles)
+		return nil, 0, fmt.Errorf("%w: claims %d bundles, limit is %d", ErrTooMany, bundleCount, MaxBundles)
 	}
 	for i := uint64(0); i < bundleCount; i++ {
 		n, err := uvarint("a bundle length")
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if n == 0 {
-			return nil, errors.New("carrier holds an empty bundle")
+			return nil, 0, errors.New("carrier holds an empty bundle")
 		}
 		if n > uint64(len(rest)) {
-			return nil, fmt.Errorf("%w: a bundle claims %d bytes, %d remain", ErrTruncated, n, len(rest))
+			return nil, 0, fmt.Errorf("%w: a bundle claims %d bytes, %d remain", ErrTruncated, n, len(rest))
 		}
 		body, err := take(int(n), "a bundle")
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		// Copied rather than aliased: the caller may hold these after the input
 		// slice is reused, and a bundle that mutates underneath the log is a
@@ -297,8 +367,38 @@ func Decode(data []byte) (*Carrier, error) {
 		c.Bundles = append(c.Bundles, append([]byte(nil), body...))
 	}
 
-	if len(rest) != 0 {
-		return nil, fmt.Errorf("%w: %d trailing bytes", ErrNotCanonical, len(rest))
+	blobCount, err := uvarint("the blob count")
+	if err != nil {
+		return nil, 0, err
+	}
+	if blobCount > MaxBlobRefs {
+		return nil, 0, fmt.Errorf("%w: claims %d blobs, limit is %d", ErrTooMany, blobCount, MaxBlobRefs)
+	}
+	for i := uint64(0); i < blobCount; i++ {
+		h, err := take(blobstore.HashLen, "a blob hash")
+		if err != nil {
+			return nil, 0, err
+		}
+		size, err := uvarint("a blob size")
+		if err != nil {
+			return nil, 0, err
+		}
+		if size > MaxBlobBytes {
+			return nil, 0, fmt.Errorf("%w: blob %d declares %d bytes, limit is %d",
+				ErrTooMany, i, size, MaxBlobBytes)
+		}
+		var ref BlobRef
+		copy(ref.Hash[:], h)
+		if ref.Hash.IsZero() {
+			return nil, 0, errors.New("carrier declares a blob with no hash")
+		}
+		ref.Size = size
+		c.Blobs = append(c.Blobs, ref)
+	}
+
+	consumed := len(data) - len(rest)
+	if len(rest) != 0 && !allowTrailing {
+		return nil, 0, fmt.Errorf("%w: %d trailing bytes", ErrNotCanonical, len(rest))
 	}
 
 	// One carrier, one wire form. Same structural defence the record and bundle
@@ -306,12 +406,12 @@ func Decode(data []byte) (*Carrier, error) {
 	// minimality check per field.
 	reencoded, err := Encode(c)
 	if err != nil {
-		return nil, fmt.Errorf("carrier did not survive re-encoding: %w", err)
+		return nil, 0, fmt.Errorf("carrier did not survive re-encoding: %w", err)
 	}
-	if !bytes.Equal(reencoded, data) {
-		return nil, ErrNotCanonical
+	if !bytes.Equal(reencoded, data[:consumed]) {
+		return nil, 0, ErrNotCanonical
 	}
-	return c, nil
+	return c, consumed, nil
 }
 
 // sortAreas orders area tags, so a carrier built from a map is deterministic.
