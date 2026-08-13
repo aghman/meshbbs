@@ -39,7 +39,17 @@ An exchange is TWO trips, because a hand-off has no round trip in it:
 
 The first carrier says what you hold. The reply contains only what you were
 missing, worked out from the vectors you sent — no conversation happens, which
-is what makes this work between boards that have never met.`,
+is what makes this work between boards that have never met.
+
+Every carrier also asks. Files your users have queued (§6.5) ride along as a
+list of content hashes, and a board answering with --files sends those and
+nothing else:
+
+    meshbbs file request utils kermit.zip --for austin
+    meshbbs file requests
+
+That is fetch path 2. The mesh never carries file bytes, at any size, so a
+stick is the other way they move.`,
 	}
 	cmd.AddCommand(newSneakernetExportCmd(e), newSneakernetImportCmd(e))
 	return cmd
@@ -63,7 +73,14 @@ a stick goes somewhere else, to someone specific, so it gets its own choice.
 
 --files carries file bodies as well as records. This is the one path §7.5 allows
 bytes on — the mesh never carries them at any size — and it is off by default
-because a carrier with files on it is a different size of object entirely.`,
+because a carrier with files on it is a different size of object entirely.
+
+With --reply-to, --files answers the requests on THEIR carrier and carries
+nothing else. Without one it is the blunt version: everything they do not have,
+which is all an opening carrier can do, since nobody has asked yet.
+
+Whatever your own users have queued rides on every carrier either way. Asking
+is 16 bytes and needs no blob store.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, err := e.nodeKey()
@@ -101,28 +118,46 @@ because a carrier with files on it is a different size of object entirely.`,
 					return err
 				}
 
+				// Our own queue rides every carrier, both legs, whether or not
+				// this one carries files: asking costs 16 bytes on a medium
+				// with no airtime budget, and a carrier that answers somebody
+				// while forgetting to ask is a wasted trip (§6.5).
+				wants, err := st.OpenFileRequestHashes(ctx, sneakernet.MaxRequests)
+				if err != nil {
+					return err
+				}
+
 				opt := sneakernet.ExportOptions{
-					Self:  key.ID(),
-					Now:   uint32(e.clock.Now().Unix()),
-					Reply: reply,
-					Areas: tags,
+					Self:     key.ID(),
+					Now:      uint32(e.clock.Now().Unix()),
+					Reply:    reply,
+					Areas:    tags,
+					Requests: wants,
 				}
 
 				var blobs *blobstore.Store
+				var plan sneakernet.BlobPlan
 				out := cmd.OutOrStdout()
 				if withFiles {
 					blobs, err = openBlobs(e)
 					if err != nil {
 						return err
 					}
-					refs, skipped, err := chooseBlobs(ctx, st, blobs, reply)
+					plan, err = chooseBlobs(ctx, st, blobs, reply)
 					if err != nil {
 						return err
 					}
-					opt.Blobs = refs
-					for _, s := range skipped {
+					opt.Blobs = plan.Refs
+					for _, s := range plan.Skipped {
 						fmt.Fprintf(out, "skipping %s\n", s)
 					}
+				} else if reply != nil && len(reply.Requests) > 0 {
+					// The one case where doing nothing is worth a line. They
+					// asked, this carrier will not answer, and the person who
+					// asked finds out a week later on somebody else's desk.
+					fmt.Fprintf(out, "%s asked for %d file(s) and this carrier holds none — "+
+						"re-run with --files to answer.\n",
+						reply.Origin.Short(), len(reply.Requests))
 				}
 
 				c, err := sneakernet.Export(gs, dict, opt)
@@ -158,6 +193,13 @@ because a carrier with files on it is a different size of object entirely.`,
 				}
 				fmt.Fprintf(out, "\n  %d area(s), %d bundle(s), %d file(s)\n",
 					len(c.Vectors), len(c.Bundles), len(c.Blobs))
+				if len(c.Requests) > 0 {
+					fmt.Fprintf(out, "  asking for %d file(s) queued here (§6.5)\n", len(c.Requests))
+				}
+				for _, h := range plan.Unanswered {
+					fmt.Fprintf(out, "  cannot answer their request for %s — "+
+						"not held in any federated file area here\n", describeHash(h))
+				}
 				if reply == nil {
 					fmt.Fprintf(out, "\nThis is the outward leg. On the other board:\n"+
 						"  meshbbs sneakernet import %s\n"+
@@ -191,7 +233,9 @@ roster, area rules, sequence conflicts. A stick is not a way around any of that,
 and one whose records do not verify simply adds nothing.
 
 Files are stored under their own content hash, and a body that does not match
-what the carrier declared is refused rather than kept.`,
+what the carrier declared is refused rather than kept. A body somebody here had
+queued with ` + "`meshbbs file request`" + ` becomes a catalog entry in the area they
+asked for it in, and they are told the next time they log in (§6.5).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			_, dicts, err := federationDictionaries()
@@ -234,6 +278,9 @@ what the carrier declared is refused rather than kept.`,
 				if dryRun {
 					fmt.Fprintf(out, "  %d area(s), %d bundle(s), %d file(s)\n",
 						len(c.Vectors), len(c.Bundles), len(c.Blobs))
+					if len(c.Requests) > 0 {
+						fmt.Fprintf(out, "  asking for %d file(s)\n", len(c.Requests))
+					}
 					fmt.Fprintf(out, "\nNothing was applied (--dry-run). Files were not stored either.\n")
 					return nil
 				}
@@ -249,7 +296,20 @@ what the carrier declared is refused rather than kept.`,
 				for _, why := range res.Rejected {
 					fmt.Fprintf(out, "  skipped: %s\n", why)
 				}
-				if res.Records == 0 && len(res.Rejected) == 0 {
+
+				answered, err := closeRequests(ctx, st, c, out)
+				if err != nil {
+					return err
+				}
+
+				if len(c.Requests) > 0 {
+					// Said after the arrivals, because this is the next trip's
+					// work rather than this one's result.
+					fmt.Fprintf(out, "\n%s is asking for %d file(s). To answer:\n"+
+						"  meshbbs sneakernet export --reply-to %s --files back.mbx\n",
+						c.Origin.Short(), len(c.Requests), filepath.Base(args[0]))
+				}
+				if res.Records == 0 && len(res.Rejected) == 0 && answered == 0 {
 					// Not a failure and worth saying plainly, because "nothing
 					// happened" and "it did not work" look identical otherwise.
 					fmt.Fprintf(out, "\nEverything on this carrier was already held.\n")
@@ -262,6 +322,47 @@ what the carrier declared is refused rather than kept.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"say what the carrier holds without applying it")
 	return cmd
+}
+
+// closeRequests turns arrived bodies into catalog rows and closes the requests
+// they answer (§6.5 fetch path 2), reporting how many were answered.
+//
+// # Why an unrequested body is worth a line
+//
+// A carrier written with a blunt `--files` may hold content nobody here asked
+// for. Its bytes are in the blob store — content-addressed, verified — and
+// there is no catalog row for them, because there is no area to file them in
+// and no name to file them under: a body arrives with a hash and a length, and
+// the name lives in the FILE record, which may or may not be on the same stick.
+//
+// That is a defensible thing for the format to do and a terrible thing to do
+// silently, so the sysop is told the count. A request is what turns a body into
+// a file, and this is the line that says so.
+func closeRequests(ctx context.Context, st *store.Store, c *sneakernet.Carrier, out io.Writer) (int, error) {
+	var answered, unasked int
+	for _, ref := range c.Blobs {
+		reqs, err := st.SatisfyFileRequests(ctx, ref.Hash, int64(ref.Size))
+		if err != nil {
+			return answered, err
+		}
+		if len(reqs) == 0 {
+			unasked++
+			continue
+		}
+		answered += len(reqs)
+		for _, r := range reqs {
+			if r.Filed() {
+				fmt.Fprintf(out, "  answered: %s/%s for %s\n", r.Area, r.Name, r.Nick)
+				continue
+			}
+			fmt.Fprintf(out, "  %s/%s for %s: %s\n", r.Area, r.Name, r.Nick, r.Note)
+		}
+	}
+	if unasked > 0 {
+		fmt.Fprintf(out, "  %d file(s) nobody here had asked for: held as content, "+
+			"with no catalog entry to reach them by\n", unasked)
+	}
+	return answered, nil
 }
 
 func openBlobs(e *env) (*blobstore.Store, error) {
@@ -301,10 +402,15 @@ func resolveAreas(ctx context.Context, st *store.Store, names []string) ([]recor
 }
 
 // chooseBlobs picks the file bodies to carry.
-func chooseBlobs(ctx context.Context, st *store.Store, bs *blobstore.Store, reply *sneakernet.Carrier) ([]sneakernet.BlobRef, []string, error) {
+//
+// Candidates come from FEDERATED file areas only, requests included. A
+// local-only area is a sysop saying this content does not leave the building,
+// and somebody else's request does not overrule that — an unanswerable request
+// is reported back rather than quietly satisfied out of a private area.
+func chooseBlobs(ctx context.Context, st *store.Store, bs *blobstore.Store, reply *sneakernet.Carrier) (sneakernet.BlobPlan, error) {
 	areas, err := st.ListFileAreas(ctx)
 	if err != nil {
-		return nil, nil, err
+		return sneakernet.BlobPlan{}, err
 	}
 	var files []store.File
 	for _, a := range areas {
@@ -313,20 +419,28 @@ func chooseBlobs(ctx context.Context, st *store.Store, bs *blobstore.Store, repl
 		}
 		in, err := st.ListFiles(ctx, a.Name)
 		if err != nil {
-			return nil, nil, err
+			return sneakernet.BlobPlan{}, err
 		}
 		files = append(files, in...)
 	}
 
 	theyHave := map[blobstore.Hash]bool{}
+	var wanted []sneakernet.WireHash
 	if reply != nil {
 		for _, ref := range reply.Blobs {
 			theyHave[ref.Hash] = true
 		}
+		wanted = reply.Requests
 	}
-	refs, skipped := sneakernet.BlobsToCarry(files, bs, theyHave)
-	return refs, skipped, nil
+	return sneakernet.BlobsToCarry(files, bs, theyHave, wanted), nil
 }
+
+// describeHash names a hash the way a sysop can match it against a listing.
+//
+// The full 16 bytes are unreadable out loud and the short form is what every
+// other ID in this codebase renders as, so this is the same bargain `[D9]`
+// makes everywhere else: enough to identify, short enough to say.
+func describeHash(h sneakernet.WireHash) string { return fmt.Sprintf("%x…", h[:6]) }
 
 // humanBytes renders a size the way a sysop deciding whether it fits would want.
 func humanBytes(n int64) string {

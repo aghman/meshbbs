@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aghman/meshbbs/internal/identity"
@@ -300,4 +301,112 @@ func FuzzDecode(f *testing.F) {
 			t.Fatalf("accepted %d vectors and %d bundles", len(c.Vectors), len(c.Bundles))
 		}
 	})
+}
+
+// wantHash builds a request hash distinct enough to tell apart in a failure.
+func wantHash(b byte) WireHash {
+	var h WireHash
+	h[0], h[len(h)-1] = b, b
+	return h
+}
+
+// A request is 16 bytes and it is the whole of what fetch path 2 puts on the
+// wire (§6.5), so it round-trips or the queue does not work.
+func TestRequestsRoundTrip(t *testing.T) {
+	c := testCarrier(t)
+	c.Requests = []WireHash{wantHash(0x01), wantHash(0x02), wantHash(0xFF)}
+
+	enc, err := Encode(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Requests) != len(c.Requests) {
+		t.Fatalf("asked for %d files, carried %d", len(c.Requests), len(got.Requests))
+	}
+	for i := range c.Requests {
+		if got.Requests[i] != c.Requests[i] {
+			t.Errorf("request %d came back as %x", i, got.Requests[i])
+		}
+	}
+
+	// Order is part of the form. The queue drains oldest first, and a carrier
+	// that reordered it would quietly re-prioritise somebody's week-old ask.
+	if !bytes.Equal(enc, mustEncode(t, got)) {
+		t.Error("a decoded carrier does not re-encode to the same bytes")
+	}
+}
+
+func mustEncode(t *testing.T, c *Carrier) []byte {
+	t.Helper()
+	b, err := Encode(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// A carrier that asks for nothing is the ordinary case, and it must stay a
+// carrier rather than becoming a different shape.
+func TestACarrierMayAskForNothing(t *testing.T) {
+	c := testCarrier(t)
+	got, err := Decode(mustEncode(t, c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Requests) != 0 {
+		t.Errorf("an empty queue produced %d requests", len(got.Requests))
+	}
+}
+
+// One logical carrier, one wire form. The same hash written twice is the same
+// request written twice, and permitting it would give one meaning two forms.
+func TestDuplicateRequestsAreRefused(t *testing.T) {
+	c := testCarrier(t)
+	c.Requests = []WireHash{wantHash(0x05), wantHash(0x05)}
+	if _, err := Encode(c); !errors.Is(err, ErrNotCanonical) {
+		t.Errorf("encoding a duplicated request returned %v", err)
+	}
+}
+
+// A request for nothing addresses nothing, and would ride every carrier
+// forever without a holder ever being able to answer it.
+func TestAZeroRequestIsRefused(t *testing.T) {
+	c := testCarrier(t)
+	c.Requests = []WireHash{{}}
+	if _, err := Encode(c); err == nil {
+		t.Error("a carrier asked for the zero hash")
+	}
+}
+
+func TestTooManyRequestsAreRefused(t *testing.T) {
+	c := testCarrier(t)
+	for i := 0; i <= MaxRequests; i++ {
+		var h WireHash
+		binary.BigEndian.PutUint32(h[:], uint32(i+1))
+		c.Requests = append(c.Requests, h)
+	}
+	if _, err := Encode(c); !errors.Is(err, ErrTooMany) {
+		t.Errorf("encoding %d requests returned %v", len(c.Requests), err)
+	}
+}
+
+// A carrier from a build that predates the queue must say so rather than dying
+// inside a field it never wrote — the sysop is holding the stick and can act on
+// one of those and not the other.
+func TestAPreRequestCarrierIsNamedNotMisparsed(t *testing.T) {
+	c := testCarrier(t)
+	enc := mustEncode(t, c)
+	enc[4] = 1 // the version byte, back to the format before requests existed
+
+	_, err := Decode(enc)
+	if !errors.Is(err, ErrNotACarrier) {
+		t.Fatalf("a v1 carrier returned %v", err)
+	}
+	if !strings.Contains(err.Error(), "version") {
+		t.Errorf("the refusal does not name the version: %v", err)
+	}
 }

@@ -77,7 +77,14 @@ var Magic = [4]byte{'M', 'B', 'X', 'F'}
 // format inside it (bundle.FormatVersion) and of the record format inside that.
 // Three layers, three versions: a carrier can gain a field without touching
 // what the mesh speaks.
-const FormatVersion uint8 = 1
+//
+// Version 2 added the requests section (§6.5 fetch path 2). Bumped rather than
+// quietly extended, even though nothing has frozen yet and `[D10]`'s freeze is
+// a Phase 6 deliverable: a v1 carrier fed to this build would otherwise die
+// inside the request count with a truncation error, and "carrier format version
+// 1, this build speaks 2" is what a sysop holding a stick from a board on an
+// older build can act on.
+const FormatVersion uint8 = 2
 
 // Limits. See the package comment on why these are stricter in spirit than the
 // mesh's: the medium has no MTU and no rate limit.
@@ -89,6 +96,13 @@ const (
 	MaxVectors = 256
 	// MaxBlobRefs bounds how many files one exchange carries.
 	MaxBlobRefs = 256
+	// MaxRequests bounds how many files one carrier may ask for.
+	//
+	// Matched to MaxBlobRefs on purpose: asking for more than a carrier could
+	// possibly answer in one trip is not a request, it is a wish. A queue
+	// longer than this drains oldest-first over successive hand-offs, which is
+	// what store.OpenFileRequestHashes orders for.
+	MaxRequests = MaxBlobRefs
 	// MaxBlobBytes bounds one file's contents.
 	//
 	// Blobs are the one thing here that does not fit in memory and is not meant
@@ -149,7 +163,36 @@ type Carrier struct {
 	// arrives is what lets a receiver refuse a 200 GB stick without reading it,
 	// which is the streaming form of bounding a length before allocating.
 	Blobs []BlobRef
+
+	// Requests are the files this carrier's writer wants back (§6.5 path 2).
+	//
+	// # Why a request is a hash and nothing else
+	//
+	// The writer does not hold the file. All it has ever seen is the FILE
+	// record somebody announced, which carries a truncated BLAKE3 rather than
+	// all 32 bytes — so the truncation is not a choice made here, it is the
+	// whole of what the requester knows.
+	//
+	// It is also the stronger way to ask. "Send me utils/kermit.zip" is
+	// answered by whatever the holder happens to have filed under that name;
+	// "send me the bytes hashing to this" is answered by the bytes or not at
+	// all, and the receiver re-hashes on the way in. Content addressing is
+	// what makes an unsigned container safe, and it makes the request safe for
+	// the same reason.
+	//
+	// A carrier that asks for nothing is the ordinary case, and asking costs
+	// 16 bytes on a medium with no airtime budget — so this rides on both
+	// legs, outward and reply, rather than being a mode.
+	Requests []WireHash
 }
+
+// WireHash is a content hash as a request names it: BLAKE3 truncated to what a
+// FILE record carries.
+//
+// An alias rather than a defined type, so a record.FileBody's hash is one of
+// these without a conversion. The two are the same thing and giving them
+// different names would invite a build that keeps them in step by hand.
+type WireHash = [record.FileHashLen]byte
 
 // BlobRef names a file body carried after the manifest.
 //
@@ -169,11 +212,19 @@ type BlobRef struct {
 //	magic(4) | version(1) | origin(8) | created(4)
 //	vectorCount(uvarint) | (area(4) | len(uvarint) | vectorBytes)*
 //	bundleCount(uvarint) | (len(uvarint) | bundleBytes)*
+//	blobCount(uvarint) | (hash(32) | size(uvarint))*
+//	requestCount(uvarint) | hash(16)*
 //
 // Vectors are written in area order and bundles in the order given. Sorting the
 // vectors is what makes the encoding canonical: they arrive from a map, and Go
 // randomises map iteration (§6.2.1 rule 2), so an unsorted walk would give one
 // carrier a different form on every write.
+//
+// Requests come last, after the blob references, because the bodies follow the
+// manifest and the section that describes them should be the one nearest to
+// them. A reader that stops early has the declarations it needs to bound what
+// is coming; the requests are for the writer of the NEXT carrier, who is in no
+// hurry.
 func Encode(c *Carrier) ([]byte, error) {
 	if len(c.Vectors) > MaxVectors {
 		return nil, fmt.Errorf("%w: %d vectors, limit is %d", ErrTooMany, len(c.Vectors), MaxVectors)
@@ -183,6 +234,9 @@ func Encode(c *Carrier) ([]byte, error) {
 	}
 	if len(c.Blobs) > MaxBlobRefs {
 		return nil, fmt.Errorf("%w: %d blobs, limit is %d", ErrTooMany, len(c.Blobs), MaxBlobRefs)
+	}
+	if len(c.Requests) > MaxRequests {
+		return nil, fmt.Errorf("%w: %d requests, limit is %d", ErrTooMany, len(c.Requests), MaxRequests)
 	}
 
 	var buf []byte
@@ -225,6 +279,24 @@ func Encode(c *Carrier) ([]byte, error) {
 		}
 		buf = append(buf, b.Hash[:]...)
 		buf = binary.AppendUvarint(buf, b.Size)
+	}
+
+	buf = binary.AppendUvarint(buf, uint64(len(c.Requests)))
+	seen := make(map[WireHash]bool, len(c.Requests))
+	for _, h := range c.Requests {
+		if h == (WireHash{}) {
+			return nil, errors.New("carrier asks for a file with no hash")
+		}
+		// One logical carrier, one wire form: asking for the same hash twice
+		// is the same request written down twice, and permitting it would let
+		// two encodings mean the same thing. The caller de-duplicates by
+		// asking the store for distinct hashes; this is the structural check
+		// that says so.
+		if seen[h] {
+			return nil, fmt.Errorf("%w: a request appears twice (%x)", ErrNotCanonical, h[:4])
+		}
+		seen[h] = true
+		buf = append(buf, h[:]...)
 	}
 
 	if len(buf) > MaxCarrierBytes {
@@ -394,6 +466,27 @@ func decode(data []byte, allowTrailing bool) (*Carrier, int, error) {
 		}
 		ref.Size = size
 		c.Blobs = append(c.Blobs, ref)
+	}
+
+	requestCount, err := uvarint("the request count")
+	if err != nil {
+		return nil, 0, err
+	}
+	if requestCount > MaxRequests {
+		return nil, 0, fmt.Errorf("%w: asks for %d files, limit is %d",
+			ErrTooMany, requestCount, MaxRequests)
+	}
+	for i := uint64(0); i < requestCount; i++ {
+		h, err := take(record.FileHashLen, "a request hash")
+		if err != nil {
+			return nil, 0, err
+		}
+		var want WireHash
+		copy(want[:], h)
+		if want == (WireHash{}) {
+			return nil, 0, errors.New("carrier asks for a file with no hash")
+		}
+		c.Requests = append(c.Requests, want)
 	}
 
 	consumed := len(data) - len(rest)
