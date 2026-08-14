@@ -39,6 +39,21 @@
 # it as non-empty-means-crasher reports every committed regression seed as a
 # fresh finding. We snapshot the directory before the run and compare after, so
 # only files this run produced count.
+#
+# A MISSING CRASHER DIRECTORY IS AN EMPTY CORPUS, NOT AN ERROR, and saying so
+# explicitly is load-bearing rather than defensive. Most targets have never
+# found anything, so testdata/fuzz/<Target>/ does not exist for most of them —
+# and `ls` on a missing path exits non-zero, which `2>/dev/null` hides the
+# complaint about but not the status. Under `set -o pipefail` that failure is
+# the pipeline's, and the SECOND snapshot runs after `set -e` has been turned
+# back on, so the classifier aborted before it could classify anything.
+#
+# The effect was the exact inverse of this script's purpose: a target that hit
+# the tolerated shutdown race and had no committed corpus failed the job, with
+# the group header printed and no verdict under it. It went unnoticed because
+# both conditions are needed at once — the race is nondeterministic, and the
+# four targets that HAVE a corpus directory are the ones whose tolerance path
+# had ever run.
 set -uo pipefail
 
 pkg="$1"
@@ -53,8 +68,15 @@ before="$(mktemp)"
 after="$(mktemp)"
 trap 'rm -f "$log" "$before" "$after"' EXIT
 
+# snapshot lists the crasher directory, treating a missing one as empty. Both
+# callers go through it so neither depends on whether `set -e` happens to be
+# active where it is written — see the header on why that mattered.
+snapshot() {
+  ls -A "$crasher_dir" 2>/dev/null | sort || true
+}
+
 # Committed regression corpus, i.e. everything that is NOT a finding from this run.
-ls -A "$crasher_dir" 2>/dev/null | sort > "$before"
+snapshot > "$before"
 
 # The pattern is ANCHORED. -fuzz takes a regular expression, and Go refuses to
 # run at all when it matches more than one target:
@@ -77,7 +99,7 @@ fi
 
 echo "::group::${target} exited ${status}; classifying"
 
-ls -A "$crasher_dir" 2>/dev/null | sort > "$after"
+snapshot > "$after"
 new_crashers="$(comm -13 "$before" "$after")"
 
 if [ -n "$new_crashers" ]; then

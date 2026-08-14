@@ -13,6 +13,7 @@ import (
 
 	"github.com/aghman/meshbbs/internal/bbs"
 	"github.com/aghman/meshbbs/internal/clock"
+	"github.com/aghman/meshbbs/internal/record"
 	"github.com/aghman/meshbbs/internal/store"
 	"github.com/aghman/meshbbs/internal/term"
 	"github.com/aghman/meshbbs/internal/theme"
@@ -194,6 +195,16 @@ type Model struct {
 	// current text when the screen opens, so "d" is an edit rather than a
 	// retype — most uses of this are fixing a word, not writing from scratch.
 	descInput textInput
+	// requested is the content this session's user has already asked for
+	// (§6.5), keyed by the truncated hash a catalog entry carries. Held as a
+	// set rather than re-queried per row: the file browser asks the question
+	// once per file drawn, and the answer changes only when this session makes
+	// a request.
+	requested map[[record.FileHashLen]byte]bool
+	// arrivals are requests that have landed and not been mentioned to this
+	// user yet. Shown on the menu once and then marked told, because the
+	// person who asked was not there when a sysop imported the stick.
+	arrivals  []store.FileRequest
 	sysop_    sysopState
 	chatInput textInput
 	chatLines []ChatLine
@@ -250,6 +261,11 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{}
 	if m.screen == screenMenu {
 		cmds = append(cmds, m.loadAreas())
+		// A guest has no account to have asked with, so there is nothing to
+		// read and nobody to tell (§6.5).
+		if !m.guest {
+			cmds = append(cmds, m.loadFileRequests())
+		}
 	}
 	// Started here rather than at the first keypress: a session that connects
 	// and sits there is exactly the one a time limit is for.
@@ -346,6 +362,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case filesLoadedMsg:
 		m.files, m.fileIdx, m.fileArea = msg.files, 0, msg.area
+		return m, nil
+
+	case fileRequestsLoadedMsg:
+		m.requested, m.arrivals = msg.requested, msg.arrivals
+		return m, nil
+
+	case fileRequestedMsg:
+		// Recorded in the session's own set rather than re-read, so the
+		// listing under the cursor updates without a round trip. The store is
+		// the truth and this is a copy of one bit of it, which is safe because
+		// the only thing that sets that bit is this session.
+		if m.requested == nil {
+			m.requested = map[[record.FileHashLen]byte]bool{}
+		}
+		m.requested[msg.hash] = true
+		m.status, m.statusErr = msg.status.text, msg.status.isErr
 		return m, nil
 
 	case fileDescribedMsg:

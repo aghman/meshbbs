@@ -23,7 +23,118 @@ func newFileCmd(e *env) *cobra.Command {
 		Use:   "file",
 		Short: "Inspect and annotate the file catalog",
 	}
-	cmd.AddCommand(newFileListCmd(e), newFileDescribeCmd(e))
+	cmd.AddCommand(newFileListCmd(e), newFileDescribeCmd(e),
+		newFileRequestCmd(e), newFileRequestsCmd(e))
+	return cmd
+}
+
+// newFileRequestCmd queues a file for the next sneakernet exchange.
+//
+// The TUI is where a user does this — they are looking at the listing that
+// says which BBS holds it — so this exists for the sysop, who is the one
+// carrying the stick and is entitled to put something on it without logging in
+// to their own board over SSH.
+func newFileRequestCmd(e *env) *cobra.Command {
+	var nick string
+	cmd := &cobra.Command{
+		Use:   "request <area> <name>",
+		Short: "Queue a file held by another BBS for the next exchange (§6.5)",
+		Long: `Ask for a file this BBS does not hold.
+
+The mesh never carries file bytes, at any size, so a file announced by another
+board is a listing here and nothing more. This records a request. It rides every
+sneakernet carrier written from now on as a content hash, and when a board that
+holds the bytes answers one, the file is filed in this area under this name and
+whoever asked is told the next time they log in.
+
+What it does not do is promise a date. A hand-off happens when somebody walks,
+and nothing here knows when that is.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			area, name := args[0], args[1]
+			return withStore(e, cmd, func(ctx context.Context, st *store.Store) error {
+				entries, err := st.ListAreaContents(ctx, area)
+				if err != nil {
+					return err
+				}
+				var want store.CatalogEntry
+				var found bool
+				for _, entry := range entries {
+					if entry.Name != name {
+						continue
+					}
+					// A name can appear twice — two boards, two files, one
+					// name — and the one worth requesting is the one this node
+					// does not have.
+					if !entry.Held {
+						want, found = entry, true
+						break
+					}
+					want, found = entry, true
+				}
+				if !found {
+					return fmt.Errorf("%s holds no listing for %s", area, name)
+				}
+
+				req, err := st.RequestFile(ctx, area, want.Name, want.Hash, want.Origin, nick)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(),
+					"Queued %s/%s for %s.\nIt rides the next carrier: "+
+						"meshbbs sneakernet export away.mbx\n",
+					req.Area, req.Name, req.Nick)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&nick, "for", "sysop",
+		"the account to notify when it lands")
+	return cmd
+}
+
+// newFileRequestsCmd shows the queue.
+func newFileRequestsCmd(e *env) *cobra.Command {
+	var nick string
+	cmd := &cobra.Command{
+		Use:   "requests",
+		Short: "Show what is queued for the next sneakernet exchange",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return withStore(e, cmd, func(ctx context.Context, st *store.Store) error {
+				reqs, err := st.ListFileRequests(ctx, nick)
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				if len(reqs) == 0 {
+					fmt.Fprintln(out, "Nothing is on request.")
+					return nil
+				}
+
+				w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(w, "AREA\tNAME\tFOR\tHASH\tSTATE")
+				for _, r := range reqs {
+					state := "waiting"
+					switch {
+					case r.Filed():
+						state = "arrived"
+					case r.Arrived():
+						state = r.Note
+					}
+					fmt.Fprintf(w, "%s\t%s\t%s\t%x…\t%s\n",
+						r.Area, r.Name, r.Nick, r.Hash[:6], state)
+				}
+				if err := w.Flush(); err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "\nWaiting requests ride every carrier "+
+					"`meshbbs sneakernet export` writes.\n")
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&nick, "for", "", "show only this account's requests")
 	return cmd
 }
 

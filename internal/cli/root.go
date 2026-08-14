@@ -98,6 +98,7 @@ no registry and no address authority. Run "meshbbs id" to see this node's ID.`,
 		newFileCmd(e),
 		newDoorCmd(e),
 		newDoorExampleCmd(),
+		newSneakernetCmd(e),
 		newMeshCmd(e),
 		newDevCmd(e),
 	)

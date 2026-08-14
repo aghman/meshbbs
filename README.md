@@ -59,6 +59,22 @@ format rather than a setting: every field of a catalog entry is bounded, so the 
 211-byte body against the 8 KiB a record may carry — there is nowhere in one to put a file. Browse with `F` from the main menu, and move files with an ordinary SFTP client. A file
 held by another BBS says so, and says which one, instead of offering a download that could not work.
 
+**You can still ask for it.** Press `r` and the request is written down. It rides the next
+exchange of records between boards as a content hash, a board that holds those bytes answers with
+them, and you are told when the file lands. What it does not give you is a date — an exchange
+happens when somebody carries a drive somewhere, and nothing here knows when that is:
+
+```
+meshbbs sneakernet export away.mbx     # on your board, then carry it
+meshbbs sneakernet import away.mbx     # on theirs
+meshbbs sneakernet export --reply-to away.mbx --files back.mbx
+meshbbs sneakernet import back.mbx     # home again, with the files
+```
+
+That is also how two boards federate with no radio in range and no IP route between them. A
+carrier holds records and the sender's version vectors, so the reply can be computed without a
+conversation ever happening.
+
 The same BBS is also reachable from a browser. That front end is off until you give it a public
 origin and a TLS certificate, because neither has a sensible default — passkeys are bound to the
 origin, and a mismatch fails every sign-in with a browser error that says nothing about the cause:
