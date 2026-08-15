@@ -1,0 +1,267 @@
+Anyone else seeing the RAK4631 drop off the mesh after about six hours? Mine
+comes back if I power cycle it but that is not much of a fix. Running 2.5.4
+with the default preset and nothing exotic in the config.
+
+73 de austin
+%%
+> comes back if I power cycle it but that is not much of a fix
+
+I had exactly this last winter. Turned out to be battery sag under TX rather
+than anything in the firmware. Put a bigger cap across the 3v3 rail and see
+whether it settles down.
+%%
+Re: RAK4631 dropping off the mesh
+
+> Put a bigger cap across the 3v3 rail
+
+That did it, thank you. Twelve hours uptime now with no resets at all. I am
+posting this from the node itself, which feels like a milestone of some kind.
+%%
+New file area is up. /files/firmware has the 2.5.x builds for the boards
+people around here actually run. Descriptions are thin at the moment and I
+will fill them in as I go. If you have a build that is not there, upload it
+and I will get it into the catalog.
+%%
+Reminder that the swap area is for gear and not for general chatter. Two
+posts this week were neither. Not a big deal, just trying to keep it useful
+for the people who search it later.
+%%
+Solar controller is finally behaving itself. The trick was disabling the load
+output entirely and running the node straight off the battery terminals. Four
+days unattended now through some genuinely miserable weather.
+%%
+> running the node straight off the battery terminals
+
+Does that not risk over-discharge? Mine cuts out at 3.2v and I would rather
+it kept doing so. Curious what you are using for low voltage protection now.
+%%
+Re: Solar controller
+
+> Does that not risk over-discharge?
+
+It does, and I am relying on the BMS in the pack rather than the controller.
+Not ideal. If the pack ever goes I will have made a mistake and I know it.
+%%
+Catalog now has 41 files across three areas. If anyone wants a copy of the
+whole lot on a stick, say so and I will bring one to the meetup on Saturday.
+%%
+Weekly net is Thursday at 19:00 local on the usual channel. Bring a signal
+report if you can manage one. I want to map the eastern edge properly this
+time and I need more than my own two data points to do it.
+%%
+Re: Weekly net
+
+> Bring a signal report if you can manage one
+
+I will be portable from the ridge above the reservoir. That should be the
+longest path we have tried so far. Will post numbers afterwards either way.
+%%
+The node list for August is uploaded. Twelve active instances, three of them
+new since June, and two that have not been heard from in six weeks. I have
+left the quiet ones in for now rather than pruning them.
+%%
+Question for the group: what hop limit is everyone running? I have been at 3
+since I set the thing up and I have no idea whether that is sensible or
+whether I am quietly making everybody else's life worse.
+%%
+> what hop limit is everyone running?
+
+Three here as well. My understanding is that going higher costs the whole
+channel rather than just you, so I have left it alone. Would be glad to be
+corrected by somebody who has actually measured it.
+%%
+Re: hop limit
+
+> going higher costs the whole channel rather than just you
+
+That matches what I have read. Every extra hop multiplies the airtime one
+packet costs across the network, so it is not a local decision even though it
+looks like one in the config file.
+%%
+Uploaded the ANSI art pack from the old board. It is mostly menu screens and
+a few login sequences, all of it from the mid nineties. No idea who drew any
+of it. If you recognise a signature let me know and I will credit it.
+%%
+Power outage here took the board down for about nine hours yesterday. Sorry
+to anyone who tried to connect. Everything came back cleanly and I do not
+think anything was lost, but shout if you notice a gap.
+%%
+> Everything came back cleanly and I do not think anything was lost
+
+Confirmed from this end. My last sync picked up everything from Tuesday
+onward with no gaps that I can see.
+%%
+Does anybody have a spare 868 antenna they are willing to part with? Mine
+snapped at the base in the wind and the replacement I ordered is apparently
+coming by boat. Happy to pay or trade.
+%%
+Re: spare 868 antenna
+
+> Mine snapped at the base in the wind
+
+I have two of the short stubby ones doing nothing in a drawer. Not brilliant
+but better than nothing. Will bring one Saturday if you are going.
+%%
+The game league is up and running. Four boards signed up so far. Scores
+settle over a day or two rather than instantly, which took some getting used
+to, but it works and it is genuinely fun to see somebody else's board show up
+in the results.
+%%
+> Scores settle over a day or two rather than instantly
+
+That is the part I like about it honestly. It feels closer to how this all
+worked originally than a live scoreboard would.
+%%
+Sysop note: registration is open again. I closed it for a fortnight while I
+sorted out the disk situation and I should have said so at the time rather
+than leaving people wondering. Apologies.
+%%
+Anyone running this on a Pi Zero 2? Wondering whether it is worth the power
+saving over the Pi 4 I have now, or whether I will spend the difference
+swearing at it.
+%%
+> Anyone running this on a Pi Zero 2?
+
+Yes, for about three months. It is fine. The SSH side is unnoticeable and the
+mesh side is not exactly demanding. I would do it again.
+%%
+Re: Pi Zero 2
+
+> The SSH side is unnoticeable
+
+Good to know, thank you. Ordering one. The Pi 4 can go back to doing whatever
+it was doing before I decided it should be a BBS.
+%%
+Long path report from last night: 41km, line of sight across the water, and
+it worked on the first try which frankly surprised me. Both ends were on the
+default preset with no amplification of any kind.
+%%
+> 41km, line of sight across the water
+
+That is a very good number for a stock setup. Water paths flatter everybody
+but that is still impressive. What was the antenna height at each end?
+%%
+Re: Long path report
+
+> What was the antenna height at each end?
+
+About four metres my side, on a pole strapped to a fence post. The other end
+was on a roof, so call it eight or nine. Nothing clever.
+%%
+Uploaded a firmware build for the Heltec V3. It is untested on my end because
+I do not own one. If somebody tries it and it works, say so and I will
+update the description to say as much.
+%%
+The file request queue works now. If you see something in the catalog held by
+a board you cannot reach, press r and it will ride along on the next stick
+somebody carries. There is no date on that, which is the honest answer.
+%%
+> There is no date on that, which is the honest answer
+
+Appreciated. Better than a progress bar that means nothing.
+%%
+Reminder for anyone new: your nick is unique on this board and nowhere else.
+If you send mail to somebody on another instance you need the board as well,
+so austin@pnw rather than just austin.
+%%
+Re: nicks
+
+> your nick is unique on this board and nowhere else
+
+Which is exactly how it worked before, and I would argue it is the right call.
+Nobody needs a global registry of nicknames.
+%%
+Meetup on Saturday is confirmed. Same room as last time, from about eleven.
+Bring anything you want flashed, I will have a laptop and the usual cables.
+%%
+Winter plan: I want to get a node onto the hill before the weather closes in.
+Solar, sealed box, and no way to get to it between November and March. If it
+fails it fails until spring, which concentrates the mind about the mounting.
+%%
+> no way to get to it between November and March
+
+Overbuild the mounting and undersize the load. That is the only advice I have
+that has survived contact with an actual winter.
+%%
+Re: Winter plan
+
+> Overbuild the mounting and undersize the load
+
+Noted. I am budgeting for about a third of what the panel claims and assuming
+the worst about the mounting hardware.
+%%
+Board has been up for a year today. Fourteen users, a few thousand posts, one
+disk scare, and no data lost. Thanks to everyone who has put anything into it.
+%%
+> Board has been up for a year today
+
+Congratulations. It has been a genuinely nice place to read in the evening,
+which is more than I can say for most things.
+%%
+Small thing but the file descriptions make an enormous difference when you
+are browsing on a slow link. If you upload something, write the one line.
+Future you searching for it will be grateful.
+%%
+Anyone tried the door API? I want to port an old game over and I cannot tell
+from the docs whether I need level 3 or level 4 for what I am doing. It posts
+results to an area but it does not need to act as the user.
+%%
+> whether I need level 3 or level 4
+
+Level 3. Level 4 is only for posting as the user, which from your description
+is not what you want. Announcing to an area is the level below it.
+%%
+Re: door API
+
+> Level 3
+
+That is what I hoped. Thank you. Will report back when there is something
+worth playing.
+%%
+Mail is working properly again after the key rotation. If you sent me
+anything in the last week and got silence, that is why, and please resend.
+%%
+Netlist question: are we tracking boards that are only reachable by stick?
+There are at least two I know of that have never been on the mesh and
+probably never will be, and they are still part of this in every way that
+matters.
+%%
+> are we tracking boards that are only reachable by stick?
+
+We should. The catalog already knows about files it cannot fetch, so there is
+precedent for listing something you cannot reach directly.
+%%
+Storm took out the repeater on the ridge. Nothing we can do until the road
+reopens. Traffic is routing the long way round and it shows, but it is
+routing, which is the whole point of the thing.
+%%
+> Traffic is routing the long way round and it shows
+
+Latency here went from minutes to most of an hour. Still arrived. I will take
+slow over silent.
+%%
+Fresh install notes for anyone starting out: run config check before you run
+anything else. It catches about nine tenths of the mistakes I made and it
+takes a second.
+%%
+> run config check before you run anything else
+
+Seconded. It caught a bad key path for me before I had wondered why nothing
+was signing.
+%%
+Trade: I have a spare solar charge controller, MPPT, barely used. Looking for
+a decent SMA pigtail or two, or just take it if you need it more than I need
+the pigtails.
+%%
+The archive of last year's net logs is uploaded. It is a plain text dump,
+nothing fancy, but the signal reports in it are useful if you are trying to
+work out where to put an antenna.
+%%
+Reminder that DMs are end to end encrypted now if you are using the key
+helper. The server cannot read them, which also means I cannot recover them
+for you if you lose the passphrase. Write it down somewhere real.
+%%
+> which also means I cannot recover them for you
+
+That is the correct trade and I am glad it is stated plainly rather than
+buried. Most places would not say the second half.

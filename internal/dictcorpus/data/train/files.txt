@@ -1,0 +1,30 @@
+firmware-2.5.4-rak4631.uf2	412160	RAK4631 build, tested here for a week
+firmware-2.5.4-heltec-v3.bin	389120	Heltec V3, untested, reported working
+firmware-2.5.1-tbeam.bin	401408	older T-Beam build, kept for reference
+firmware-2.5.4-station-g2.bin	394240	Station G2, default preset
+meshbbs-0.20.tar.gz	1048576	source release, signed
+meshbbs-0.19.tar.gz	1032192	previous source release
+meshbbs-linux-arm64	14680064	prebuilt for the Pi, cgo free
+meshbbs-linux-amd64	15204352	prebuilt, cgo free
+ansi-artpack-1996.zip	2359296	menu screens and login sequences, origin unknown
+ansi-artpack-1997.zip	1966080	second volume of the same collection
+netlist-2026-08.txt	8192	August node list, twelve active instances
+netlist-2026-07.txt	7936	July node list
+netlist-2026-06.txt	7680	June node list
+netlog-2026-08-07.txt	24576	Thursday net, signal reports included
+netlog-2026-07-31.txt	22528	Thursday net
+netlog-2026-07-24.txt	26624	Thursday net, long path attempt
+netlogs-2025-archive.tar.gz	3145728	last year of net logs, plain text
+terminal-manual-ch9.pdf	5242880	escape sequences, scanned
+antenna-notes.txt	4096	what worked and what did not, by location
+solar-sizing.txt	3072	panel and battery sizing for a winter node
+enclosure-bom.txt	2048	parts list for the sealed box
+tradewars-scores-2026-08.csv	16384	league export, month to date
+tradewars-scores-2026-07.csv	18432	league export
+door-api-notes.txt	6144	porting notes for an old game
+config-example-full.toml	12288	every key with comments
+config-example-minimal.toml	1024	the shortest thing that starts
+migration-notes-0.19-0.20.txt	5120	what changed and what to back up first
+pi-zero-2-notes.txt	3584	power draw and thermals over three months
+ridge-site-survey.txt	9216	photographs and bearings for the hill site
+boat-node-log.txt	11264	paths held at anchor and under way

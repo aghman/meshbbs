@@ -250,12 +250,7 @@ func TestBundleVectors(t *testing.T) {
 // belongs in a new dictionary ID, leaving old peers able to decode.
 func TestBundleDecodeVectors(t *testing.T) {
 	c, _ := load(t)
-	dict, err := bundle.Dictionary0()
-	if err != nil {
-		t.Fatalf("dictionary 0: %v", err)
-	}
-	defer dict.Close()
-	set, err := bundle.NewDictionarySet(dict)
+	set, err := bundle.DefaultDictionarySet()
 	if err != nil {
 		t.Fatalf("dictionary set: %v", err)
 	}

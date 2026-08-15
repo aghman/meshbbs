@@ -514,35 +514,65 @@ func buildBundles(records map[string]*record.Record) ([]conformance.BundleVector
 	// never regenerated: the test only asserts they still DECODE, so a zstd
 	// upgrade that emits different bytes is free while one that stops reading
 	// its own old output is not.
-	dict, err := bundle.Dictionary0()
+	// Every shipped dictionary appears here. That is what makes editing one in
+	// place a red build rather than a field report: §7.4 keeps old dictionaries
+	// supported, and content that changed under an unchanged ID is exactly the
+	// failure that promise exists to prevent.
+	//
+	// The dictionary-0 vectors keep the names they were frozen under. Their
+	// suffix does not say "dict0" because at the time there was only one, and
+	// renaming a frozen vector is not a thing this corpus permits — a third-party
+	// implementation may already be testing against the name.
+	d0, err := bundle.Dictionary0()
 	if err != nil {
 		return nil, nil, err
 	}
-	defer dict.Close()
+	defer d0.Close()
+	d1, err := bundle.Dictionary1()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer d1.Close()
 
-	var decode []conformance.BundleDecodeVector
-	for _, name := range []string{"bundle-single", "bundle-multi-origin"} {
-		var v conformance.BundleVector
-		for _, c := range vectors {
-			if c.Name == name {
-				v = c
-			}
-		}
-		b := &bundle.Bundle{Area: record.AreaTagFor(v.Input.Area), BaseTS: v.Input.BaseTS, DictID: 0}
+	packedFor := func(v conformance.BundleVector, d *bundle.Dictionary) ([]byte, error) {
+		b := &bundle.Bundle{Area: record.AreaTagFor(v.Input.Area), BaseTS: v.Input.BaseTS, DictID: d.ID()}
 		for _, rn := range v.Input.Records {
 			b.Records = append(b.Records, records[rn])
 		}
-		packed, err := bundle.Pack(b, dict)
-		if err != nil {
-			return nil, nil, err
+		return bundle.Pack(b, d)
+	}
+	find := func(name string) conformance.BundleVector {
+		for _, c := range vectors {
+			if c.Name == name {
+				return c
+			}
 		}
-		decode = append(decode, conformance.BundleDecodeVector{
-			Name:       name + "-packed",
-			Note:       "frozen dictionary-0 output; asserted to DECODE, never to be re-emitted byte for byte",
-			DictID:     0,
-			Packed:     packed,
-			ExpectBody: v.Body,
-		})
+		return conformance.BundleVector{}
+	}
+
+	var decode []conformance.BundleDecodeVector
+	for _, spec := range []struct {
+		dict   *bundle.Dictionary
+		suffix string
+	}{
+		{d0, "-packed"},
+		{d1, "-packed-dict1"},
+	} {
+		for _, name := range []string{"bundle-single", "bundle-multi-origin"} {
+			v := find(name)
+			packed, err := packedFor(v, spec.dict)
+			if err != nil {
+				return nil, nil, err
+			}
+			decode = append(decode, conformance.BundleDecodeVector{
+				Name: name + spec.suffix,
+				Note: fmt.Sprintf("frozen dictionary-%d output; asserted to DECODE, never to be re-emitted byte for byte",
+					spec.dict.ID()),
+				DictID:     spec.dict.ID(),
+				Packed:     packed,
+				ExpectBody: v.Body,
+			})
+		}
 	}
 	return vectors, decode, nil
 }
