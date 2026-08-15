@@ -62,75 +62,104 @@
 
     <div class="gap-s"></div>
 
-    <div class="term">
+    <div class="term term-screen">
+      <div class="term-cap"><span>Captured over SSH from a live instance</span><b>80×24</b></div>
       <div class="term-bar" role="tablist" aria-label="Ways to connect">
         <button role="tab" aria-selected="true"  data-tab="new">ssh new@</button>
-        <button role="tab" aria-selected="false" data-tab="unknown">Unknown nick</button>
-        <button role="tab" aria-selected="false" data-tab="login">Returning</button>
+        <button role="tab" aria-selected="false" data-tab="warn">The warning</button>
+        <button role="tab" aria-selected="false" data-tab="login">Arriving</button>
         <button role="tab" aria-selected="false" data-tab="guest">Guest</button>
       </div>
       <div class="term-body">
-<pre data-panel="new"><span class="d">The documented path. `new` is a reserved nick the server</span>
-<span class="d">accepts with any key, or none at all.</span>
+<pre data-panel="new"><span class="d">The documented path. `new` is a reserved nick the server accepts</span>
+<span class="d">with any key, or none at all. Three prompts, in this order.</span>
 
 <span class="p">$</span> <span class="c">ssh new@bbs.example.com</span>
 
-<span class="d">  ┌──────────────────────────────────────────────┐</span>
-<span class="d">  │</span>  <span class="b">NEW USER REGISTRATION</span>                       <span class="d">│</span>
-<span class="d">  ├──────────────────────────────────────────────┤</span>
-<span class="d">  │</span>  Nick        <span class="c">austin_</span>                        <span class="d">│</span>
-<span class="d">  │</span>  Public key  <span class="g">✓ enrolled from this session</span>    <span class="d">│</span>
-<span class="d">  │</span>  Passphrase  <span class="d">••••••••  (wraps your DM key)</span>   <span class="d">│</span>
-<span class="d">  └──────────────────────────────────────────────┘</span>
+<span class="b">New User Registration</span>
+<span class="d">------------------------------------------------------------------------------</span>
 
-<span class="d">  SSH already handed the server your public key, so</span>
-<span class="d">  enrollment is free and your next login is passwordless.</span>
-<span class="d">  Connecting without a key? You set a password instead.</span></pre>
+Your SSH key will be enrolled automatically.
+A password is optional — press enter to skip it.
 
-<pre data-panel="unknown" hidden><span class="d">The path people find by accident, and it's nicer than an</span>
-<span class="d">opaque "Permission denied".</span>
+Nick: <span class="c">marguerite_</span>
 
-<span class="p">$</span> <span class="c">ssh austin@bbs.example.com</span>
+<span class="d">esc to disconnect</span>
 
-<span class="d">  No account here yet under that nick.</span>
+<span class="d">  Then: Password (optional, since the key is already enrolled),</span>
+<span class="d">  then a DM passphrase and its confirmation.</span></pre>
 
-    <span class="b">[R]</span> Register as <span class="c">austin</span>
-    <span class="b">[Q]</span> Quit
+<pre data-panel="warn" hidden><span class="d">The last screen before the account exists. It is not a formality —</span>
+<span class="d">this is the one thing on the BBS nobody can undo for you.</span>
 
-<span class="d">  ────────────────────────────────────────────────</span>
-<span class="d">  If the nick DOES exist and your key isn't enrolled,</span>
-<span class="d">  you get a different screen — never the signup flow.</span>
-<span class="d">  Offering "register?" to someone whose key merely</span>
-<span class="d">  changed is how you get duplicate accounts.</span></pre>
+<span class="b">New User Registration</span>
+<span class="d">------------------------------------------------------------------------------</span>
 
-<pre data-panel="login" hidden><span class="p">$</span> <span class="c">ssh austin@bbs.example.com</span>
+Before you finish, one thing that cannot be undone:
 
-<span class="d">  ╔══════════════════════════════════════════════╗</span>
-<span class="d">  ║</span>   <span class="c">fog city bbs</span>  <span class="d">K7QM4X2P…</span>        <span class="g">3 nodes up</span>   <span class="d">║</span>
-<span class="d">  ╚══════════════════════════════════════════════╝</span>
+If you forget your passphrase, your private messages become permanently
+unreadable. Not by the sysop, not by anyone. There is no reset, and inventing
+one would defeat the point.
 
-    <span class="b">[F]</span> Forums          <span class="d">12 new in 4 areas</span>
-    <span class="b">[M]</span> Mail            <span class="c">2 unread</span>
-    <span class="b">[D]</span> Doors           <span class="d">3 available</span>
-    <span class="b">[F]</span> File areas      <span class="d">1,204 files network-wide</span>
-    <span class="b">[C]</span> Node chat       <span class="d">nobody around</span>
-    <span class="b">[S]</span> Settings        <span class="d">theme, encoding, keys</span>
+The sysop can reset your password, but doing so destroys your existing mail —
+they will be warned, and so are you.
 
-  <span class="p">Command:</span> <span class="c">_</span></pre>
+  <span class="b">[Y]</span> I understand, create my account    <span class="b">[N]</span> cancel
+
+<span class="d">esc to disconnect</span></pre>
+
+<pre data-panel="login" hidden><span class="p">$</span> <span class="c">ssh marguerite@bbs.example.com</span>
+
+<span class="b">MeshBBS</span>
+<span class="d">------------------------------------------------------------------------------</span>
+
+You are marguerite  on node 1
+
+  <span class="b">[M]</span> Message areas — read and post
+  <span class="b">[F]</span> File areas — browse what is here
+  <span class="b">[E]</span> Electronic mail — your private messages
+  <span class="b">[C]</span> Chat with everyone online
+  <span class="b">[D]</span> Door games
+  <span class="b">[W]</span> Who else is online
+  <span class="b">[N]</span> This node's identity
+  <span class="b">[P]</span> Passkey for the web — sign in from a browser
+  <span class="b">[Q]</span> Quit
+
+<span class="g">* Welcome to the BBS, marguerite.</span>
+
+<span class="d">Press a highlighted letter. Ctrl+C to disconnect.</span></pre>
 
 <pre data-panel="guest" hidden><span class="p">$</span> <span class="c">ssh guest@bbs.example.com</span>
 
-<span class="d">  Read-only session. No persistent identity.</span>
-<span class="d">  Browse the forums, see what's here, decide later.</span>
+<span class="b">MeshBBS</span>
+<span class="d">------------------------------------------------------------------------------</span>
 
-    <span class="b">[F]</span> Forums          <span class="d">read-only</span>
-    <span class="b">[F]</span> File areas      <span class="d">read-only</span>
-    <span class="d">[M] Mail            requires an account</span>
+You are guest (guest, read-only)  on node 1
 
-  <span class="p">Command:</span> <span class="c">_</span>
+  <span class="b">[M]</span> Message areas — read and post
+  <span class="b">[F]</span> File areas — browse what is here
+  <span class="b">[E]</span> Electronic mail — your private messages
+  <span class="b">[C]</span> Chat with everyone online
+  <span class="b">[D]</span> Door games
+  <span class="b">[W]</span> Who else is online
+  <span class="b">[N]</span> This node's identity
+  <span class="b">[Q]</span> Quit
 
-<span class="d">  Guest access is a sysop setting and may be off.</span></pre>
+<span class="d">You are browsing as a guest. Run `ssh new@this-bbs` to register.</span>
+
+<span class="d">Press a highlighted letter. Ctrl+C to disconnect.</span></pre>
       </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="col prose">
+      <p style="font-size:16px;color:var(--fg-dim)">
+        The menu is the same graph for everyone — a guest sees every entry and is turned away at
+        the ones that need an account, rather than being shown a shorter board. Two entries are
+        conditional: <code>[P]</code> appears only when the sysop has enabled the web front end,
+        and <code>[S] Sysop panel</code> only for the sysop.
+      </p>
     </div>
 
     <div class="gap-m"></div>
@@ -156,14 +185,34 @@
           <code>daemon</code></div>
       </div>
       <div class="row">
+        <div class="k">Typing a nick that doesn't exist</div>
+        <div class="v"><code>ssh marguerite@bbs</code> for an account nobody has taken drops you
+          into registration with that nick already filled in, rather than returning an opaque
+          permission denied. If the nick <em>does</em> exist and your key is not enrolled on it, you
+          get a different screen telling you to log in with your password and enrol the key —
+          never the signup flow. Offering "register?" to someone whose key merely changed is how
+          you get duplicate accounts.</div>
+      </div>
+      <div class="row">
         <div class="k">Registration modes</div>
-        <div class="v">Open, approval, invite or closed. The default is open <em>with federated
-          posting withheld</em> — the door is open, the shared airtime is gated. A sysop grants
-          <code>post_federated</code> when they're ready to spend budget on you.</div>
+        <div class="v">The default is open <em>with federated posting withheld</em> — the door is
+          open, the shared airtime is gated. A sysop grants <code>post_federated</code> when
+          they're ready to spend budget on you. The config accepts
+          <code>approval</code> and <code>invite</code> as well, but
+          <a class="inline" href="status.html#gaps">neither flow is built yet</a>: today anything
+          other than <code>open</code> simply closes self-registration.</div>
       </div>
       <div class="row">
         <div class="k">Multiple keys</div>
-        <div class="v">Enroll one per client. Your laptop and your phone can both be you.</div>
+        <div class="v">Enrol one per client, from a session you are already logged into. Your
+          laptop and your phone can both be you.</div>
+      </div>
+      <div class="row">
+        <div class="k">Themes are the sysop's</div>
+        <div class="v">Four ship — <code>classic</code>, <code>contrast</code>, <code>mono</code>,
+          <code>muted</code> — and the instance picks one for every session. There is no per-user
+          theme picker. Character encoding <em>is</em> per-session: UTF-8 or CP437, guessed from
+          your locale and terminal type.</div>
       </div>
     </div>
   </section>
@@ -224,14 +273,59 @@
       </p>
       <p>
         Address them <code>nick@NODEID</code>, or <code>nick@alias</code> if your sysop has named
-        the peer. If the destination isn't reachable, mail is held and retried with backoff for
-        seven days before bouncing.
+        the peer. Undeliverable mail to a peer that has not been heard from is queued rather than
+        refused — the retry and bounce policy is a Phase 5 concern and is not built yet, so today
+        the honest description is that mail to an unreachable node waits.
       </p>
       <p>
         Where key custody is concerned there's a genuine tension, and it's worth being straight
         about: the product is a terminal session, so if the server never holds your key, the server
         can't render your mail. Three tiers ship in order.
       </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term term-screen">
+      <div class="term-cap"><span>Captured over SSH from a live instance</span><b>80×24</b></div>
+      <div class="term-bar" role="tablist" aria-label="Reading mail">
+        <button role="tab" aria-selected="true"  data-tab="unlock">Unlocking</button>
+        <button role="tab" aria-selected="false" data-tab="inbox">The inbox</button>
+        <button role="tab" aria-selected="false" data-tab="read">Reading one</button>
+      </div>
+      <div class="term-body">
+<pre data-panel="unlock"><span class="b">Unlock Mail</span>
+<span class="d">------------------------------------------------------------------------------</span>
+
+Your messages are encrypted with a key that only your passphrase opens.
+The sysop stores that key encrypted and cannot read your mail without it.
+
+Passphrase: <span class="c">_</span>
+
+<span class="d">enter unlock · esc back</span></pre>
+
+<pre data-panel="inbox" hidden><span class="d">Before you unlock, and after the session ends, this is all the</span>
+<span class="d">server can render. The subject line is inside the ciphertext.</span>
+
+<span class="b">Mail</span>
+<span class="d">------------------------------------------------------------------------------</span>
+
+<span class="c">&gt;   marguerite     (encrypted — press enter to read)  08-15 16:52</span>
+
+<span class="g">* Message sent to marguerite.</span>
+
+<span class="d">up/down move · enter read · c compose · q back</span></pre>
+
+<pre data-panel="read" hidden><span class="b">Message</span>
+<span class="d">------------------------------------------------------------------------------</span>
+
+<span class="b">Note to self</span>
+<span class="d">from marguerite · 2026-08-15 16:52</span>
+
+Antenna is on the roof now. Survey starts Saturday if the mesh is quiet.
+
+<span class="d">r reply · any other key back</span></pre>
+      </div>
     </div>
 
     <div class="gap-m"></div>
@@ -301,33 +395,72 @@
 
     <div class="gap-s"></div>
 
-    <div class="term">
+    <div class="term term-screen">
+      <div class="term-cap"><span>Captured from a live instance</span><b>sftp, then the in-terminal browser</b></div>
+      <div class="term-bar" role="tablist" aria-label="File areas">
+        <button role="tab" aria-selected="true"  data-tab="sftp">Uploading</button>
+        <button role="tab" aria-selected="false" data-tab="browse">Browsing</button>
+        <button role="tab" aria-selected="false" data-tab="detail">One file</button>
+      </div>
       <div class="term-body">
-<pre><span class="p">$</span> <span class="c">sftp -P 2222 austin@bbs.example.com</span>
+<pre data-panel="sftp"><span class="p">$</span> <span class="c">sftp -P 2222 austin@bbs.example.com</span>
+<span class="d">Connected to bbs.example.com.</span>
 
 <span class="p">sftp&gt;</span> <span class="c">put mesh-survey.tar.gz /utils/MESH-SURVEY.TGZ</span>
-<span class="d">Uploading mesh-survey.tar.gz  100%  84KB  84.0KB/s</span>
+<span class="d">Uploading mesh-survey.tar.gz to /utils/MESH-SURVEY.TGZ</span>
+<span class="d">mesh-survey.tar.gz                            100% 1457     2.6MB/s   00:00</span>
 
-<span class="d">─────────────────────────────────────────────────────────</span>
-<span class="d">In the file browser, a file held elsewhere says so</span>
-<span class="d">rather than spinning forever:</span>
+<span class="p">sftp&gt;</span> <span class="c">ls /utils</span>
+<span class="d">/utils/MESH-SURVEY.TGZ</span>
 
-  <span class="b">DOOM-SRC.TAR.GZ</span>   <span class="d">8.0 MB</span>   <span class="d">held by</span> <span class="c">pnw</span>
+<span class="d">  Uploading needs the upload_files capability, which new accounts</span>
+<span class="d">  do get by default — unlike post_federated, which they do not.</span></pre>
 
-  <span class="c">Held by pnw (SKX2DBX4)</span>
+<pre data-panel="browse" hidden><span class="d">The area list first. "Local to this BBS" here means the catalog</span>
+<span class="d">stays put; federating it sends the listing, never the bytes.</span>
 
-  <span class="d">This BBS does not have the file, only its listing.</span>
-  <span class="d">File contents never travel the mesh, at any size, so</span>
-  <span class="d">there is nothing to download here.</span>
+<span class="b">File Areas</span>
+<span class="d">------------------------------------------------------------------------------</span>
 
-  <span class="d">That BBS's sysop:</span>
-  <span class="g">    sysop@pnw.example</span></pre>
+<span class="c">&gt; utils             Tools and odds and ends     Local to this BBS</span>
+
+<span class="d">"Federated" means this area's file list travels the mesh, so other BBSes can see</span>
+<span class="d">what is here. The files themselves never do, at any size.</span>
+
+<span class="d">up/down move · enter open · q back</span>
+
+<span class="b">Files in utils</span>
+<span class="d">------------------------------------------------------------------------------</span>
+
+  <span class="d">Name                      Size       Description               Held by</span>
+<span class="c">&gt; MESH-SURVEY.TGZ           1.4 KB     Survey scripts and a sa…  here</span>
+
+<span class="d">up/down move · enter details · q back</span></pre>
+
+<pre data-panel="detail" hidden><span class="b">MESH-SURVEY.TGZ</span>
+<span class="d">------------------------------------------------------------------------------</span>
+
+<span class="b">MESH-SURVEY.TGZ</span>
+<span class="d">1.4 KB  ·  1457 bytes  ·  uploaded by austin  ·  2026-08-15 16:46</span>
+
+Survey scripts and a sample report
+
+To download it:
+    <span class="c">sftp -P 2222 marguerite@this-bbs</span>  then:  <span class="c">get /utils/MESH-SURVEY.TGZ</span>
+
+<span class="d">q back</span></pre>
       </div>
     </div>
 
     <div class="gap-m"></div>
 
     <div class="col prose">
+      <p>
+        <strong>Held by</strong> is the column that carries the whole idea. It says <code>here</code>
+        for a file this BBS has the bytes of, and names the peer for one it only knows the listing
+        of — and in that second case the detail screen says so plainly instead of offering a
+        download that would spin forever.
+      </p>
       <p>
         The design's two fetch paths are a direct IP connection to a holding BBS, or the sneakernet
         queue — a request recorded and satisfied at the next bundle exchange, which might be someone
@@ -470,23 +603,35 @@
 
     <div class="gap-s"></div>
 
-    <div class="term">
+    <div class="term term-screen">
+      <div class="term-cap"><span>Captured over SSH from a live instance</span><b>main menu → P</b></div>
       <div class="term-body">
-<pre><span class="d">In an SSH session you're already logged in to:</span>
+<pre><span class="b">Passkey Enrolment</span>
+<span class="d">------------------------------------------------------------------------------</span>
 
-  <span class="p">Command:</span> <span class="c">P</span>
+Open <span class="c">http://localhost:8443</span> in a browser and enter this code to add a passkey
+to your account. After that the passkey signs you in on its own.
 
-<span class="d">  ┌──────────────────────────────────────────────┐</span>
-<span class="d">  │</span>  <span class="b">ADD A PASSKEY</span>                               <span class="d">│</span>
-<span class="d">  ├──────────────────────────────────────────────┤</span>
-<span class="d">  │</span>  Go to <span class="c">https://bbs.example.com</span>               <span class="d">│</span>
-<span class="d">  │</span>  and enter this code:                         <span class="d">│</span>
-<span class="d">  │</span>                                               <span class="d">│</span>
-<span class="d">  │</span>      <span class="g">K7QM-4X2P-B9TFR</span>                          <span class="d">│</span>
-<span class="d">  │</span>                                               <span class="d">│</span>
-<span class="d">  │</span>  <span class="d">Single use. Expires in 10 minutes.</span>           <span class="d">│</span>
-<span class="d">  └──────────────────────────────────────────────┘</span></pre>
+  <span class="d">code</span>   <span class="g">33XR-ATWX-HPY3G</span>
+  <span class="d">until</span>  16:58:31
+
+This code can only add a passkey. It cannot log anyone in, it works once, and
+asking for another cancels this one.
+
+It expires in ten minutes. Press P again for a fresh one.
+
+<span class="d">any key back</span></pre>
       </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="col prose">
+      <p style="font-size:16px;color:var(--fg-dim)">
+        The URL in that screen is whatever the sysop set as <code>web.origin</code> — here a
+        loopback instance, which is the one case a browser accepts without a certificate. The
+        <code>[P]</code> entry does not appear in the menu at all until the web front end is on.
+      </p>
     </div>
 
     <div class="gap-m"></div>
@@ -499,9 +644,11 @@
         ten minutes, and is stored hashed like any other credential.
       </p>
       <p>
-        But an earlier draft of the design claimed a stolen code "gets an attacker no session", and
-        <strong>that was wrong</strong>. Someone holding a live code can register <em>their own</em>
-        passkey on your account and sign in with it whenever they like — that is what enrolling a
+        Read "it cannot log anyone in" precisely, though: the code is not a bearer token, and no
+        endpoint trades it for a session. It is <em>not</em> a claim that a stolen code is harmless.
+        An earlier draft of the design said a stolen code "gets an attacker no session", and
+        <strong>that was wrong</strong> — someone holding a live code can register <em>their own</em>
+        passkey on your account and sign in with it whenever they like. That is what enrolling a
         credential means, and no arrangement of endpoints changes it. The protection is the
         ten-minute window and the fact that only an already-authenticated session can mint one.
       </p>
