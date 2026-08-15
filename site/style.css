@@ -80,6 +80,8 @@
 *, *::before, *::after { box-sizing: border-box; }
 
 html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+/* Pages carrying a section strip have two sticky bars to clear. */
+html:has(.subnav) { scroll-padding-top: 132px; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
 body {
@@ -273,6 +275,8 @@ ul.plain > li strong { color: var(--fg); font-weight: 400; }
   color: var(--fg-faint);
   margin-bottom: 30px;
 }
+.status-line a { color: inherit; text-decoration: none; border-bottom: 1px solid var(--rule); }
+.status-line a:hover { color: var(--fg-dim); border-bottom-color: var(--amber); }
 .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; }
 .dot.pending { background: var(--amber); }
 
@@ -616,6 +620,99 @@ figcaption {
 .next:hover .nt { color: var(--amber); }
 .next .nk { font-size: 11px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--fg-faint); }
 .next .nt { transition: color .15s; }
+
+/* ── section navigation ─────────────────────────────────────
+   The run-a-node pages are one section of several pages. This
+   strip sits under the main nav and shows where you are in it. */
+
+.subnav {
+  position: sticky;
+  top: 47px;
+  z-index: 30;
+  display: flex;
+  align-items: baseline;
+  gap: 6px 20px;
+  flex-wrap: wrap;
+  margin: 0 -28px 34px;
+  padding: 11px 28px;
+  background: color-mix(in srgb, var(--ink-2) 92%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.subnav b {
+  font-weight: 400;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  margin-right: 4px;
+}
+.subnav a {
+  color: var(--fg-dim);
+  text-decoration: none;
+  padding-bottom: 2px;
+  border-bottom: 1px solid transparent;
+  transition: color .15s, border-color .15s;
+}
+.subnav a:hover { color: var(--fg); border-bottom-color: var(--amber); }
+.subnav a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--amber); }
+
+/* ── captured terminal output ───────────────────────────────
+   A caption bar above a .term block. Everything wearing one is
+   real output copied from a live run, not an illustration. */
+
+.term-cap {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 9px 20px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(160, 175, 205, 0.16);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #7C8598;
+}
+.term-cap b { font-weight: 400; color: #A8B1C4; letter-spacing: 0.06em; }
+
+/* Screen captures keep their own alignment, so they are never
+   re-wrapped: a BBS screen that reflows is not that screen. */
+.term-screen .term-body pre { white-space: pre; }
+
+/* Key metadata in the generated configuration reference: type and
+   default on one line, the environment variable under it. */
+.row .k .meta {
+  display: inline-block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--fg-faint);
+  letter-spacing: 0.02em;
+}
+.row .k .meta.env { color: var(--signal); word-break: break-all; }
+
+/* ── linked cards ───────────────────────────────────────── */
+
+a.card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border-left: 2px solid transparent;
+  transition: border-color .15s, background .15s;
+}
+a.card:hover { border-left-color: var(--amber); background: var(--ink-3); }
+a.card h3 { color: var(--fg); }
+a.card .go {
+  display: block;
+  margin-top: 12px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  color: var(--amber);
+}
 
 /* ── footer ─────────────────────────────────────────────── */
 

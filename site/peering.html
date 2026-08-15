@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peering — meshbbs</title>
+<meta name="description" content="Where meshbbs node IDs come from, how to read yours, how to find and verify another board's, and what peering does and does not mean when there is no registry.">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <div class="subnav">
+    <b>Run a node</b>
+    <a href="running.html">Quick start</a>
+    <a href="config.html">Configuration</a>
+    <a href="radio.html">Attach a radio</a>
+    <a href="peering.html">Peering</a>
+    <a href="troubleshooting.html">Troubleshooting</a>
+    <a href="status.html">Project status</a>
+  </div>
+
+  <header class="pagehead">
+    <div class="eyebrow">Federation</div>
+    <h1>Peering, when there is nothing to register</h1>
+    <p class="lede col">
+      There is no registration, no pairing ceremony and no authority to ask. A node's ID
+      <strong>is</strong> its key, so there is nothing to squat, no binding to maintain and no way
+      for a different key to answer to an ID. What is left for a sysop to do is small, and this page
+      is all of it.
+    </p>
+  </header>
+
+  <div class="toc">
+    <span>On this page</span>
+    <a href="#what">What peering is here</a>
+    <a href="#mine">Your own node ID</a>
+    <a href="#theirs">Finding another board's</a>
+    <a href="#alias">Naming them</a>
+    <a href="#verify">Verifying them</a>
+    <a href="#transports">The three transports</a>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="what">
+    <div class="eyebrow">Expectations</div>
+    <div class="col prose">
+      <h2>Nobody grants you a peer</h2>
+      <p>
+        In most federated systems, peering is a handshake: two operators agree, exchange
+        credentials, add each other to a list. Here it is closer to tuning to a frequency. Two
+        instances federate when they are on the same <code>bbsnet</code> channel with the same key
+        and have federated areas whose names match. That is the whole mechanism.
+      </p>
+      <p>
+        So the sysop work is not <em>establishing</em> peers — it is <em>recognising</em> them:
+        knowing which board a node ID belongs to, giving it a name you will remember, and checking
+        that the board calling itself Fog City is the one you meant.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">What creates a peer</div>
+        <div class="v">Sharing a channel name and key on the radio, and sharing an area name. Area
+          tags are derived from the name, so two instances that create <code>general</code>
+          independently land in the same conversation — and a typo silently makes a different
+          one.</div>
+      </div>
+      <div class="row">
+        <div class="k">How they appear</div>
+        <div class="v">A peer announces itself in a signed NODE record. Your instance learns the ID,
+          the display name and the key from it, without you doing anything. Nothing auto-binds:
+          the display name is a <em>suggestion</em>, and it is yours to accept or ignore.</div>
+      </div>
+      <div class="row">
+        <div class="k">What does not exist yet</div>
+        <div class="v">There is no allow list, block list or <code>peer add</code> command. Access
+          control on the mesh is the channel key — anyone with it federates with you. If you need a
+          closed network, run a channel key you have not given away.</div>
+      </div>
+      <div class="row">
+        <div class="k">What you cannot undo</div>
+        <div class="v">Nothing on a broadcast medium is unsendable. Taking an area off the mesh
+          stops <em>this</em> node sending its posts; it does not withdraw what peers already hold,
+          because those records are signed and already replicated.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="mine">
+    <div class="eyebrow">Your identity</div>
+    <div class="col prose">
+      <h2>Reading your own node ID</h2>
+      <p>
+        It was printed once by <code>meshbbs init</code> and it never changes, because it is
+        <code>BLAKE3(pubkey)[:8]</code> — 64 bits derived from the key in <code>keys/</code>. Two
+        renderings of the same bits: base32 for typing, six words for saying out loud.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-cap"><span>Captured from a real run</span><b>meshbbs id</b></div>
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs id</span>
+<span class="b">Node ID</span>
+  <span class="d">base32</span>  <span class="b">J9GC-7YKB-JEHCA</span>
+  <span class="d">words   mystery-alcohol-write-strong-demand-glad</span>
+  <span class="d">short   J9GC7YKB</span>
+
+<span class="d">Display name: fog-city</span>
+<span class="d">(self-declared and not authoritative — peers choose their own local alias)</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="col prose">
+      <p style="font-size:16px;color:var(--fg-dim)">
+        Anyone logged into your board can read it too, without shell access: press <code>N</code> at
+        the main menu. That is the screen to point somebody at when they ask "what's your node ID?"
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term term-screen">
+      <div class="term-cap"><span>Captured over SSH from a live instance</span><b>main menu → N</b></div>
+      <div class="term-body">
+<pre><span class="b">Node Identity</span>
+<span class="d">------------------------------------------------------------------------------</span>
+
+This BBS's identity is derived from its own key.
+There is no registry — the ID is the key.
+
+  <span class="d">base32</span>  <span class="b">J9GC-7YKB-JEHCA</span>
+  <span class="d">words   mystery-alcohol-write-strong-demand-glad</span>
+
+<span class="d">Read the words aloud when confirming this node over the radio; type the base32</span>
+<span class="d">form when adding it to a config.</span>
+
+<span class="d">any key back</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">base32</div>
+        <div class="v">13 characters, grouped for reading. Grouping is cosmetic — every command
+          accepts <code>J9GC-7YKB-JEHCA</code> and <code>J9GC7YKBJEHCA</code> alike.</div>
+      </div>
+      <div class="row">
+        <div class="k">six words</div>
+        <div class="v">The same 64 bits, for reading aloud over voice radio or the phone. This is
+          the rendering to use when confirming a fingerprint with a human.</div>
+      </div>
+      <div class="row">
+        <div class="k">short</div>
+        <div class="v">The first 8 characters, for display where space is tight. It is an
+          abbreviation, not an identifier — never paste a short form into a config.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="theirs">
+    <div class="eyebrow">Their identity</div>
+    <div class="col prose">
+      <h2>Finding another board's ID</h2>
+      <p>
+        Two ways, and you will usually use both. Once a peer's node record has reached you, its ID
+        is already in <code>peer list</code> — that is the discovery path, and it needs nothing from
+        either sysop. Before that, or to confirm it, ask the operator: the ID is not a secret and
+        the point of a self-certifying identifier is that publishing it is safe.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-cap"><span>Captured from a real run</span><b>meshbbs peer list</b></div>
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs peer list</span>
+<span class="d">NODE ID          ALIASES  DISPLAY NAME  SELF</span>
+<span class="b">J9GC-7YKB-JEHCA</span>  home     fog-city      <span class="g">yes</span>
+
+<span class="d">Display names are self-declared and not authoritative — always check the ID.</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="col prose">
+      <p style="font-size:16px;color:var(--fg-dim)">
+        A fresh instance lists only itself, marked <code>SELF</code>. Peers appear as their node
+        records arrive over the mesh — which, on an instance that has just enabled the radio, takes
+        as long as it takes: federation runs on a 15–30 minute batching window, and most scheduled
+        beats are suppressed when they would carry no news.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="alias">
+    <div class="eyebrow">Naming</div>
+    <div class="col prose">
+      <h2>Giving a peer a name you will remember</h2>
+      <p>
+        An alias is a local petname, exactly like a <code>Host</code> entry in an SSH config. It is
+        owned by you, resolved locally when a message is composed, and <strong>never travels on the
+        wire</strong> — so two BBSes may disagree about what <code>pnw</code> means and neither is
+        wrong. That is precisely why no registry needs to exist.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="d"># either rendering of the ID is accepted</span>
+<span class="p">$</span> <span class="c">./meshbbs peer alias pnw K7QM-4X2P-B9TFR</span>
+<span class="p">$</span> <span class="c">./meshbbs peer alias pnw pilot-ranch-obey-vivid-scout-amber</span>
+
+<span class="p">$</span> <span class="c">./meshbbs peer resolve pnw</span>       <span class="d"># show both renderings of what a name means</span>
+<span class="p">$</span> <span class="c">./meshbbs peer list</span>              <span class="d"># every node this instance knows about</span>
+<span class="p">$</span> <span class="c">./meshbbs peer unalias pnw</span>        <span class="d"># take the name back</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="col prose">
+      <p style="font-size:16px;color:var(--fg-dim)">
+        Users then address mail as <code>austin@pnw</code>. The alias is resolved to a node ID
+        before anything is sent, and the ID is what goes out.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="verify">
+    <div class="eyebrow">Trust</div>
+    <div class="col prose">
+      <h2>Verifying out of band</h2>
+      <p>
+        Address squatting is impossible here, which leaves display-name spoofing as the residual
+        naming attack: nothing stops a node calling itself <code>Fog City</code>. The interface
+        therefore always renders a display name next to its short ID, and never binds a name to an
+        ID on its own — an arriving display name is a suggestion you may accept as an alias with one
+        keystroke.
+      </p>
+      <p>
+        The check itself is a human one, and it takes ten seconds. Read the six words to the other
+        sysop over voice radio, the phone, or anything that is not the mesh you are about to trust,
+        and have them read theirs back. The ID cannot be spoofed; only your belief about whose it is
+        can be wrong.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="note">
+      <span class="tag">Why the words exist at all</span>
+      <p>
+        Thirteen base32 characters read aloud over a noisy voice channel is a transcription error
+        waiting to happen. Six words are not. The list is the 2048-word BIP-39 English wordlist,
+        vendored and frozen: it is part of the ID's display contract, so reordering it would change
+        how every existing node ID renders. Both forms encode exactly the same 64 bits, and every
+        command accepts either — hyphens or spaces.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="transports">
+    <div class="eyebrow">Reach</div>
+    <div class="col prose">
+      <h2>Three ways records travel</h2>
+      <p>
+        Peering is about identity; how the bytes get there is a separate question, and the answer
+        does not have to be the same for every peer.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k" style="color:var(--ok)">Meshtastic</div>
+        <div class="v">The one that makes this project what it is, and the one that costs shared
+          airtime. <a class="inline" href="radio.html">Attach a radio →</a></div>
+      </div>
+      <div class="row">
+        <div class="k" style="color:var(--ok)">Sneakernet</div>
+        <div class="v">Carry a file. An exchange is two trips, because a hand-off has no round trip
+          in it: <code>sneakernet export</code> on your board, <code>import</code> on theirs,
+          <code>export --reply-to</code> back, <code>import</code> at home. The reply contains only
+          what you were missing, worked out from the version vectors you sent — no conversation
+          happens, which is what makes it work between boards that have never met. It is also the
+          only way file <em>contents</em> move between boards without IP, since the mesh carries
+          catalogs and never bytes.</div>
+      </div>
+      <div class="row">
+        <div class="k" style="color:var(--amber)">Over IP</div>
+        <div class="v">Mutually-authenticated TLS where each side's certificate is its node key, so
+          the ID is the identity on that link too. The transport is built and tested; there is not
+          yet a configuration surface for pointing an instance at a peer's host, so treat it as
+          present in the code rather than available to a sysop today.
+          <a class="inline" href="status.html">Project status →</a></div>
+      </div>
+    </div>
+  </section>
+
+  <a class="next" href="troubleshooting.html">
+    <span class="nk">Next</span>
+    <span class="nt">Troubleshooting — when the radio, the web UI or the database misbehaves →</span>
+  </a>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="config-reference.html">Configuration reference</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project status — meshbbs</title>
+<meta name="description" content="What is built in meshbbs and what is not: the phase roadmap, what code-complete does not claim, and what has and has not been proven on real radios.">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <div class="subnav">
+    <b>Run a node</b>
+    <a href="running.html">Quick start</a>
+    <a href="config.html">Configuration</a>
+    <a href="radio.html">Attach a radio</a>
+    <a href="peering.html">Peering</a>
+    <a href="troubleshooting.html">Troubleshooting</a>
+    <a href="status.html">Project status</a>
+  </div>
+
+  <header class="pagehead">
+    <div class="eyebrow">Where the project is</div>
+    <h1>Status and roadmap</h1>
+    <p class="lede col">
+      Phase 3 is code-complete: a usable single-node BBS, the sync protocol and its simulator,
+      federation over IP, and the Meshtastic link with its airtime governor, ham-mode safety checks,
+      <code>mesh survey</code>, and file catalog replication — file areas whose listing travels the
+      mesh while the files themselves never do, at any size.
+    </p>
+  </header>
+
+  <div class="toc">
+    <span>On this page</span>
+    <a href="#claims">What that does not claim</a>
+    <a href="#phases">The phases</a>
+    <a href="#hardware">What hardware taught</a>
+    <a href="#gaps">Known gaps</a>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="claims">
+    <div class="eyebrow">Precision</div>
+    <div class="col prose">
+      <h2>Two things "code-complete" should not be read to include</h2>
+      <p>
+        What has run on real radios is the <strong>link</strong>. A full record sync between two
+        instances over the air has not been recorded yet — the protocol is exercised exhaustively
+        in the deterministic simulator, and that is a different claim.
+      </p>
+      <p>
+        And the airtime governor still runs on a guessed flood multiplier of 4. Every airtime figure
+        in the design scales linearly with it. <code>mesh survey</code> exists precisely to measure
+        the real number, and nobody has yet — including, so far, us. If you run one,
+        <a class="inline" href="radio.html#survey">the report is designed to be shared</a>.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="phases">
+    <div class="eyebrow">Roadmap</div>
+    <div class="col prose">
+      <h2>The phases</h2>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k" style="color:var(--ok)">0 — Skeleton ✓</div>
+        <div class="v">Config loader, SQLite schema, node key and ID, alias table, command tree,
+          account CLI, injected clock and seeded RNG, CI cross-compiling all five targets
+          cgo-free.</div>
+      </div>
+      <div class="row">
+        <div class="k" style="color:var(--ok)">1 — Single-node BBS ✓</div>
+        <div class="v">SSH server, signup, capability grants, the terminal interface, themes, local
+          forums and mail with passphrase-wrapped keys, file areas over SFTP, node chat, the sysop
+          panel.</div>
+      </div>
+      <div class="row">
+        <div class="k" style="color:var(--ok)">2 — Federation over IP ✓</div>
+        <div class="v">Record log, version vectors, anti-entropy, bundle format, zstd dictionary,
+          the fountain codec, succession records, the deterministic simulator and its property,
+          invariant and fuzz suites.</div>
+      </div>
+      <div class="row">
+        <div class="k" style="color:var(--amber)">3 — Meshtastic link →</div>
+        <div class="v"><strong>In progress.</strong> Serial and TCP transports, protobuf framing,
+          the airtime governor with flood-multiplier accounting, ham-mode safety checks, file
+          catalog replication, the mesh survey and live R estimation.</div>
+      </div>
+      <div class="row">
+        <div class="k">4 — Doors</div>
+        <div class="v">The modern door API and its capability model, PTY and ConPTY bridging,
+          sandboxing, reference doors. Independent of federation.</div>
+      </div>
+      <div class="row">
+        <div class="k" style="color:var(--ok)">Web front end ✓</div>
+        <div class="v"><strong>Shipped out of order</strong>, ahead of the phase it was scheduled
+          in. The screen model was split from its rendering, then a browser renderer, passkey auth
+          and a session bridge were built on top. It arrived as a semantic terminal rather than the
+          xterm.js stopgap originally planned — see <a class="inline"
+          href="using.html#web">using it</a>.</div>
+      </div>
+      <div class="row">
+        <div class="k">5 — Reach</div>
+        <div class="v">What's left of it: inter-BBS door events, sneakernet bundles, and the
+          client-held key helper.</div>
+      </div>
+      <div class="row">
+        <div class="k">6 — Interop</div>
+        <div class="v">Freeze the wire format, publish a spec and conformance vectors, request a
+          registered Meshtastic port number, ship the FidoNet gateway. The first point at which the
+          project makes promises to strangers, and not to be rushed toward.</div>
+      </div>
+      <div class="row">
+        <div class="k">7 — Legacy DOS doors</div>
+        <div class="v">A DOSBox-X bridge. Nice-to-have; may never ship, and nothing depends on
+          it.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="hardware">
+    <div class="eyebrow">Bring-up</div>
+    <div class="col prose">
+      <h2>What real radios taught</h2>
+      <p>
+        The first two-radio bring-up has run: two Heltec V3s on a <code>bbsnet</code> channel, with
+        discovery, broadcast in both directions and attribution all working. Two things came out of
+        it that no amount of simulation would have produced.
+      </p>
+      <p>
+        Packet IDs are part of the wire contract, so a deterministically seeded node goes silent
+        after a restart — it reissues IDs the mesh has already seen and every packet is dropped as a
+        duplicate. And firmware 2.5+ encrypts unicast with the destination's own key, so a direct
+        packet to a peer whose key you have not exchanged is acknowledged by the firmware and never
+        reaches the application.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="gaps">
+    <div class="eyebrow">Honesty</div>
+    <div class="col prose">
+      <h2>Known gaps a sysop will actually hit</h2>
+      <p>
+        Things the documentation would otherwise let you assume. None of them stop a board working;
+        all of them will surprise somebody if they are not written down.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Config reload</div>
+        <div class="v">Not built. Every change needs a restart of <code>serve</code>, including the
+          ones the design marks as hot-reloadable.</div>
+      </div>
+      <div class="row">
+        <div class="k">Registration modes</div>
+        <div class="v">Only <code>open</code> is distinguished. <code>approval</code>,
+          <code>invite</code> and <code>closed</code> all currently refuse self-registration —
+          the approval queue and invitation flow are not written. Use
+          <code>meshbbs user add</code>.</div>
+      </div>
+      <div class="row">
+        <div class="k">Federation over IP</div>
+        <div class="v">The transport is built and tested — mutually-authenticated TLS with the node
+          key as the certificate — but there is no configuration surface for pointing an instance at
+          a peer's host. It is present in the code, not available to a sysop.</div>
+      </div>
+      <div class="row">
+        <div class="k">Peer access control</div>
+        <div class="v">No allow list or block list. On the mesh, the channel key is the access
+          control. <a class="inline" href="peering.html">Peering →</a></div>
+      </div>
+      <div class="row">
+        <div class="k">Succession</div>
+        <div class="v">The record type exists and replicates; there is no CLI to issue one. A lost
+          node key is unrecoverable today.</div>
+      </div>
+      <div class="row">
+        <div class="k">R is still a guess</div>
+        <div class="v">The default flood multiplier of 4 is a placeholder in every shipped binary.
+          It is the largest single source of error in every airtime number the project
+          quotes.</div>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <p style="font-size:16px;color:var(--fg-dim)">
+        Nearly every measured number on this site — convergence times, channel utilisation, the
+        coding overhead constants, the publish ceiling — came out of the deterministic simulator
+        rather than a whiteboard. Several of them contradicted what an earlier draft of the design
+        assumed, which is the whole reason it exists. How that is built and enforced is a
+        contributor's concern rather than a sysop's:
+        <a class="inline" href="https://github.com/aghman/meshbbs/blob/main/docs/testing.md">docs/testing.md</a>.
+      </p>
+    </div>
+  </section>
+
+  <a class="next" href="running.html">
+    <span class="nk">Back to the start</span>
+    <span class="nt">Run a node — four commands to a working BBS →</span>
+  </a>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="config-reference.html">Configuration reference</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>
