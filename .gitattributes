@@ -7,6 +7,12 @@
 # stable across platforms.
 internal/identity/wordlist.go -text
 
+# The conformance corpus is a frozen wire-format contract (§12.6), and the whole
+# point of it is that the bytes do not move. JSON parsing would survive a CRLF
+# checkout, but "immutable except on Windows" is not the property being claimed —
+# and a third-party implementation is meant to be able to hash these files.
+internal/conformance/testdata/** -text
+
 # SQL migrations are applied verbatim and hashed in schema_migrations.
 *.sql text eol=lf
 

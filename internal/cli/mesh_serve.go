@@ -631,11 +631,11 @@ func presetFrom(info *meshtastic.RadioInfo) (airtime.Preset, error) {
 //
 // The dictionary is a wire-format constant: two nodes with different
 // dictionaries cannot read each other's bundles, so this is deliberately not
-// configurable and will be frozen with the rest of the format in Phase 6.
+// configurable and will be frozen with the rest of the format in Phase 6. Its
+// content lives in the bundle package for that reason, and the conformance
+// corpus pins it (§12.6).
 func federationDictionaries() (*bundle.Dictionary, *bundle.DictionarySet, error) {
-	d, err := bundle.NewRawDictionary(0, []byte(
-		"subject: re: from wrote posted meshbbs node area post reply thread "+
-			"http:// https:// the and that with have this for you are not "))
+	d, err := bundle.Dictionary0()
 	if err != nil {
 		return nil, nil, err
 	}

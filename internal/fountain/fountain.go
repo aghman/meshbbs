@@ -136,6 +136,22 @@ func DecodeSymbol(b []byte) (Symbol, error) {
 // Mask derivation
 // ---------------------------------------------------------------------------
 
+// Mask exposes the repair-symbol derivation to the conformance corpus (§12.6).
+//
+// It is exported for that one reason, and the reason is strong. The mask never
+// travels on the wire: both ends compute it from (sender, bundle_id, index), so
+// an implementation that computes it differently does not fail a length check or
+// a signature — it decodes to garbage, silently, with every field agreeing.
+// There is nowhere else in BSMP where being wrong is this quiet, which makes it
+// the one part of the format a third-party implementer most needs a frozen
+// witness for.
+//
+// The result is indexed by source symbol: element i is true when symbol i is
+// XORed into the repair symbol.
+func Mask(sender identity.NodeID, bundleID uint32, index uint16, k int) []bool {
+	return mask(sender, bundleID, index, k)
+}
+
 // mask returns which source symbols XOR into repair symbol `index`.
 //
 // Derived from (sender, bundleID, index) so it never travels on the wire. Both
