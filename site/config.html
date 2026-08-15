@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration — meshbbs</title>
+<meta name="description" content="How meshbbs configuration works: file location, precedence, strict validation, and complete recommended configurations for a private board, a public board and a federating one.">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <div class="subnav">
+    <b>Run a node</b>
+    <a href="running.html">Quick start</a>
+    <a href="config.html">Configuration</a>
+    <a href="radio.html">Attach a radio</a>
+    <a href="peering.html">Peering</a>
+    <a href="troubleshooting.html">Troubleshooting</a>
+    <a href="status.html">Project status</a>
+  </div>
+
+  <header class="pagehead">
+    <div class="eyebrow">Configuration</div>
+    <h1>One TOML file, strictly validated</h1>
+    <p class="lede col">
+      An unknown key is a startup <strong>error</strong>, not a silently ignored line — because
+      quietly dropping <code>airtime_ceiling_pct</code> when somebody wrote
+      <code>airtime_ceiling_percent</code> is how a mesh gets flooded. Almost every default is
+      already the right answer, so a good config file is a short one.
+    </p>
+  </header>
+
+  <div class="toc">
+    <span>On this page</span>
+    <a href="#how">How it resolves</a>
+    <a href="#recipes">Three complete configs</a>
+    <a href="#sections">What each section is for</a>
+    <a href="#web">The browser front end</a>
+    <a href="#care">Settings that need care</a>
+    <a href="config-reference.html">Every setting →</a>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="how">
+    <div class="eyebrow">Mechanics</div>
+    <div class="col prose">
+      <h2>Where the file is and how it wins</h2>
+      <p>
+        <code>meshbbs init</code> writes <code>config.toml</code> into the data directory. You can
+        keep it somewhere else with <code>--config</code>, and put the whole instance somewhere
+        else with <code>--data-dir</code> — both are global flags accepted by every subcommand.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Default location</div>
+        <div class="v"><code>~/.local/share/meshbbs/config.toml</code> on Linux,
+          <code>~/Library/Application&nbsp;Support/MeshBBS/</code> on macOS,
+          <code>%APPDATA%\MeshBBS\</code> on Windows. <code>meshbbs config check</code> prints the
+          path it actually read.</div>
+      </div>
+      <div class="row">
+        <div class="k">Precedence</div>
+        <div class="v">Defaults, then the file, then <code>MESHBBS_*</code> environment variables,
+          then command-line flags. Later wins. <em>Every</em> setting has an environment variable —
+          <code>mesh.hop_limit</code> is <code>MESHBBS_MESH_HOP_LIMIT</code> — which is what makes
+          container deployments possible without a config file at all.</div>
+      </div>
+      <div class="row">
+        <div class="k">Only differences</div>
+        <div class="v">A key you do not write takes its default. There is no 400-line commented
+          dump to maintain, and no way for your file to drift behind a new release.</div>
+      </div>
+      <div class="row">
+        <div class="k">Unknown keys are fatal</div>
+        <div class="v">A typo does not start. Neither does an out-of-range value, a
+          <code>web.enabled</code> without an origin, or a ham-mode combination that would break
+          Part 97. Cross-field checks live here rather than scattered through the code.</div>
+      </div>
+      <div class="row">
+        <div class="k">Changes need a restart</div>
+        <div class="v">Today, all of them: stop <code>serve</code> and start it again. A
+          <code>SIGHUP</code> reload for the subset that can be applied live — themes, MOTD, rate
+          limits, quiet hours — is in the design and is not built yet, so do not assume a running
+          instance has picked up an edit.</div>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="term">
+      <div class="term-cap"><span>Real output, paths shortened</span><b>meshbbs config check</b></div>
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs config check</span>
+<span class="g">Configuration OK:</span> <span class="d">~/.local/share/meshbbs/config.toml</span>
+  <span class="d">data directory: ~/.local/share/meshbbs</span>
+  <span class="d">database:       ~/.local/share/meshbbs/bbs.db</span>
+  <span class="d">keys:           ~/.local/share/meshbbs/keys</span>
+  <span class="d">environment:    production</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="col prose">
+      <p style="font-size:16px;color:var(--fg-dim)">
+        <code>config check</code> exits non-zero when it is unhappy, which is why the generated
+        service units run it as a pre-start step: a BBS that fails to start beats one that starts
+        with the wrong airtime budget. <code>config show</code> prints the effective values after
+        precedence, and <code>config reference</code> prints
+        <a class="inline" href="config-reference.html">every key there is</a>, generated from the
+        source so it cannot drift.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="recipes">
+    <div class="eyebrow">Recommended</div>
+    <div class="col prose">
+      <h2>Three configs you can copy whole</h2>
+      <p>
+        Pick the one that describes your board. Each is complete — everything not written here is
+        left at its default deliberately, not by omission.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-bar" role="tablist" aria-label="Configuration recipes">
+        <button role="tab" aria-selected="true"  data-tab="cfg-private">Private board</button>
+        <button role="tab" aria-selected="false" data-tab="cfg-public">Public board</button>
+        <button role="tab" aria-selected="false" data-tab="cfg-mesh">On the mesh</button>
+      </div>
+      <div class="term-body">
+<pre data-panel="cfg-private"><span class="d"># A board for you and people you know. No radio, no web, no</span>
+<span class="d"># public port. This is the shape most instances should start in.</span>
+
+<span class="b">[node]</span>
+<span class="c">display_name</span> = <span class="c">"fog-city"</span>
+<span class="c">sysop_name</span>   = <span class="c">"austin"</span>
+<span class="c">timezone</span>     = <span class="c">"America/Los_Angeles"</span>
+
+<span class="b">[ssh]</span>
+<span class="c">bind</span> = <span class="c">"0.0.0.0"</span>
+<span class="c">port</span> = <span class="g">2222</span>
+
+<span class="b">[users]</span>
+<span class="c">registration_mode</span> = <span class="c">"closed"</span>   <span class="d"># you create the accounts yourself:</span>
+<span class="c">guest_enabled</span>     = <span class="g">false</span>      <span class="d">#   meshbbs user add bob</span>
+
+<span class="b">[log]</span>
+<span class="c">level</span> = <span class="c">"info"</span></pre>
+
+<pre data-panel="cfg-public" hidden><span class="d"># Open to strangers over SSH and in a browser. The origin and the</span>
+<span class="d"># certificate are the only two things without sensible defaults.</span>
+
+<span class="b">[node]</span>
+<span class="c">display_name</span>  = <span class="c">"fog-city"</span>
+<span class="c">sysop_name</span>    = <span class="c">"austin"</span>
+<span class="c">sysop_contact</span> = <span class="c">"austin@example.com"</span>   <span class="d"># published in your NODE record</span>
+<span class="c">timezone</span>      = <span class="c">"America/Los_Angeles"</span>
+
+<span class="b">[ssh]</span>
+<span class="c">port</span>         = <span class="g">22</span>                     <span class="d"># needs root or a capability</span>
+<span class="c">max_sessions</span> = <span class="g">32</span>
+
+<span class="b">[users]</span>
+<span class="c">registration_mode</span>       = <span class="c">"open"</span>     <span class="d"># ssh new@ works; federated</span>
+<span class="c">guest_enabled</span>           = <span class="g">true</span>      <span class="d">#   posting is still withheld</span>
+<span class="c">session_time_limit_mins</span> = <span class="g">0</span>         <span class="d"># 0 = no limit; sysops exempt</span>
+
+<span class="b">[web]</span>
+<span class="c">enabled</span>  = <span class="g">true</span>
+<span class="c">origin</span>   = <span class="c">"https://bbs.example.com"</span>    <span class="d"># REQUIRED — passkeys bind to it</span>
+<span class="c">port</span>     = <span class="g">8443</span>
+<span class="c">tls_cert</span> = <span class="c">"/etc/meshbbs/fullchain.pem"</span>
+<span class="c">tls_key</span>  = <span class="c">"/etc/meshbbs/privkey.pem"</span>
+
+<span class="b">[log]</span>
+<span class="c">level</span>  = <span class="c">"info"</span>
+<span class="c">format</span> = <span class="c">"json"</span>
+<span class="c">file</span>   = <span class="c">"/var/log/meshbbs/bbs.log"</span></pre>
+
+<pre data-panel="cfg-mesh" hidden><span class="d"># Everything above, plus the radio. Read the airtime page before</span>
+<span class="d"># you set mesh.enabled: this transmits on a band other people use.</span>
+
+<span class="b">[mesh]</span>
+<span class="c">enabled</span>       = <span class="g">true</span>
+<span class="c">mode</span>          = <span class="c">"serial"</span>          <span class="d"># serial | tcp | auto</span>
+<span class="c">serial_device</span> = <span class="c">"/dev/ttyUSB0"</span>    <span class="d"># empty auto-detects; see `mesh ports`</span>
+<span class="c">channel_name</span>  = <span class="c">"bbsnet"</span>          <span class="d"># same name and key on every instance</span>
+
+<span class="c">hop_limit</span>     = <span class="g">3</span>                 <span class="d"># as low as your topology allows</span>
+<span class="c">quiet_hours</span>   = <span class="c">"22:00-06:00"</span>     <span class="d"># local time; may wrap midnight</span>
+
+<span class="d"># The two numbers that decide your budget. Leave both alone until</span>
+<span class="d"># `meshbbs mesh survey` has told you what R really is on your mesh.</span>
+<span class="c">airtime_ceiling_pct</span>     = <span class="g">5</span>       <span class="d"># the WHOLE network's share, not yours</span>
+<span class="c">expected_instance_count</span> = <span class="g">50</span>      <span class="d"># what divides it</span>
+<span class="c">flood_multiplier</span>        = <span class="g">4</span>       <span class="d"># R — a guess until you measure it</span>
+
+<span class="d"># Over WiFi instead of USB:</span>
+<span class="d">#   mode     = "tcp"</span>
+<span class="d">#   tcp_host = "meshtastic.local"   # port 4403 if you omit it</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="note warn">
+      <span class="tag">registration_mode is not fully built</span>
+      <p>
+        Only <code>open</code> is distinguished today: it is what lets <code>ssh new@</code>
+        register an account. <code>approval</code>, <code>invite</code> and <code>closed</code> all
+        currently do the same thing — they refuse self-registration — because the approval queue
+        and the invitation flow are not written yet. Use <code>meshbbs user add</code> in the
+        meantime, and read <code>closed</code> as "the honest name for what the other two do".
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="sections">
+    <div class="eyebrow">Orientation</div>
+    <div class="col prose">
+      <h2>What each section is for</h2>
+      <p>
+        Nine sections, and most boards touch three of them.
+        <a class="inline" href="config-reference.html">The full reference</a> lists every key in
+        each with its default and its environment variable.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>[node]</code></div>
+        <div class="v">Who this instance says it is: display name, sysop name and contact,
+          timezone, and whether it is a <code>development</code> or <code>production</code>
+          instance. <strong>There is no <code>node_id</code> key</strong> — the ID is derived from
+          the key in <code>keys/</code> and is read-only everywhere.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>[storage]</code></div>
+        <div class="v">Where the data directory, database, file areas and keys live. The keys
+          directory must be <code>0700</code> with <code>0600</code> keys or the process refuses to
+          start.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>[ssh]</code></div>
+        <div class="v">The front door: bind address, port, session cap. On by default, because a
+          BBS with no way in is not one.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>[users]</code></div>
+        <div class="v">Registration mode, guests, session time limits, and whether new users are
+          listed in the network directory. Note that new accounts never get
+          <code>post_federated</code>, whatever the registration mode.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>[web]</code></div>
+        <div class="v">The browser front end. Off by default and the only section with a required
+          key — see <a class="inline" href="#web">below</a>.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>[telnet]</code></div>
+        <div class="v">Off by default, and guest-only when on. Telnet is plaintext: browsing over
+          it costs nothing, typing a password over it costs everything.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>[mesh]</code></div>
+        <div class="v">The radio link and the airtime governor. Off by default because turning it
+          on transmits on a shared band. Every key here is explained on
+          <a class="inline" href="radio.html">the radio page</a>, in the order you need them.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>[theme]</code></div>
+        <div class="v">Default theme and encoding, and the directory scanned for
+          <code>*.toml</code> style overrides. A malformed theme file is a startup error, never a
+          silent fallback.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>[log]</code></div>
+        <div class="v">Level, text or JSON, and a file to write to. Empty logs to stderr, which is
+          what you want under a service manager.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="web">
+    <div class="eyebrow">The second door</div>
+    <div class="col prose">
+      <h2>Turning on the browser front end</h2>
+      <p>
+        The web UI is served from the same binary — no CDN, no asset build, nothing to deploy
+        separately. It is off until you give it two things it cannot guess: the origin browsers
+        will reach you at, and a certificate.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="steps">
+      <div class="stepitem">
+        <div>
+          <h3>Set the origin exactly</h3>
+          <p>Scheme, host and port as the browser will send them. Passkeys are bound to this
+             string, and getting it wrong <em>does not degrade</em> — every sign-in fails with a
+             browser error that says nothing about the cause. That is why it has no default and is
+             validated at startup.</p>
+        </div>
+      </div>
+      <div class="stepitem">
+        <div>
+          <h3>Point at a certificate</h3>
+          <p>Any normal chain and key. The exception is loopback: browsers treat
+             <code>http://localhost</code> as a secure context, so a bind to loopback needs no
+             certificate — which is the easy way to try the web UI before you own a domain.</p>
+        </div>
+      </div>
+      <div class="stepitem">
+        <div>
+          <h3>Check, then restart</h3>
+          <p><code>config check</code> catches a missing origin before you find it at the sign-in
+             page.</p>
+          <div class="term"><div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs config check</span>
+<span class="p">$</span> <span class="c">./meshbbs serve</span>
+<span class="d">  ssh listening on :2222 · web listening on :8443</span></pre>
+          </div></div>
+        </div>
+      </div>
+      <div class="stepitem">
+        <div>
+          <h3>Get your first passkey across</h3>
+          <p>Press <code>P</code> in an SSH session and type the code it shows into the sign-in
+             page. The code is short-lived on purpose — it is read off a terminal and typed into a
+             browser on the same desk, so ten minutes is generous.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">Behind a reverse proxy</span>
+      <p>
+        <code>web.trusted_proxies</code> is empty by default, which means
+        <code>X-Forwarded-For</code> is ignored and every request is attributed to the address it
+        arrived from. That is correct when nothing sits in front of you, and it collapses every
+        per-client rate limit into one shared allowance when something does. Set it only for
+        proxies you run: any address listed there can claim to be any client.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="care">
+    <div class="eyebrow">Sharp edges</div>
+    <div class="col prose">
+      <h2>The settings that repay reading twice</h2>
+      <p>
+        Most keys are inert if you get them wrong. These are the ones that either fail invisibly or
+        cost somebody else something.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>web.origin</code><br><span style="color:var(--warn);font-size:11px">required when enabled</span></div>
+        <div class="v">Wrong value, total failure, no useful error. There is no partial credit
+          here.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.hop_limit</code><br><span style="color:var(--fg-faint);font-size:11px">0 — use the radio's own</span></div>
+        <div class="v">A direct multiplier on what everything you send costs the mesh. Set it
+          explicitly, as low as your topology allows.
+          <a class="inline" href="radio.html#budget">What it actually costs →</a></div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.flood_multiplier</code><br><span style="color:var(--fg-faint);font-size:11px">4</span></div>
+        <div class="v">R, the number every airtime figure scales linearly with — and 4 is a
+          <strong>guess</strong>. It is not a knob to tune; it is a measurement to take, with
+          <code>meshbbs mesh survey</code>.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.airtime_ceiling_pct</code><br><span style="color:var(--fg-faint);font-size:11px">5</span></div>
+        <div class="v">The share of the channel the <em>whole BBS network</em> should use, divided
+          by <code>expected_instance_count</code> to get yours. Raising it takes airtime from
+          everyone else on the frequency, which is why the code clamps it at 15 whatever you
+          write.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.ham_mode_override</code></div>
+        <div class="v">Set to <code>i_accept_part97_responsibility</code> to transmit encrypted
+          traffic while the radio reports a licensed operator. Part 97 prohibits obscuring the
+          meaning of amateur transmissions; the licence at risk is yours. Note what is
+          <em>not</em> restricted: signatures authenticate without obscuring, so a ham-mode
+          instance federates public traffic normally and gives up only private mail over the
+          mesh.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>telnet.enabled</code><br><span style="color:var(--fg-faint);font-size:11px">false</span></div>
+        <div class="v">Plaintext. Anything typed can be read by anyone on the network path. If you
+          want it, leave <code>telnet.guest_only</code> at <code>true</code>.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.unlocked_idle_timeout_mins</code><br><span style="color:var(--fg-faint);font-size:11px">10 — vs 30 idle</span></div>
+        <div class="v">Shorter on purpose. A session with mail unlocked holds the passphrase in
+          memory, and a closing browser tab is a far less reliable goodbye than an SSH
+          disconnect.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>node.environment</code><br><span style="color:var(--fg-faint);font-size:11px">production</span></div>
+        <div class="v">The <code>meshbbs dev</code> subcommands refuse to run against a production
+          datadir. Set <code>development</code> only on an instance you are willing to lose.</div>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">The asymmetry, stated</span>
+      <p>
+        A knob whose wrong value harms other people on the mesh does not get to be a plain config
+        value. The governor's ceiling is configurable up to a hard maximum compiled into the
+        binary; the flood multiplier can be pinned only for testing, and logs a warning at every
+        startup when it is; mesh file transfer is not configurable at all, because it does not
+        exist as a code path. Sysops get wide latitude over their own instance and narrow latitude
+        over shared airtime.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <p class="col">
+      <a class="inline" href="config-reference.html">Every setting, with defaults and environment
+      variables →</a>
+    </p>
+  </section>
+
+  <a class="next" href="radio.html">
+    <span class="nk">Next</span>
+    <span class="nt">Attach a radio — find your node, set it up, learn the budget →</span>
+  </a>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="config-reference.html">Configuration reference</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>

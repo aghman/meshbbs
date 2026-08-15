@@ -3,7 +3,7 @@ BINARY  := meshbbs
 VERSION := $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X $(MODULE)/internal/cli.Version=$(VERSION)
 
-.PHONY: build test test-race vet fmt fmt-check check cross clean
+.PHONY: build test test-race vet fmt fmt-check check cross clean docs
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/meshbbs
@@ -30,6 +30,12 @@ fmt-check:
 	fi
 
 check: fmt-check vet test-race
+
+# Regenerate the two documentation artifacts built from the config struct tags,
+# so neither can drift from the binary. Run after changing a config key.
+docs:
+	go run ./cmd/meshbbs config reference --markdown > docs/config.md
+	go run ./tools/genconfigsite
 
 # Cross-compile for all platforms shipped by CI.
 cross:

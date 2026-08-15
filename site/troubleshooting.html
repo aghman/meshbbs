@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Troubleshooting — meshbbs</title>
+<meta name="description" content="Diagnosing a meshbbs instance: startup refusals, serial ports, radios that do not federate, passkey failures, backups, and the one restore that can permanently diverge you from your peers.">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <div class="subnav">
+    <b>Run a node</b>
+    <a href="running.html">Quick start</a>
+    <a href="config.html">Configuration</a>
+    <a href="radio.html">Attach a radio</a>
+    <a href="peering.html">Peering</a>
+    <a href="troubleshooting.html">Troubleshooting</a>
+    <a href="status.html">Project status</a>
+  </div>
+
+  <header class="pagehead">
+    <div class="eyebrow">Operations</div>
+    <h1>When it doesn't work</h1>
+    <p class="lede col">
+      Most failures here are loud on purpose: an instance that refuses to start beats one that
+      starts wrong. The exceptions — the ones that fail <em>silently</em> — are on this page too,
+      and they are the ones worth reading before you need them.
+    </p>
+  </header>
+
+  <div class="toc">
+    <span>On this page</span>
+    <a href="#startup">It won't start</a>
+    <a href="#serial">The radio isn't found</a>
+    <a href="#federate">Nothing federates</a>
+    <a href="#web">Passkeys fail</a>
+    <a href="#backup">Backups, done right</a>
+    <a href="#restore">Restoring the database</a>
+    <a href="#keys">A lost node key</a>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="startup">
+    <div class="eyebrow">Startup</div>
+    <div class="col prose">
+      <h2>It refuses to start</h2>
+      <p>
+        Run <code>meshbbs config check</code> first, every time. It exits non-zero with a precise
+        message, and it is the same validation <code>serve</code> runs — so if
+        <code>check</code> is happy, the config is not your problem.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Unknown key</div>
+        <div class="v">A typo is fatal by design. <code>airtime_ceiling_percent</code> is not
+          <code>airtime_ceiling_pct</code>, and silently ignoring the difference is how a mesh gets
+          flooded. Check spelling against
+          <a class="inline" href="config-reference.html">the reference</a>.</div>
+      </div>
+      <div class="row">
+        <div class="k">Key permissions</div>
+        <div class="v">The keys directory must be <code>0700</code> and the keys inside it
+          <code>0600</code>. A restore from an archive that did not preserve modes is the usual
+          cause: <code>chmod 700 keys &amp;&amp; chmod 600 keys/*</code>.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.enabled</code> without an origin</div>
+        <div class="v">Deliberate. The origin has no default because a wrong one fails every
+          sign-in with no useful error, so it is caught here instead.</div>
+      </div>
+      <div class="row">
+        <div class="k">Ham-mode conflict</div>
+        <div class="v">The radio reports a licensed operator and the configuration would encrypt
+          traffic. Either turn off ham mode on the radio, or accept the override — and its
+          consequences — explicitly.</div>
+      </div>
+      <div class="row">
+        <div class="k">Address already in use</div>
+        <div class="v">Another instance is running, or something else holds the port. Port 2222 is
+          the default precisely so that this is rare; port 22 also needs root or
+          <code>CAP_NET_BIND_SERVICE</code>.</div>
+      </div>
+      <div class="row">
+        <div class="k">"dev commands refuse to run"</div>
+        <div class="v">Working as intended: <code>node.environment</code> is
+          <code>production</code>. The <code>meshbbs dev</code> subcommands only run against an
+          instance marked <code>development</code>, which is a datadir you are willing to
+          lose.</div>
+      </div>
+      <div class="row">
+        <div class="k">The mesh stops startup</div>
+        <div class="v">Also intended. The radio link comes up <em>before</em> SSH accepts anyone,
+          so a missing channel or an unreachable node fails loudly rather than leaving an instance
+          that looks healthy and federates nothing.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="serial">
+    <div class="eyebrow">Hardware</div>
+    <div class="col prose">
+      <h2>The radio isn't found, or stops answering</h2>
+      <p>
+        Start with <code>meshbbs mesh ports</code> and <code>meshbbs mesh info</code>. Between them
+        they distinguish "no device", "wrong device", "no permission" and "device is there but the
+        firmware is unhappy", which are four quite different problems.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Nothing listed</div>
+        <div class="v">On Linux and Windows, detection reads USB vendor and product IDs, so an
+          empty list usually means the OS has not enumerated the device — try another cable, and on
+          Windows install the CP210x or CH340 driver. On macOS detection matches device
+          <em>names</em>, so an unusual adapter can be missed even when it works: name the port
+          directly with <code>mesh.serial_device</code>.</div>
+      </div>
+      <div class="row">
+        <div class="k">Permission denied (Linux)</div>
+        <div class="v">You are not in the <code>dialout</code> group.
+          <code>sudo usermod -aG dialout $USER</code>, then log out and back in — the new group
+          does not apply to an existing session.</div>
+      </div>
+      <div class="row">
+        <div class="k">It hangs on open (macOS)</div>
+        <div class="v">You are on the <code>/dev/tty.*</code> device, which blocks waiting for
+          carrier detect. Use the <code>/dev/cu.*</code> device with the same name.</div>
+      </div>
+      <div class="row">
+        <div class="k">Wrong port picked</div>
+        <div class="v">Detection ranks candidates and explains each guess; it never claims
+          certainty, because most Meshtastic boards use generic USB-UART bridges that anything
+          might use. Set <code>mesh.serial_device</code> and the guessing stops.</div>
+      </div>
+      <div class="row">
+        <div class="k">It worked, then went quiet</div>
+        <div class="v">A USB serial handle can go one-way: writes keep succeeding and
+          transmissions go out while nothing is ever received, and only silence reveals it.
+          <code>mesh.rx_timeout_secs</code> (default 300) reconnects when the radio has sent
+          nothing for that long. Do not set it below about 60 — a busy-but-quiet radio gets
+          reconnected needlessly, and each reconnect re-announces.</div>
+      </div>
+      <div class="row">
+        <div class="k">TCP node unreachable</div>
+        <div class="v">Confirm the address on the node's <em>Network</em> screen in the Meshtastic
+          app, then <code>meshbbs mesh info --tcp &lt;host&gt;</code>. Port 4403 is assumed if you
+          do not give one. A node that dropped off WiFi usually took a new DHCP lease.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="federate">
+    <div class="eyebrow">Federation</div>
+    <div class="col prose">
+      <h2>The radio is up but nothing federates</h2>
+      <p>
+        Federation has more off-switches than anything else in the system, all of them deliberate.
+        Work down this list in order — it is roughly the order of how often each one is the answer.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Is the area federated?</div>
+        <div class="v">Areas are local-only when created. <code>meshbbs area list</code> shows the
+          scope of each; <code>meshbbs area federate general</code> changes it.</div>
+      </div>
+      <div class="row">
+        <div class="k">Does the poster have the capability?</div>
+        <div class="v">New accounts never get <code>post_federated</code>, whatever the
+          registration mode. <code>meshbbs user show bob</code> shows what they have.</div>
+      </div>
+      <div class="row">
+        <div class="k">Same channel, same key?</div>
+        <div class="v">Both sides need a secondary channel with matching name <em>and</em> key.
+          <code>meshbbs mesh info</code> lists the channels the radio actually has, which is the
+          only opinion that counts.</div>
+      </div>
+      <div class="row">
+        <div class="k">Same area name, exactly?</div>
+        <div class="v">Area tags are derived from names, so <code>general</code> and
+          <code>General</code> are different conversations and nothing warns you.
+          <code>meshbbs area list</code> prints the derived tag — compare it with your peer's.</div>
+      </div>
+      <div class="row">
+        <div class="k">Have you waited long enough?</div>
+        <div class="v">Records are batched over a 15–30 minute window and most scheduled beats are
+          suppressed when they carry no news. Federation is not chat, and an hour of quiet after
+          the first post is normal.</div>
+      </div>
+      <div class="row">
+        <div class="k">Is the budget exhausted?</div>
+        <div class="v">The governor defers rather than drops. If an area is monopolising the
+          allowance, <code>meshbbs area share</code> caps it as a fraction of the whole
+          budget.</div>
+      </div>
+      <div class="row">
+        <div class="k">Quiet hours?</div>
+        <div class="v">A node in a <code>mesh.quiet_hours</code> window transmits nothing at all.
+          That is the setting doing its job.</div>
+      </div>
+      <div class="row">
+        <div class="k">A development instance that restarted</div>
+        <div class="v">Packet IDs are part of the wire contract, so a deterministically seeded node
+          re-uses IDs the mesh has already seen after a restart and its packets are dropped as
+          duplicates — it looks like a node that has gone mute. Real hardware taught this one, and
+          it only affects seeded development instances.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="web">
+    <div class="eyebrow">Browser front end</div>
+    <div class="col prose">
+      <h2>Passkeys fail, and say nothing useful</h2>
+      <p>
+        Almost always <code>web.origin</code>. Passkeys are bound to an origin, and a mismatch does
+        not degrade gracefully — the browser refuses with an error that says nothing about the
+        cause. Scheme, host and port must match exactly what the browser sends.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Sign-in always fails</div>
+        <div class="v">Compare <code>web.origin</code> with the address bar, character for
+          character. <code>https://bbs.example.com</code> and
+          <code>https://bbs.example.com:8443</code> are different origins.</div>
+      </div>
+      <div class="row">
+        <div class="k">Enrolment code rejected</div>
+        <div class="v">Codes expire in ten minutes and enrolment is rate-limited to ten attempts an
+          hour per client. Press <code>P</code> in the SSH session again for a fresh one.</div>
+      </div>
+      <div class="row">
+        <div class="k">Everyone rate-limited at once</div>
+        <div class="v">You are behind a reverse proxy and <code>web.trusted_proxies</code> is
+          empty, so every request is attributed to the proxy's address and all clients share one
+          allowance. List the proxy — and only proxies you run, because any address listed can
+          claim to be any client.</div>
+      </div>
+      <div class="row">
+        <div class="k">No certificate yet</div>
+        <div class="v">Bind to loopback. Browsers treat <code>http://localhost</code> as a secure
+          context, so the web UI works there with no certificate at all — which is the sane way to
+          try it before you own a domain.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="backup">
+    <div class="eyebrow">Before you need it</div>
+    <div class="col prose">
+      <h2>What to back up, and how</h2>
+      <p>
+        Two things, with completely different risk profiles. <code>keys/</code> is irreplaceable and
+        should be backed up immediately, everywhere, forever. <code>bbs.db</code> is replaceable in
+        the sense that a restore is <em>possible</em> — and dangerous in a way that is worth
+        understanding before you are in a hurry.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k" style="color:var(--ok)"><code>keys/</code></div>
+        <div class="v">Back it up now. Copy it off the machine. Preserve permissions — 0700 on the
+          directory, 0600 on the keys. There is no downside and no risk: restoring a key changes
+          nothing about your position in the network, because the key <em>is</em> your position in
+          the network.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>bbs.db</code></div>
+        <div class="v">Stop the server, copy the file, start it again. That is the safe procedure.
+          A copy taken while the server is running may be mid-transaction; if you must, use
+          <code>sqlite3 bbs.db ".backup snapshot.db"</code>, which is transaction-aware.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>config.toml</code></div>
+        <div class="v">Worth keeping, trivially reconstructable. It is a dozen lines of settings
+          you chose, not state.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>files/</code></div>
+        <div class="v">Your file areas. Ordinary data — back it up like any other directory. The
+          catalog lives in the database, the bytes live here.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="restore">
+    <div class="eyebrow">The dangerous one</div>
+    <div class="col prose">
+      <h2>Restoring the database is not a routine operation</h2>
+      <p>
+        Every record this instance publishes carries a sequence number, and peers remember which
+        ones they have seen. Restore a week-old database and the instance starts reissuing sequence
+        numbers that peers already hold — with different content behind them.
+      </p>
+      <p>
+        The consequence is worth stating plainly: the divergence is <strong>permanent and
+        completely silent</strong>. No error, no conflict, no repair. Peers simply hold different
+        records under identical coordinates, forever, and every future comparison between those
+        logs is meaningless.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="note warn">
+      <span class="tag">What the software can and cannot catch</span>
+      <p>
+        At startup, meshbbs compares the durable high-water mark against the highest sequence
+        number actually in its own log. If the mark is behind — a restore that rolled back the
+        counter but not the records, or vice versa — it repairs the mark and bumps an
+        <em>incarnation counter</em>, which is the signal peers use to re-verify this origin's log
+        rather than assume continuity. Every area is checked, and one regression anywhere bumps the
+        incarnation once for all of them.
+      </p>
+      <p>
+        What it cannot catch is a <em>consistent</em> rollback: a whole database restored to an
+        older state, records and counter together, looks exactly like a node that has simply
+        published less. Nothing local can tell the difference. That case is on you.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Prefer this instead</div>
+        <div class="v">If the instance is broken but the key survives, consider starting from an
+          empty database rather than an old one. You lose local history; you do not corrupt the
+          network's view of you. Peers will re-send what they hold.</div>
+      </div>
+      <div class="row">
+        <div class="k">If you must restore</div>
+        <div class="v">Restore, then start the server and read the log. A warning about a repaired
+          high-water mark and an incremented incarnation counter is the expected outcome and means
+          the safety net caught it. No warning after a restore of an <em>older</em> database is
+          the case to worry about.</div>
+      </div>
+      <div class="row">
+        <div class="k">Tell your peers</div>
+        <div class="v">This is a social protocol as much as a technical one. If you have restored a
+          backup, say so on whatever channel your network uses. Sysops who know can compare.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="keys">
+    <div class="eyebrow">The unrecoverable one</div>
+    <div class="col prose">
+      <h2>A lost node key</h2>
+      <p>
+        Cannot be recovered. Not by us, not by your peers, not by anyone — the ID is derived from
+        the key, so with no key there is nothing to sign with and nothing that proves the new
+        instance is a continuation of the old one.
+      </p>
+      <p>
+        The protocol has a record type for exactly this — a signed succession record, by which a
+        node hands its identity to a new key — but signing one requires the <em>old</em> key, so it
+        is a planned handover and not a recovery path. There is no sysop command for it yet.
+      </p>
+      <p>
+        In practice: a lost key means re-initialising. The instance rejoins under a new ID, its
+        history is not attributable to it, and every peer that had named it needs to re-alias. This
+        is the whole reason step three of the quick start is "back up <code>keys/</code>" and not
+        something more interesting.
+      </p>
+    </div>
+  </section>
+
+  <a class="next" href="status.html">
+    <span class="nk">Next</span>
+    <span class="nt">Project status — what is built, and what "code-complete" is not claiming →</span>
+  </a>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="config-reference.html">Configuration reference</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>
