@@ -3,7 +3,7 @@ BINARY  := meshbbs
 VERSION := $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X $(MODULE)/internal/cli.Version=$(VERSION)
 
-.PHONY: build test test-race vet fmt fmt-check check cross clean docs
+.PHONY: build test test-race vet fmt fmt-check check conformance vectors dict cross clean docs
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/meshbbs
@@ -29,7 +29,21 @@ fmt-check:
 		exit 1; \
 	fi
 
-check: fmt-check vet test-race
+# The wire-format gate (§12.6). Separated from `test` so that "the bytes on the
+# mesh changed" can be asked as its own question.
+conformance:
+	go test ./internal/conformance/...
+
+# Append new vectors to the frozen corpus. Refuses to alter an existing one.
+vectors:
+	go run ./tools/conformance
+
+# Retrain the compression dictionary (§7.4). Refuses to overwrite one that
+# exists: a dictionary is superseded under a new ID, never edited in place.
+dict:
+	go run ./tools/traindict
+
+check: fmt-check vet conformance test-race
 
 # Regenerate the two documentation artifacts built from the config struct tags,
 # so neither can drift from the binary. Run after changing a config key.

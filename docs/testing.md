@@ -40,10 +40,59 @@ intentional change and read the diff:
 go test ./internal/tui/ -update
 ```
 
+## Frozen wire-format vectors
+
+Every other test that touches an encoder is a round trip: encode, decode, check
+you got back what you started with. That proves the two halves agree with each
+other and says nothing about *which* bytes they agreed on. Flip the record
+timestamp to little-endian on both sides and the entire suite stays green.
+
+So the bytes themselves are frozen — 93 vectors covering node IDs, the record
+envelope, each typed body, bundle framing, the gossip messages, the fountain
+symbol headers and masks, and the signed announcements:
+
+```
+make conformance
+```
+
+**If this fails, do not regenerate it.** The bytes on the mesh have changed, and
+regenerating turns that into a green test and a diff nobody reads closely. Find
+the encoder change. If it was intended, it is a wire-format change and needs a
+version bump, not an edited expectation. The generator refuses to help:
+
+```
+make vectors        # appends new vectors; refuses to alter an existing one
+```
+
+The vectors carry their own inputs, so they are also what a third-party
+implementation would test against. Full schema in
+`internal/conformance/testdata/v1/README.md`.
+
+## The compression dictionary
+
+`internal/bundle/dict1.zdict` is a committed binary artifact, trained from
+`internal/dictcorpus`. Its ratio is gated, so a change that helps one record
+type and hurts the rest gets caught, and so does one that makes any bundle
+*larger* — plain zstd does that to a lone catalog entry, and fixing it is much of
+why a dictionary is carried.
+
+The corpus has a train half and a holdout half that share no content. Every
+ratio quoted anywhere comes from the holdout half; measured on its training data
+the same dictionary reads 3.19x against a real 1.41x, so the split is not
+ceremony.
+
+Retraining ships a **new** dictionary ID and a new file. Old dictionaries stay
+readable forever, and editing one in place would leave every peer on an older
+build unable to decode anything under an ID claiming they agree:
+
+```
+make dict           # refuses to overwrite; use -id 2 -out .../dict2.zdict
+```
+
 ## The whole gate
 
-`make check` runs formatting, vet and the race detector, which is what CI
-runs:
+`make check` runs formatting, vet, the wire-format vectors and the race
+detector, which is what CI runs:
 
 ```
 make check

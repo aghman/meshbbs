@@ -1,0 +1,6 @@
+tradewars	austin,kestrel,marlow,pippin,orlaith,delaney
+lorddoor	austin,kestrel,fenwick,greaves,harlow
+usurper	marlow,pippin,delaney,orlaith
+barren-realms	austin,greaves,harlow,fenwick,kestrel
+global-war	pippin,delaney,marlow
+food-fight	austin,kestrel,harlow

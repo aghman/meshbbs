@@ -1,0 +1,12 @@
+firmware-2.6.0-rak4631.uf2	418304	RAK4631, first 2.6 build, lightly tested
+firmware-2.6.0-heltec-v3.bin	396288	Heltec V3, 2.6 series
+meshbbs-0.21.tar.gz	1064960	source release, signed
+meshbbs-darwin-arm64	15728640	prebuilt, cgo free
+ansi-artpack-1998.zip	2097152	third volume, some duplicates of the earlier packs
+netlist-2026-09.txt	8448	September node list
+netlog-2026-08-14.txt	23552	Thursday net, quiet evening
+winter-net-schedule.txt	1536	fortnightly through March, same channel
+condensation-notes.txt	2560	what actually kept water out of a sealed box
+chimney-mount-notes.txt	4608	coverage before and after, with bearings
+retention-policy-draft.txt	7168	proposal for per area pruning
+survey-baseline-2026-08.txt	13312	channel utilisation before and after load

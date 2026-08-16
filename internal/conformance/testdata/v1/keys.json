@@ -1,0 +1,45 @@
+{
+  "format_version": 1,
+  "vectors": [
+    {
+      "name": "node-a",
+      "seed": "4358e70e42efe443d40855b4b3ccb83d34f95c53078eb804d0dd0dd56f97243f",
+      "public_key": "54f5282565491705c21c5166529b2b5687ec272ce0f050ae74900e7f8e943379",
+      "node_id": "e41be10756a217e5",
+      "compact": "WGDY21TPM8BYA",
+      "grouped": "WGDY-21TP-M8BYA",
+      "short": "WGDY21TP",
+      "words": "tomato-tenant-dove-pull-cannon-very"
+    },
+    {
+      "name": "node-b",
+      "seed": "1573551bb168d75bfd43ae61f425bffc7d0ce8de9161f863fa35913384b24ce6",
+      "public_key": "eee56d608a0550a044620954803c496e0c6fd841090007bace3cbd579c4bf822",
+      "node_id": "9ee3169099924f49",
+      "compact": "KVHHD44SJ97MJ",
+      "grouped": "KVHH-D44S-J97MJ",
+      "short": "KVHHD44S",
+      "words": "page-board-picnic-creek-ceiling-pilot"
+    },
+    {
+      "name": "node-c",
+      "seed": "78a72b9262bc378885bcd9afc3973735f7f64b62813af1f502b74283b75f1c82",
+      "public_key": "ff8cafbc3d98c5d8137091944110bbc389d7984cb1a1d07093c0d50e75db64b1",
+      "node_id": "2cb22d8888c93537",
+      "compact": "5JS2V248S4TKE",
+      "grouped": "5JS2-V248-S4TKE",
+      "short": "5JS2V248",
+      "words": "coach-multiply-giraffe-bag-nation-oppose"
+    },
+    {
+      "name": "node-d",
+      "seed": "e22924a7e29bd2289a00e11056be25e6a52d42e3096483a2688b094dc9b07fee",
+      "public_key": "e9d20d7f99246128b68655c96da0994c583efb006cf1a12083484b7c590f27d7",
+      "node_id": "bdc70538ebad4892",
+      "compact": "QQ3GAE7BNN494",
+      "grouped": "QQ3G-AE7B-NN494",
+      "short": "QQ3GAE7B",
+      "words": "saddle-deal-evolve-struggle-stand-enable"
+    }
+  ]
+}

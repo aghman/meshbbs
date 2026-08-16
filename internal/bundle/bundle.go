@@ -138,6 +138,20 @@ func Unpack(data []byte, dicts *DictionarySet) (*Bundle, error) {
 	return decodeBody(payload)
 }
 
+// EncodeBody and DecodeBody expose the uncompressed framing to the conformance
+// corpus (§12.6).
+//
+// The corpus freezes THIS, not Pack's output. Pack runs the body through zstd,
+// and those bytes move whenever the compressor is upgraded or the dictionary is
+// retrained — §7.4 asks for exactly that retraining before the Phase 6 freeze.
+// Pinning them would freeze a library's behaviour and call it a wire format. The
+// framing below is the part that is actually the format, and it is deterministic
+// by construction.
+func EncodeBody(b *Bundle) ([]byte, error) { return encodeBody(b) }
+
+// DecodeBody parses the uncompressed framing. See EncodeBody.
+func DecodeBody(b []byte) (*Bundle, error) { return decodeBody(b) }
+
 // encodeBody renders the uncompressed bundle body.
 //
 // Layout:
@@ -347,6 +361,30 @@ func decodeBody(b []byte) (*Bundle, error) {
 // ---------------------------------------------------------------------------
 // Compression (§7.4)
 // ---------------------------------------------------------------------------
+
+// Dictionary0Corpus is the content of dictionary 0.
+//
+// It lives here rather than in the code that wires up a server because it is a
+// wire-format constant, not a configuration choice: two nodes holding different
+// bytes under the same dictionary ID cannot read each other's bundles at all.
+// The conformance corpus (§12.6) pins a bundle packed against it, which is what
+// makes editing this string in place a red build.
+//
+// That matters more than it looks, because this corpus is KNOWN to be wrong and
+// scheduled to be replaced. §7.4 records that it is a raw corpus of forum
+// vocabulary written when a post was the only thing being compressed — it
+// predates both FILE and DOOR_EVENT — and that a real `zstd --train` product
+// must ship before the Phase 6 freeze. When that lands it must ship as
+// dictionary 1, leaving this one untouched and supported, exactly as §7.4 says
+// old dictionaries stay supported. Rewriting dictionary 0 would silently break
+// every peer running an older build.
+const Dictionary0Corpus = "subject: re: from wrote posted meshbbs node area post reply thread " +
+	"http:// https:// the and that with have this for you are not "
+
+// Dictionary0 builds the dictionary every node speaks by default.
+func Dictionary0() (*Dictionary, error) {
+	return NewRawDictionary(0, []byte(Dictionary0Corpus))
+}
 
 // Dictionary is a zstd dictionary plus its identifier.
 //

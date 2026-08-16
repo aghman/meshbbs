@@ -1,0 +1,114 @@
+Has anyone got a sensible way to keep condensation out of a sealed enclosure?
+Mine has a puddle in the bottom every time I open it and I am running out of
+ideas that do not involve drilling a hole in something waterproof.
+
+73 de kestrel
+%%
+> a puddle in the bottom every time I open it
+
+Vent it downward with a Gore patch and put a sachet inside. Sealing harder is
+what got you here. You want it to breathe in one direction rather than not at
+all.
+%%
+Re: condensation
+
+> Vent it downward with a Gore patch
+
+Ordered. It had not occurred to me that sealing it better was making it
+worse, but that is obviously what has been happening all summer.
+%%
+Question about retention: does anything actually delete old records yet, or
+does the log just grow forever? Not complaining, my disk is enormous, but I
+would like to know before I recommend this to somebody whose disk is not.
+%%
+> does anything actually delete old records yet
+
+Nothing prunes today as far as I can tell. It is per area policy in the design
+and the flag exists, but I have never seen it fire.
+%%
+Put a node on the boat over the weekend. Anchored in the bay it holds a path
+back to shore fine, which I did not expect at sea level with everything wet.
+Under way it drops constantly, which I did expect.
+%%
+> Anchored in the bay it holds a path back to shore fine
+
+Salt water is a very good ground plane. You are effectively cheating, and I
+mean that as a compliment.
+%%
+Anybody know what the actual flood multiplier is around here? Everything I
+read assumes a number and I cannot find where the number came from. It seems
+like the sort of thing somebody should measure rather than assume.
+%%
+> Everything I read assumes a number
+
+There is a survey command that is supposed to measure it. I have not run it.
+Somebody should, and then we would all know instead of guessing.
+%%
+Re: flood multiplier
+
+> There is a survey command that is supposed to measure it
+
+I will run it this week if the weather is quiet enough to get a clean
+baseline. No promises about the analysis being any good.
+%%
+Uploaded scans of the old user manual for the terminal program half of us
+seem to be using. Two hundred pages, mostly useless, but chapter nine has the
+escape sequences and I could not find them anywhere online.
+%%
+Sysop note: I am moving the board to a different machine on Sunday morning.
+Expect a couple of hours down. Nothing should be lost but this is exactly the
+sort of thing that eats a sequence number if I am careless, so bear with me.
+%%
+> this is exactly the sort of thing that eats a sequence number
+
+Take the backup before you move it and take another one after. Restoring from
+the wrong side of a move is how people end up with a log that disagrees with
+itself.
+%%
+Somebody asked me offline why posts take so long to show up on other boards.
+Short answer is that the radio budget is about ten packets a day and a post
+is not one packet. It is not broken, it is just small.
+%%
+> the radio budget is about ten packets a day
+
+Worth putting that somewhere a new user reads it. I assumed something was
+wrong for a fortnight before I understood the numbers.
+%%
+Trade: two 433 antennas, both fine, wrong band for me since I moved. Would
+like a soldering iron that holds temperature, or nothing at all, honestly
+they are just taking up space.
+%%
+The winter net schedule is posted. Fortnightly rather than weekly until March
+because half of us cannot get to a decent spot in the dark. Same channel,
+same time, just fewer of them.
+%%
+> Fortnightly rather than weekly until March
+
+Sensible. The December one last year had three people on it and two of us
+were in the same building.
+%%
+New here. Got the SSH side working in about ten minutes but I cannot work out
+how to enrol a second key. Is that a thing I can do myself or do I need to
+ask a sysop for it?
+%%
+> how to enrol a second key
+
+You can do it yourself from an authenticated session. Sysop only has to get
+involved if you have locked yourself out entirely, which is the point.
+%%
+Re: second key
+
+> You can do it yourself from an authenticated session
+
+Found it, thank you. Laptop and phone both working now.
+%%
+Antenna went up on the chimney at the weekend. Coverage to the north is
+transformed and coverage to the south is somehow worse than it was on the
+fence post. I am choosing to believe this is the building and not something I
+have done wrong.
+%%
+> coverage to the south is somehow worse
+
+That will be the chimney itself. You have put a large lump of masonry between
+you and half the compass. Nothing you can do about it short of a second
+antenna.

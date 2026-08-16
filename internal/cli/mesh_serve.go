@@ -629,18 +629,24 @@ func presetFrom(info *meshtastic.RadioInfo) (airtime.Preset, error) {
 
 // federationDictionaries builds the compression dictionary set (§7.4).
 //
-// The dictionary is a wire-format constant: two nodes with different
-// dictionaries cannot read each other's bundles, so this is deliberately not
-// configurable and will be frozen with the rest of the format in Phase 6.
+// A dictionary is a wire-format constant: two nodes holding different bytes
+// under the same ID cannot read each other's bundles at all, so this is
+// deliberately not configurable and will be frozen with the rest of the format
+// in Phase 6. The contents live in the bundle package for that reason, and the
+// conformance corpus pins them (§12.6).
+//
+// The two returns are not the same question. The set is everything this build
+// can READ — dictionary 0 is in it forever — while the single dictionary is the
+// one it compresses WITH. See bundle.DefaultDictionary for why writing with
+// dictionary 1 is safe now and would not be after the freeze.
 func federationDictionaries() (*bundle.Dictionary, *bundle.DictionarySet, error) {
-	d, err := bundle.NewRawDictionary(0, []byte(
-		"subject: re: from wrote posted meshbbs node area post reply thread "+
-			"http:// https:// the and that with have this for you are not "))
+	set, err := bundle.DefaultDictionarySet()
 	if err != nil {
 		return nil, nil, err
 	}
-	set, err := bundle.NewDictionarySet(d)
+	d, err := bundle.DefaultDictionary()
 	if err != nil {
+		set.Close()
 		return nil, nil, err
 	}
 	return d, set, nil

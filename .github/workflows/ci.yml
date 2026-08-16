@@ -48,6 +48,19 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: go run ./tools/checkdeterminism ./...
 
+      # Runs on every OS, and before the rest of the suite.
+      #
+      # On every OS because the frozen bytes are exactly where a platform
+      # difference would show — a width or an endianness that happens to match
+      # on the machine the vectors were generated on (§12.6, §6.2.1 rule 2).
+      #
+      # Before the rest because "the wire format changed" is a different piece
+      # of news from "a test failed", and it should not have to be dug out of a
+      # `go test ./...` log. It also runs again inside that log; this step is
+      # here so the failure has a name.
+      - name: Wire-format conformance (design §12.6)
+        run: go test ./internal/conformance/...
+
       - name: Test
         run: go test -race ./...
 
