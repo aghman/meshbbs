@@ -156,13 +156,36 @@ func mustDoorBody(d record.DoorEventBody) []byte {
 	return b
 }
 
+// readText reads a corpus file and normalises its line endings.
+//
+// .gitattributes marks this directory -text so a checkout is LF everywhere, and
+// that is the real fix: these files are inputs to a committed artifact, and
+// dict1.zdict was trained on their LF bytes. This normalisation is the second
+// line of defence, for the copy that arrives through some path git attributes do
+// not cover — an editor that rewrites endings on save, a zip, a patch pasted
+// into a terminal.
+//
+// It is worth having twice because the failure is quiet in the direction that
+// matters. Before the attribute existed, a CRLF checkout did not fail to parse:
+// it parsed the entire forum file into ONE post, because the separator no longer
+// matched, and the first thing to notice was a slice bounds panic several
+// packages away. A corpus that silently changes shape retrains a different
+// dictionary and measures a different ratio.
+func readText(half, name string) (string, error) {
+	raw, err := fs.ReadFile(data, "data/"+half+"/"+name)
+	if err != nil {
+		return "", err
+	}
+	return strings.ReplaceAll(string(raw), "\r\n", "\n"), nil
+}
+
 func readPosts(half string) ([]string, error) {
-	raw, err := fs.ReadFile(data, "data/"+half+"/forum.txt")
+	raw, err := readText(half, "forum.txt")
 	if err != nil {
 		return nil, err
 	}
 	var out []string
-	for _, chunk := range strings.Split(string(raw), "\n"+postSeparator+"\n") {
+	for _, chunk := range strings.Split(raw, "\n"+postSeparator+"\n") {
 		if s := strings.TrimSpace(chunk); s != "" {
 			out = append(out, s)
 		}
@@ -174,12 +197,12 @@ func readPosts(half string) ([]string, error) {
 }
 
 func readFiles(half string) ([]record.FileBody, error) {
-	raw, err := fs.ReadFile(data, "data/"+half+"/files.txt")
+	raw, err := readText(half, "files.txt")
 	if err != nil {
 		return nil, err
 	}
 	var out []record.FileBody
-	sc := bufio.NewScanner(strings.NewReader(string(raw)))
+	sc := bufio.NewScanner(strings.NewReader(raw))
 	line := 0
 	for sc.Scan() {
 		line++
@@ -222,14 +245,14 @@ func readFiles(half string) ([]record.FileBody, error) {
 // flusher emits when a league is busy enough to matter, and a batch of one would
 // measure the framing rather than the traffic.
 func readDoors(half string) ([]record.DoorEventBody, error) {
-	raw, err := fs.ReadFile(data, "data/"+half+"/doors.txt")
+	raw, err := readText(half, "doors.txt")
 	if err != nil {
 		return nil, err
 	}
 	peer := corpusKey(half + "/peer").ID()
 
 	var out []record.DoorEventBody
-	sc := bufio.NewScanner(strings.NewReader(string(raw)))
+	sc := bufio.NewScanner(strings.NewReader(raw))
 	line := 0
 	for sc.Scan() {
 		line++

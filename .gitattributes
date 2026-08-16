@@ -11,6 +11,14 @@ internal/identity/wordlist.go -text
 # keeps them out of diffs and stops any newline handling touching them.
 *.zdict binary
 
+# The dictionary training corpus is an INPUT to a committed artifact, so its
+# bytes have to be the same everywhere. dict1.zdict was trained on these files
+# with LF endings and the ratio floors were measured against them; a CRLF
+# checkout would quietly measure a different corpus than the one the dictionary
+# was built from. It also broke the post separator outright on Windows, which is
+# how this was found.
+internal/dictcorpus/data/** -text
+
 # The conformance corpus is a frozen wire-format contract (§12.6), and the whole
 # point of it is that the bytes do not move. JSON parsing would survive a CRLF
 # checkout, but "immutable except on Windows" is not the property being claimed —
