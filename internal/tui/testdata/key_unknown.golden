@@ -3,8 +3,6 @@ Key Not Recognised
 
 That account exists, but this key is not enrolled on it.
 
-an account with that name exists, but this key is not enrolled on it.
-
 If this is your account, reconnect with a password:
     ssh -o PreferredAuthentications=password austin@this-bbs
 

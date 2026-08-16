@@ -184,7 +184,12 @@ func (s *Server) Chat() *tui.ChatRoom { return s.chat }
 
 func (s *Server) publicKeyHandler(ctx ssh.Context, key ssh.PublicKey) bool {
 	d := s.authn.PublicKey(ctx, ctx.User(), key)
-	s.log.Debug("public key auth", "user", ctx.User(), "intent", d.Intent.String())
+	// This log is the only place the decision's reason surfaces. The screens
+	// that used to print it say the same thing in their own words, and a
+	// rejected connection never reaches a screen at all — so without this a
+	// sysop asking "why was that refused?" has nothing to read.
+	s.log.Debug("public key auth", "user", ctx.User(), "intent", d.Intent.String(),
+		"reason", d.Reason)
 
 	// A key-unknown outcome is ACCEPTED at the transport layer on purpose.
 	//
@@ -202,7 +207,8 @@ func (s *Server) publicKeyHandler(ctx ssh.Context, key ssh.PublicKey) bool {
 
 func (s *Server) passwordHandler(ctx ssh.Context, password string) bool {
 	d := s.authn.Password(ctx, ctx.User(), password)
-	s.log.Debug("password auth", "user", ctx.User(), "intent", d.Intent.String())
+	s.log.Debug("password auth", "user", ctx.User(), "intent", d.Intent.String(),
+		"reason", d.Reason)
 	if d.Intent == IntentUnknown {
 		return false
 	}

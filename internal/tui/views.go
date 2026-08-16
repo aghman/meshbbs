@@ -472,8 +472,12 @@ func (m Model) buildKeyUnknown() Screen {
 	return Screen{
 		Kind: "keyunknown", Title: "Key Not Recognised", Status: m.statusLine(),
 		Blocks: []Block{
+			// The auth layer's reason for this decision is deliberately not
+			// printed. It says the same two things this screen already says —
+			// the account exists but the key is not enrolled, and a password
+			// gets you back in — so showing it repeats both the line above and
+			// the block below.
 			Say(LevelError, "That account exists, but this key is not enrolled on it."),
-			Say(LevelBody, sanitize(m.cfg.AuthNote)),
 			// These breaks are load-bearing: re-wrapping the ssh invocation
 			// would print a command that does not work.
 			Lines(LevelMuted, strings.Split(

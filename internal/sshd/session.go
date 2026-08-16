@@ -156,7 +156,6 @@ func (s *Server) programHandler(sess ssh.Session) *tea.Program {
 		User:         d.User,
 		PublicKey:    d.PublicKey,
 		KeyFP:        d.Fingerprint,
-		AuthNote:     d.Reason,
 		SessionLimit: s.opts.SessionLimit,
 		Doors:        doors,
 		TermType:     pty.Term,
