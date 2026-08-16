@@ -281,9 +281,7 @@ func TestKeyUnknownScreenExplainsRecovery(t *testing.T) {
 	f := newFixture(t)
 	f.user(t, "austin", "pw")
 
-	cfg := f.config(IntentKeyUnknown, "austin")
-	cfg.AuthNote = "an account with that name exists, but this key is not enrolled on it."
-	s := newSession(t, cfg)
+	s := newSession(t, f.config(IntentKeyUnknown, "austin"))
 
 	s.contains("Key Not Recognised", "not enrolled")
 	// It must offer the password path and the different-name path.
@@ -463,9 +461,7 @@ func TestGoldenFrames(t *testing.T) {
 	t.Run("key_unknown", func(t *testing.T) {
 		f := newFixture(t)
 		f.user(t, "austin", "pw")
-		cfg := f.config(IntentKeyUnknown, "austin")
-		cfg.AuthNote = "an account with that name exists, but this key is not enrolled on it."
-		newSession(t, cfg).golden("key_unknown")
+		newSession(t, f.config(IntentKeyUnknown, "austin")).golden("key_unknown")
 	})
 
 	t.Run("unlock", func(t *testing.T) {

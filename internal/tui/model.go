@@ -103,7 +103,6 @@ type Config struct {
 	User      store.User
 	PublicKey string
 	KeyFP     string
-	AuthNote  string
 	Chat      *ChatRoom
 	Clock     clock.Clock
 	Location  *time.Location
