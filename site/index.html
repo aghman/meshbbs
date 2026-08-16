@@ -29,7 +29,8 @@
       <div>
         <div class="status-line">
           <span class="dot"></span>
-          Phase 3 code-complete · mesh link running on real radios · record sync over the air not yet proven
+          <a href="status.html">Phase 3 code-complete · mesh link running on real radios · record
+          sync over the air not yet proven</a>
         </div>
 
         <h1>A BBS that fits in <em>233 bytes</em></h1>
@@ -315,32 +316,45 @@
     <div class="gap-s"></div>
 
     <div class="term">
+      <div class="term-cap"><span>Real output, paths shortened</span><b>build · init · serve</b></div>
       <div class="term-body">
 <pre><span class="p">$</span> <span class="c">go build -o meshbbs ./cmd/meshbbs</span>
 <span class="p">$</span> <span class="c">./meshbbs init --display-name fog-city --sysop-nick austin \
       --sysop-password-stdin</span>
 
-<span class="g">  ✓</span> node key generated  <span class="d">keys/node.ed25519</span>
-<span class="g">  ✓</span> node id  <span class="b">K7QM-4X2P-B9TFR</span>
-<span class="d">           pilot ranch obey vivid scout amber</span>
+<span class="d">Generated node key in ~/.local/share/meshbbs/keys</span>
+<span class="d">Created database ~/.local/share/meshbbs/bbs.db</span>
+<span class="d">Created sysop account "austin"</span>
 
-<span class="w">  ⚠</span>  <span class="d">Back up keys/. A lost node key cannot be recovered —</span>
-<span class="d">     the instance would rejoin the network as a new node.</span>
+<span class="b">This node's ID:</span>
+  <span class="d">base32</span>  <span class="b">J9GC-7YKB-JEHCA</span>
+  <span class="d">words   mystery-alcohol-write-strong-demand-glad</span>
+
+<span class="w">Back up keys/node.ed25519 — a lost node key cannot be recovered.</span>
 
 <span class="p">$</span> <span class="c">./meshbbs serve</span>
-<span class="d">  ssh listening on :2222 · 4 areas · 0 peers</span></pre>
+<span class="b">fog-city is up.</span>
+  <span class="d">ssh       0.0.0.0:2222</span>
+  <span class="d">register  open</span></pre>
       </div>
     </div>
 
     <div class="gap-s"></div>
-    <p class="col"><a class="inline" href="running.html">Full setup, config and peering →</a></p>
+    <p class="col">
+      <a class="inline" href="running.html">The four commands in full →</a><br>
+      <span style="font-size:15px;color:var(--fg-dim)">Then
+        <a class="inline" href="config.html">configuration</a>,
+        <a class="inline" href="radio.html">attaching a radio</a>,
+        <a class="inline" href="peering.html">peering</a> and
+        <a class="inline" href="troubleshooting.html">troubleshooting</a>.</span>
+    </p>
   </section>
 
   <footer>
     <span>MIT licensed</span>
     <a href="https://github.com/aghman/meshbbs">GitHub</a>
     <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
-    <a href="https://github.com/aghman/meshbbs/blob/main/docs/config.md">Configuration reference</a>
+    <a href="config-reference.html">Configuration reference</a>
     <a href="https://meshtastic.org">Meshtastic</a>
   </footer>
 </div>

@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration reference — meshbbs</title>
+<meta name="description" content="Every meshbbs configuration key, with its type, default and environment variable. Generated from the source, so it cannot drift.">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <div class="subnav">
+    <b>Run a node</b>
+    <a href="running.html">Quick start</a>
+    <a href="config.html">Configuration</a>
+    <a href="radio.html">Attach a radio</a>
+    <a href="peering.html">Peering</a>
+    <a href="troubleshooting.html">Troubleshooting</a>
+    <a href="status.html">Project status</a>
+  </div>
+
+  <header class="pagehead">
+    <div class="eyebrow">Configuration reference</div>
+    <h1>Every setting there is</h1>
+    <p class="lede col">
+      Generated from the struct definitions that the loader itself reads, so this page cannot drift
+      from the binary. A key you do not write takes its default; a key you misspell is a startup
+      error. For what to actually set, start with
+      <a class="inline" href="config.html">the configuration guide</a>.
+    </p>
+  </header>
+
+  <div class="note">
+    <span class="tag">Reading a row</span>
+    <p>
+      Each row gives the key, its type and default, and the environment variable that overrides it.
+      Precedence is defaults, then the file, then <code>MESHBBS_*</code>, then flags. The same list
+      is available offline from <code>meshbbs config reference</code>, and as a table in
+      <a class="inline" href="https://github.com/aghman/meshbbs/blob/main/docs/config.md">docs/config.md</a>.
+    </p>
+  </div>
+
+  <div class="gap-m"></div>
+
+<!-- BEGIN GENERATED — go run ./tools/genconfigsite -->
+  <div class="toc">
+    <span>Sections</span>
+    <a href="#log">[log]</a>
+    <a href="#mesh">[mesh]</a>
+    <a href="#node">[node]</a>
+    <a href="#ssh">[ssh]</a>
+    <a href="#storage">[storage]</a>
+    <a href="#telnet">[telnet]</a>
+    <a href="#theme">[theme]</a>
+    <a href="#users">[users]</a>
+    <a href="#web">[web]</a>
+  </div>
+
+  <section id="log">
+    <div class="eyebrow">Section</div>
+    <div class="col prose">
+      <h2><code>[log]</code></h2>
+      <p>Logging and observability.</p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>log.file</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_LOG_FILE</span></div>
+        <div class="v">Path to a log file. Empty logs to stderr.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>log.format</code><br><span class="meta">string · text</span><br><span class="meta env">MESHBBS_LOG_FORMAT</span></div>
+        <div class="v">text or json.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>log.level</code><br><span class="meta">string · info</span><br><span class="meta env">MESHBBS_LOG_LEVEL</span></div>
+        <div class="v">debug, info, warn, or error.</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="mesh">
+    <div class="eyebrow">Section</div>
+    <div class="col prose">
+      <h2><code>[mesh]</code></h2>
+      <p>The Meshtastic link and the airtime governor (§7.1, §7.6).</p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>mesh.airtime_ceiling_pct</code><br><span class="meta">float64 · 5</span><br><span class="meta env">MESHBBS_MESH_AIRTIME_CEILING_PCT</span></div>
+        <div class="v">Share of the channel the WHOLE BBS network should use, as a percentage. Divided by expected_instance_count to get this node&#39;s allowance. Clamped to 15 in code (§7.6).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.channel_name</code><br><span class="meta">string · bbsnet</span><br><span class="meta env">MESHBBS_MESH_CHANNEL_NAME</span></div>
+        <div class="v">Name of the Meshtastic channel carrying BBS traffic (§7.1). Create it in the Meshtastic app as a secondary channel with the same name and key on every instance.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.door_event_batch_window</code><br><span class="meta">string · auto</span><br><span class="meta env">MESHBBS_MESH_DOOR_EVENT_BATCH_WINDOW</span></div>
+        <div class="v">How long a partial batch of door-league events waits before it is sent (§9.5). &#39;auto&#39; derives it from what the area&#39;s airtime share actually buys, so a measured flood multiplier propagates without a config edit. An explicit Go duration like &#39;30m&#39; overrides, and is clamped to 5m-12h.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.door_event_max_age</code><br><span class="meta">string · 24h</span><br><span class="meta env">MESHBBS_MESH_DOOR_EVENT_MAX_AGE</span></div>
+        <div class="v">How long a queued door-league event may wait before it is dropped unsent (§9.5). Generous on purpose: it exists to stop a node that has been offline for a week spending its whole budget on a game that finished, not to tighten latency.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.enabled</code><br><span class="meta">bool · false</span><br><span class="meta env">MESHBBS_MESH_ENABLED</span></div>
+        <div class="v">Federate over a Meshtastic radio. Off by default: enabling it transmits on a shared band.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.expected_instance_count</code><br><span class="meta">int · 50</span><br><span class="meta env">MESHBBS_MESH_EXPECTED_INSTANCE_COUNT</span></div>
+        <div class="v">How many instances divide the ceiling. The design plans for 50 ([D2]).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.flood_multiplier</code><br><span class="meta">float64 · 4</span><br><span class="meta env">MESHBBS_MESH_FLOOD_MULTIPLIER</span></div>
+        <div class="v">R: how many times the mesh rebroadcasts each packet. Every airtime figure scales linearly with it, and 4 is a GUESS — run &#39;meshbbs mesh survey&#39; to measure yours (§7.8).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.flood_multiplier_override</code><br><span class="meta">bool · false</span><br><span class="meta env">MESHBBS_MESH_FLOOD_MULTIPLIER_OVERRIDE</span></div>
+        <div class="v">Pin flood_multiplier and disable live refinement. Testing only: it stops the node correcting a value that is too low.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.ham_mode_override</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_MESH_HAM_MODE_OVERRIDE</span></div>
+        <div class="v">Set to &#39;i_accept_part97_responsibility&#39; to transmit encrypted traffic while the radio reports a licensed operator. FCC Part 97 prohibits obscuring the meaning of amateur transmissions; the licence at risk is yours (§8.3).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.hop_limit</code><br><span class="meta">int · 0</span><br><span class="meta env">MESHBBS_MESH_HOP_LIMIT</span></div>
+        <div class="v">Hop limit for BBS packets, 0-7. Zero uses the radio&#39;s own setting. Hop limit multiplies what every packet costs the mesh (§1.1), so set it as low as your topology allows.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.mode</code><br><span class="meta">string · auto</span><br><span class="meta env">MESHBBS_MESH_MODE</span></div>
+        <div class="v">How to reach the radio: &#39;serial&#39;, &#39;tcp&#39;, or &#39;auto&#39; (try the configured serial device or auto-detect, then fall back to tcp_host).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.quiet_hours</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_MESH_QUIET_HOURS</span></div>
+        <div class="v">Comma-separated local-time windows of zero transmission, e.g. &#39;22:00-06:00&#39;. Windows may wrap midnight.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.rx_timeout_secs</code><br><span class="meta">int · 300</span><br><span class="meta env">MESHBBS_MESH_RX_TIMEOUT_SECS</span></div>
+        <div class="v">Reconnect if the radio has sent nothing for this many seconds. A USB serial handle can go one-way — writes keep succeeding and transmissions go out while nothing is ever received — and only silence reveals it. Zero disables the check. Below about 60 a busy-but-quiet radio may be reconnected needlessly, and each reconnect re-announces.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.serial_baud</code><br><span class="meta">int · 115200</span><br><span class="meta env">MESHBBS_MESH_SERIAL_BAUD</span></div>
+        <div class="v">Serial baud rate. Every current firmware uses 115200.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.serial_device</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_MESH_SERIAL_DEVICE</span></div>
+        <div class="v">Serial port, e.g. /dev/ttyUSB0 or COM3. Empty auto-detects; run &#39;meshbbs mesh ports&#39; to see candidates.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>mesh.tcp_host</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_MESH_TCP_HOST</span></div>
+        <div class="v">Host of a node on WiFi. Port defaults to 4403 if not given.</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="node">
+    <div class="eyebrow">Section</div>
+    <div class="col prose">
+      <h2><code>[node]</code></h2>
+      <p>Instance identity and operating environment.</p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>node.display_name</code><br><span class="meta">string · meshbbs</span><br><span class="meta env">MESHBBS_NODE_DISPLAY_NAME</span></div>
+        <div class="v">Self-declared label published in this node&#39;s NODE record. Not unique, not authoritative, never used for routing (§6.1.4).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>node.environment</code><br><span class="meta">string · production</span><br><span class="meta env">MESHBBS_NODE_ENVIRONMENT</span></div>
+        <div class="v">&#39;development&#39; or &#39;production&#39;. The dev subcommands refuse to run against a production datadir (§6.7).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>node.sysop_contact</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_NODE_SYSOP_CONTACT</span></div>
+        <div class="v">Free-text contact address for the sysop, published in the NODE record.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>node.sysop_name</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_NODE_SYSOP_NAME</span></div>
+        <div class="v">Sysop&#39;s name, for display.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>node.timezone</code><br><span class="meta">string · Local</span><br><span class="meta env">MESHBBS_NODE_TIMEZONE</span></div>
+        <div class="v">IANA timezone name used for display. Wall-clock time is advisory (§6.2.1).</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="ssh">
+    <div class="eyebrow">Section</div>
+    <div class="col prose">
+      <h2><code>[ssh]</code></h2>
+      <p>The SSH front end (§5.1).</p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>ssh.bind</code><br><span class="meta">string · 0.0.0.0</span><br><span class="meta env">MESHBBS_SSH_BIND</span></div>
+        <div class="v">Address to listen on.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>ssh.enabled</code><br><span class="meta">bool · true</span><br><span class="meta env">MESHBBS_SSH_ENABLED</span></div>
+        <div class="v">Serve SSH.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>ssh.max_sessions</code><br><span class="meta">int · 32</span><br><span class="meta env">MESHBBS_SSH_MAX_SESSIONS</span></div>
+        <div class="v">Maximum concurrent sessions.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>ssh.port</code><br><span class="meta">int · 2222</span><br><span class="meta env">MESHBBS_SSH_PORT</span></div>
+        <div class="v">Port to listen on. 2222 avoids needing root; 22 is conventional for a dedicated host.</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="storage">
+    <div class="eyebrow">Section</div>
+    <div class="col prose">
+      <h2><code>[storage]</code></h2>
+      <p>Database and on-disk layout.</p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>storage.data_dir</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_STORAGE_DATA_DIR</span></div>
+        <div class="v">Root data directory. Empty selects the OS convention (~/.local/share/meshbbs, ~/Library/Application Support/MeshBBS, %APPDATA%\MeshBBS).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>storage.database</code><br><span class="meta">string · bbs.db</span><br><span class="meta env">MESHBBS_STORAGE_DATABASE</span></div>
+        <div class="v">SQLite database filename, relative to data_dir unless absolute.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>storage.files_dir</code><br><span class="meta">string · files</span><br><span class="meta env">MESHBBS_STORAGE_FILES_DIR</span></div>
+        <div class="v">Directory holding file areas, served over SFTP. Relative to data_dir unless absolute.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>storage.keys_dir</code><br><span class="meta">string · keys</span><br><span class="meta env">MESHBBS_STORAGE_KEYS_DIR</span></div>
+        <div class="v">Directory holding node and host keys, relative to data_dir unless absolute. Must be mode 0700 with 0600 keys.</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="telnet">
+    <div class="eyebrow">Section</div>
+    <div class="col prose">
+      <h2><code>[telnet]</code></h2>
+      <p>The legacy plaintext front end, off by default ([D12]).</p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>telnet.bind</code><br><span class="meta">string · 0.0.0.0</span><br><span class="meta env">MESHBBS_TELNET_BIND</span></div>
+        <div class="v">Address to listen on.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>telnet.enabled</code><br><span class="meta">bool · false</span><br><span class="meta env">MESHBBS_TELNET_ENABLED</span></div>
+        <div class="v">Serve telnet. OFF by default: telnet is plaintext, so anything typed can be read by anyone on the network path ([D12]).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>telnet.guest_only</code><br><span class="meta">bool · true</span><br><span class="meta env">MESHBBS_TELNET_GUEST_ONLY</span></div>
+        <div class="v">Serve read-only guest sessions only. Recommended: browsing over plaintext costs nothing, typing a password over it does.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>telnet.max_sessions</code><br><span class="meta">int · 16</span><br><span class="meta env">MESHBBS_TELNET_MAX_SESSIONS</span></div>
+        <div class="v">Maximum concurrent telnet sessions. This is a public plaintext port, so it is capped.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>telnet.port</code><br><span class="meta">int · 2323</span><br><span class="meta env">MESHBBS_TELNET_PORT</span></div>
+        <div class="v">Port to listen on. 23 is conventional but needs root.</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="theme">
+    <div class="eyebrow">Section</div>
+    <div class="col prose">
+      <h2><code>[theme]</code></h2>
+      <p>Appearance (§5.4).</p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>theme.default</code><br><span class="meta">string · classic</span><br><span class="meta env">MESHBBS_THEME_DEFAULT</span></div>
+        <div class="v">Built-in or file theme name, applied to every session on this instance. &#39;meshbbs serve&#39; prints the available names at startup; there is no per-user theme picker in the interface.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>theme.default_encoding</code><br><span class="meta">string · auto</span><br><span class="meta env">MESHBBS_THEME_DEFAULT_ENCODING</span></div>
+        <div class="v">auto, utf8, or cp437. &#39;auto&#39; guesses from the client&#39;s locale and terminal type.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>theme.dir</code><br><span class="meta">string · themes</span><br><span class="meta env">MESHBBS_THEME_DIR</span></div>
+        <div class="v">Directory scanned for *.toml style overrides, relative to data_dir unless absolute ([N5]).</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="users">
+    <div class="eyebrow">Section</div>
+    <div class="col prose">
+      <h2><code>[users]</code></h2>
+      <p>Registration and account policy (§6.7).</p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>users.default_directory_listed</code><br><span class="meta">bool · true</span><br><span class="meta env">MESHBBS_USERS_DEFAULT_DIRECTORY_LISTED</span></div>
+        <div class="v">Whether new users are listed in the network directory ([N9]).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>users.guest_enabled</code><br><span class="meta">bool · true</span><br><span class="meta env">MESHBBS_USERS_GUEST_ENABLED</span></div>
+        <div class="v">Allow anonymous read-only access via ssh guest@.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>users.registration_mode</code><br><span class="meta">string · open</span><br><span class="meta env">MESHBBS_USERS_REGISTRATION_MODE</span></div>
+        <div class="v">open, approval, invite, or closed. Default &#39;open&#39; with federated posting withheld: the door is open, the shared airtime is gated ([N7]).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>users.session_time_limit_mins</code><br><span class="meta">int · 0</span><br><span class="meta env">MESHBBS_USERS_SESSION_TIME_LIMIT_MINS</span></div>
+        <div class="v">End a session after this many minutes. 0 means no limit. Sysops are never timed out: the limit shares lines between callers, and the operator is not competing for one.</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="web">
+    <div class="eyebrow">Section</div>
+    <div class="col prose">
+      <h2><code>[web]</code></h2>
+      <p>The browser front end, off by default (webui.md [D16]).</p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k"><code>web.auth_attempts_per_hour</code><br><span class="meta">int · 60</span><br><span class="meta env">MESHBBS_WEB_AUTH_ATTEMPTS_PER_HOUR</span></div>
+        <div class="v">Sign-in attempts allowed per client per hour. Looser than enrolment: a passkey prompt that the user dismisses costs an attempt, and that is a normal thing to do more than once.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.bind</code><br><span class="meta">string · 0.0.0.0</span><br><span class="meta env">MESHBBS_WEB_BIND</span></div>
+        <div class="v">Address to listen on.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.enabled</code><br><span class="meta">bool · false</span><br><span class="meta env">MESHBBS_WEB_ENABLED</span></div>
+        <div class="v">Serve the browser front end. Off by default: it needs a public origin and a TLS certificate, which have no sensible defaults.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.enrol_attempts_per_hour</code><br><span class="meta">int · 10</span><br><span class="meta env">MESHBBS_WEB_ENROL_ATTEMPTS_PER_HOUR</span></div>
+        <div class="v">Passkey-enrolment code attempts allowed per client per hour. A person typing a code off their SSH session needs two or three; a script guessing codes needs far more.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.enrolment_code_ttl_mins</code><br><span class="meta">int · 10</span><br><span class="meta env">MESHBBS_WEB_ENROLMENT_CODE_TTL_MINS</span></div>
+        <div class="v">How long a passkey-enrolment code stays valid ([D18]). It is read off a terminal and typed into a browser on the same desk, so minutes are generous.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.idle_timeout_mins</code><br><span class="meta">int · 30</span><br><span class="meta env">MESHBBS_WEB_IDLE_TIMEOUT_MINS</span></div>
+        <div class="v">Disconnect a browser session idle this long.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.max_sessions</code><br><span class="meta">int · 64</span><br><span class="meta env">MESHBBS_WEB_MAX_SESSIONS</span></div>
+        <div class="v">Maximum concurrent browser sessions. A public listener with no cap is a file-descriptor exhaustion away from taking SSH down with it.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.max_sessions_per_user</code><br><span class="meta">int · 8</span><br><span class="meta env">MESHBBS_WEB_MAX_SESSIONS_PER_USER</span></div>
+        <div class="v">Maximum concurrent browser sessions for one account.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.origin</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_WEB_ORIGIN</span></div>
+        <div class="v">Public origin browsers reach this BBS at, e.g. https://bbs.example.com. REQUIRED when enabled and has no default: passkeys are bound to it, and a mismatch fails every sign-in with an error that does not say why (webui.md §7.1).</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.port</code><br><span class="meta">int · 8443</span><br><span class="meta env">MESHBBS_WEB_PORT</span></div>
+        <div class="v">Port to listen on. 443 is conventional but needs root.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.session_ttl_hours</code><br><span class="meta">int · 12</span><br><span class="meta env">MESHBBS_WEB_SESSION_TTL_HOURS</span></div>
+        <div class="v">Absolute lifetime of a browser session, however active it is.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.tls_cert</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_WEB_TLS_CERT</span></div>
+        <div class="v">Path to the TLS certificate chain. Required when enabled unless bound to loopback, which browsers treat as a secure context.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.tls_key</code><br><span class="meta">string · (empty)</span><br><span class="meta env">MESHBBS_WEB_TLS_KEY</span></div>
+        <div class="v">Path to the TLS private key.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.trusted_proxies</code><br><span class="meta">list of string · (empty)</span><br><span class="meta env">MESHBBS_WEB_TRUSTED_PROXIES</span></div>
+        <div class="v">IPs or CIDRs of reverse proxies allowed to report the real client via X-Forwarded-For. EMPTY BY DEFAULT, which means the header is ignored and every request is attributed to whatever address it arrived from — correct when nothing sits in front, and it collapses per-client rate limits into one shared allowance when something does. Set this only for proxies you run: any address listed here can claim to be any client.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>web.unlocked_idle_timeout_mins</code><br><span class="meta">int · 10</span><br><span class="meta env">MESHBBS_WEB_UNLOCKED_IDLE_TIMEOUT_MINS</span></div>
+        <div class="v">Disconnect a session that has unlocked mail after this much idleness. Shorter than idle_timeout_mins on purpose: such a session holds the passphrase in memory, and a closing browser tab is a far less reliable goodbye than an SSH disconnect (webui.md §9).</div>
+      </div>
+    </div>
+  </section>
+
+<!-- END GENERATED -->
+
+  <a class="next" href="radio.html">
+    <span class="nk">Next</span>
+    <span class="nt">Attach a radio — find your node, set it up, learn the budget →</span>
+  </a>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="config.html">Configuration guide</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>

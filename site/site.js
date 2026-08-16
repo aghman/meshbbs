@@ -81,11 +81,24 @@
     }
   }
 
-  /* ── Mark the current page in the nav ──────────────────── */
+  /* ── Mark the current page in the nav ────────────────────
+     The run-a-node section is several pages behind one top-level
+     nav entry, so a page inside it lights up both its own entry
+     in the section strip and "Run a node" above. */
+
+  var SECTION = {
+    "running.html": 1, "config.html": 1, "config-reference.html": 1,
+    "radio.html": 1, "peering.html": 1, "troubleshooting.html": 1, "status.html": 1
+  };
 
   function markCurrentPage() {
     var here = location.pathname.split("/").pop() || "index.html";
+    var top = SECTION[here] ? "running.html" : here;
+
     document.querySelectorAll(".nav a[href]").forEach(function (a) {
+      if (a.getAttribute("href") === top) a.setAttribute("aria-current", "page");
+    });
+    document.querySelectorAll(".subnav a[href]").forEach(function (a) {
       if (a.getAttribute("href") === here) a.setAttribute("aria-current", "page");
     });
   }

@@ -9,6 +9,8 @@ Generated from the source. Do not edit by hand.
 | `log.level` | string | `info` | `MESHBBS_LOG_LEVEL` | debug, info, warn, or error. |
 | `mesh.airtime_ceiling_pct` | float64 | `5` | `MESHBBS_MESH_AIRTIME_CEILING_PCT` | Share of the channel the WHOLE BBS network should use, as a percentage. Divided by expected_instance_count to get this node's allowance. Clamped to 15 in code (§7.6). |
 | `mesh.channel_name` | string | `bbsnet` | `MESHBBS_MESH_CHANNEL_NAME` | Name of the Meshtastic channel carrying BBS traffic (§7.1). Create it in the Meshtastic app as a secondary channel with the same name and key on every instance. |
+| `mesh.door_event_batch_window` | string | `auto` | `MESHBBS_MESH_DOOR_EVENT_BATCH_WINDOW` | How long a partial batch of door-league events waits before it is sent (§9.5). 'auto' derives it from what the area's airtime share actually buys, so a measured flood multiplier propagates without a config edit. An explicit Go duration like '30m' overrides, and is clamped to 5m-12h. |
+| `mesh.door_event_max_age` | string | `24h` | `MESHBBS_MESH_DOOR_EVENT_MAX_AGE` | How long a queued door-league event may wait before it is dropped unsent (§9.5). Generous on purpose: it exists to stop a node that has been offline for a week spending its whole budget on a game that finished, not to tighten latency. |
 | `mesh.enabled` | bool | `false` | `MESHBBS_MESH_ENABLED` | Federate over a Meshtastic radio. Off by default: enabling it transmits on a shared band. |
 | `mesh.expected_instance_count` | int | `50` | `MESHBBS_MESH_EXPECTED_INSTANCE_COUNT` | How many instances divide the ceiling. The design plans for 50 ([D2]). |
 | `mesh.flood_multiplier` | float64 | `4` | `MESHBBS_MESH_FLOOD_MULTIPLIER` | R: how many times the mesh rebroadcasts each packet. Every airtime figure scales linearly with it, and 4 is a GUESS — run 'meshbbs mesh survey' to measure yours (§7.8). |
@@ -39,7 +41,7 @@ Generated from the source. Do not edit by hand.
 | `telnet.guest_only` | bool | `true` | `MESHBBS_TELNET_GUEST_ONLY` | Serve read-only guest sessions only. Recommended: browsing over plaintext costs nothing, typing a password over it does. |
 | `telnet.max_sessions` | int | `16` | `MESHBBS_TELNET_MAX_SESSIONS` | Maximum concurrent telnet sessions. This is a public plaintext port, so it is capped. |
 | `telnet.port` | int | `2323` | `MESHBBS_TELNET_PORT` | Port to listen on. 23 is conventional but needs root. |
-| `theme.default` | string | `classic` | `MESHBBS_THEME_DEFAULT` | Built-in or file theme name. Run the BBS and press N for the list. |
+| `theme.default` | string | `classic` | `MESHBBS_THEME_DEFAULT` | Built-in or file theme name, applied to every session on this instance. 'meshbbs serve' prints the available names at startup; there is no per-user theme picker in the interface. |
 | `theme.default_encoding` | string | `auto` | `MESHBBS_THEME_DEFAULT_ENCODING` | auto, utf8, or cp437. 'auto' guesses from the client's locale and terminal type. |
 | `theme.dir` | string | `themes` | `MESHBBS_THEME_DIR` | Directory scanned for *.toml style overrides, relative to data_dir unless absolute ([N5]). |
 | `users.default_directory_listed` | bool | `true` | `MESHBBS_USERS_DEFAULT_DIRECTORY_LISTED` | Whether new users are listed in the network directory ([N9]). |

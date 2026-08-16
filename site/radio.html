@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attach a radio — meshbbs</title>
+<meta name="description" content="Find your Meshtastic node over USB or on the network, configure it in the Meshtastic app, understand the airtime budget, and measure R before you federate.">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="brand" href="index.html">mesh<span>bbs</span></a>
+  <a href="concept.html">Concept</a>
+  <a href="using.html">Using it</a>
+  <a href="protocol.html">Sync &amp; protocol</a>
+  <a href="running.html">Run a node</a>
+  <a class="gh" href="https://github.com/aghman/meshbbs">GitHub ↗</a>
+</nav>
+
+<div class="wrap">
+
+  <div class="subnav">
+    <b>Run a node</b>
+    <a href="running.html">Quick start</a>
+    <a href="config.html">Configuration</a>
+    <a href="radio.html">Attach a radio</a>
+    <a href="peering.html">Peering</a>
+    <a href="troubleshooting.html">Troubleshooting</a>
+    <a href="status.html">Project status</a>
+  </div>
+
+  <header class="pagehead">
+    <div class="eyebrow">Hardware</div>
+    <h1>Attaching a Meshtastic node</h1>
+    <p class="lede col">
+      A radio is what makes an instance <strong>federate</strong>. It is not what makes it work — so
+      do this after you have a board running, not before. Six things in order: get a node, find it,
+      configure it, learn what the budget is, measure your mesh, then turn federation on.
+    </p>
+  </header>
+
+  <div class="toc">
+    <span>On this page</span>
+    <a href="#hardware">Which radio</a>
+    <a href="#find">Finding your node</a>
+    <a href="#app">Setting it up</a>
+    <a href="#words">The words we use</a>
+    <a href="#budget">What the budget is</a>
+    <a href="#survey">Measuring R</a>
+    <a href="#enable">Turning it on</a>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="hardware">
+    <div class="eyebrow">Step 1</div>
+    <div class="col prose">
+      <h2>Which radio, and what firmware</h2>
+      <p>
+        Any Meshtastic node that can be reached over USB serial or over TCP works — meshbbs speaks
+        the standard protobuf stream and does not need custom firmware. Development has been done
+        against Heltec V3 boards on firmware 2.7, and the USB identifier table recognises the chips
+        on the common hardware.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Recognised chips</div>
+        <div class="v">CP210x (T-Beam, Heltec, RAK), CH9102 (T-Beam, T-Echo), CH340 (Heltec,
+          LilyGO), nRF52840 (RAK4631), Seeed XIAO nRF52840, and ESP32-S3 native USB (Heltec V3,
+          T-Deck). Hardware outside that list is not unsupported — it just will not be
+          <em>identified</em> automatically, and you name its port in the config instead.</div>
+      </div>
+      <div class="row">
+        <div class="k">Firmware</div>
+        <div class="v">2.5 or newer. Note one behaviour of 2.5+: unicast is encrypted with the
+          destination's own key, so a direct packet to a peer whose key you have not exchanged is
+          acknowledged by the firmware and never reaches the application. BBS traffic is broadcast
+          on a shared channel, which is why this does not bite in normal operation.</div>
+      </div>
+      <div class="row">
+        <div class="k">Where it should sit</div>
+        <div class="v">Somewhere with decent RF, which is rarely the same room as the server. That
+          is the case for the TCP transport: put the radio on a windowsill or in the attic on WiFi,
+          and leave the BBS in the closet.</div>
+      </div>
+      <div class="row">
+        <div class="k">Flashing it</div>
+        <div class="v">Nothing meshbbs-specific. Use the official
+          <a class="inline" href="https://flasher.meshtastic.org/">web flasher</a> or the
+          Meshtastic app, get the node talking to the app first, and only then plug it into the
+          BBS. A node that the app cannot see is not a meshbbs problem.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="find">
+    <div class="eyebrow">Step 2</div>
+    <div class="col prose">
+      <h2>Finding your node</h2>
+      <p>
+        Two ways in, and one command that answers both. Serial is the recommended default because
+        nothing can go wrong with it that you cannot see; TCP is better whenever the radio wants to
+        live somewhere the server does not.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <h3>Over USB</h3>
+      <p>
+        Plug it in and ask. Detection <em>ranks</em> candidates and explains each guess rather than
+        silently picking one, because most Meshtastic boards use generic USB-UART bridges that
+        anything else might also use.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-cap"><span>Captured from a real run</span><b>meshbbs mesh ports</b></div>
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs mesh ports</span>
+<span class="b">/dev/cu.usbserial-0001</span>
+    <span class="d">matches a USB serial device name (cu.usbserial*)</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Linux</div>
+        <div class="v"><code>/dev/ttyUSB0</code> for bridge chips, <code>/dev/ttyACM0</code> for
+          native USB. Vendor and product IDs are read from sysfs, so the guess here is a real
+          identification. <strong>You will need to be in the <code>dialout</code> group</strong> —
+          <code>sudo usermod -aG dialout $USER</code>, then log out and back in — or every attempt
+          fails with a permission error.</div>
+      </div>
+      <div class="row">
+        <div class="k">macOS</div>
+        <div class="v"><code>/dev/cu.usbserial-*</code>, <code>/dev/cu.usbmodem*</code>,
+          <code>/dev/cu.wchusbserial*</code> or <code>/dev/cu.SLAB_USBtoUART</code>. Use the
+          <code>cu.</code> device and not the <code>tty.</code> one with the same name: the
+          <code>tty.</code> device blocks on open waiting for carrier detect, which looks exactly
+          like a hung program. Reading USB IDs here would need IOKit through cgo, which the project
+          declines, so macOS matches on names — weaker evidence, honestly labelled.</div>
+      </div>
+      <div class="row">
+        <div class="k">Windows</div>
+        <div class="v"><code>COM3</code> and friends, identified by vendor and product ID from the
+          registry. If nothing appears, install the driver for your board's bridge chip (CP210x or
+          CH340) and check Device Manager under Ports (COM &amp; LPT).</div>
+      </div>
+      <div class="row">
+        <div class="k">Wired to a Pi's UART</div>
+        <div class="v">Supported, and it will appear in the list — but never ranked above a USB
+          device, because a non-USB serial port is more often a built-in UART or a Bluetooth rfcomm
+          device than a radio.</div>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <h3>Over the network</h3>
+      <p>
+        A node on WiFi exposes the same protobuf stream on <strong>TCP port 4403</strong>. To find
+        its address: in the Meshtastic app, open the node's settings and look under
+        <em>Network</em>, which shows the WiFi status and the address the node was given. Failing
+        that, most nodes answer to <code>meshtastic.local</code> over mDNS, and your router's DHCP
+        lease table always knows.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-body">
+<pre><span class="d"># the host may be a name or an address; :4403 is assumed</span>
+<span class="p">$</span> <span class="c">./meshbbs mesh info --tcp meshtastic.local</span>
+<span class="p">$</span> <span class="c">./meshbbs mesh info --tcp 192.168.1.42</span>
+<span class="p">$</span> <span class="c">./meshbbs mesh info --tcp 192.168.1.42:4403</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="col prose">
+      <h3>Confirming it, either way</h3>
+      <p>
+        <code>mesh info</code> connects and prints what the node reports about itself. This is the
+        one command to run after every change you make in the app — it is how you find out whether
+        the change took.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-cap"><span>Captured from a real Heltec V3</span><b>meshbbs mesh info</b></div>
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs mesh info</span>
+<span class="g">Connected:</span> <span class="d">serial:/dev/cu.usbserial-0001</span>
+
+<span class="b">Radio</span>
+  <span class="d">node number</span>     862509464 (0x3368d998)
+  <span class="d">hardware</span>        HELTEC_V3
+  <span class="d">firmware</span>        2.7.15.567b8ea
+
+<span class="b">LoRa</span>
+  <span class="d">region</span>          US
+  <span class="d">modem preset</span>    LONG_FAST
+  <span class="d">hop limit</span>       3
+
+<span class="b">Channels</span>
+  <span class="d">0  (preset default)   PRIMARY    encrypted</span>
+  <span class="g">2  bbsnet             SECONDARY  encrypted</span>
+  <span class="d">unused slots: 1, 3, 4, 5, 6, 7</span>
+
+<span class="b">Telemetry</span>
+  <span class="w">metrics update  firmware default (30m0s)</span>
+  <span class="d">channel busy    0.00%</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="col prose">
+      <p style="font-size:16px;color:var(--fg-dim)">
+        That is a correctly set up node with one thing still to fix: the metrics update interval is
+        at the firmware default of 30 minutes, which is far too slow for
+        <a class="inline" href="#survey">the survey</a> to sample. The next section fixes it.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="app">
+    <div class="eyebrow">Step 3</div>
+    <div class="col prose">
+      <h2>Setting the node up in the Meshtastic app</h2>
+      <p>
+        Five settings, all of them in the official app (Android, iOS, or
+        <a class="inline" href="https://client.meshtastic.org/">the web client</a>). meshbbs does
+        not change your radio's configuration — it reads it and works within it — so everything
+        here is done once, in the app, before you enable the mesh.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="steps">
+      <div class="stepitem">
+        <div>
+          <h3>Region — <span style="color:var(--warn)">required</span></h3>
+          <p><em>Radio configuration → LoRa → Region.</em> A node with no region set will not
+             transmit at all. US, EU_868, EU_433 and the rest are legal allocations, not
+             preferences: pick the one for where the radio physically is.</p>
+        </div>
+      </div>
+
+      <div class="stepitem">
+        <div>
+          <h3>Modem preset — leave it at LongFast</h3>
+          <p><em>Radio configuration → LoRa → Modem preset.</em> Every airtime figure in this
+             project is quoted for LongFast, which carries 233-byte packets in 2.157 seconds. A
+             slower preset buys range and costs you proportionally more of the budget for the same
+             traffic; a faster one does the reverse. Change it only if the whole mesh has.</p>
+        </div>
+      </div>
+
+      <div class="stepitem">
+        <div>
+          <h3>Hop limit — as low as your topology allows</h3>
+          <p><em>Radio configuration → LoRa → Hop limit.</em> This is the single most expensive
+             number on the radio: it multiplies what every packet you send costs the whole mesh.
+             The Meshtastic default of 3 is a reasonable starting point and 7 is almost never
+             right. You can also set <code>mesh.hop_limit</code> in meshbbs to override it for BBS
+             traffic only, which is the polite version.</p>
+        </div>
+      </div>
+
+      <div class="stepitem">
+        <div>
+          <h3>A secondary channel named <code>bbsnet</code></h3>
+          <p><em>Radio configuration → Channels → add a channel.</em> Name it <code>bbsnet</code>
+             — matching <code>mesh.channel_name</code> — and give it a key. Every instance that
+             should federate with you needs the <strong>same name and the same key</strong>; that
+             shared key is what makes you one BBS network rather than several. Share it the way you
+             would any shared secret, not by posting the QR code publicly.</p>
+          <p>Note that a separate channel is <em>not</em> separate airtime. It keeps BBS traffic
+             logically apart so that non-BBS nodes ignore it, but every channel on the frequency
+             shares the same seconds. Only the governor makes you a good neighbour.</p>
+        </div>
+      </div>
+
+      <div class="stepitem">
+        <div>
+          <h3>Telemetry every 60 seconds</h3>
+          <p><em>Module configuration → Telemetry → Device metrics update interval → 60.</em> The
+             node reports channel utilisation in its device metrics, and that is the measurement
+             the survey reads. A stock node updates every 30 minutes, which is far too slow to
+             sample — you would get a handful of readings across a two-hour run. Set this before
+             surveying; you can put it back afterwards.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note">
+      <span class="tag">If you want the radio on WiFi</span>
+      <p>
+        <em>Radio configuration → Network</em> — enable WiFi, give it your SSID and password, and
+        save. The node reboots and joins; its address then shows on the same screen. That is the
+        address you pass as <code>mesh.tcp_host</code>. Serial and WiFi are not exclusive, so it is
+        fine to configure over USB and then run over TCP.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="note">
+      <span class="tag">Check your work</span>
+      <p>
+        Run <code>meshbbs mesh info</code> again. Region, preset, hop limit, the
+        <code>bbsnet</code> channel and the telemetry interval are all in that output, and if one
+        of them did not save you will see it there rather than discovering it during a two-hour
+        survey.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="words">
+    <div class="eyebrow">Step 4</div>
+    <div class="col prose">
+      <h2>The words this project uses</h2>
+      <p>
+        meshbbs talks about airtime in terms that are specific to it. Here they are once, with the
+        answer to "so what should I set it to?" attached — because for most of them the answer is
+        "nothing, leave it".
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Airtime<br><span style="color:var(--fg-faint);font-size:11px">seconds on the channel</span></div>
+        <div class="v">How long a transmission occupies the frequency. One full 233-byte packet on
+          LongFast is <strong>2.157 seconds</strong>. Radio is a shared medium: while you are
+          transmitting, nobody else on that frequency can. Airtime, not bandwidth, is the scarce
+          thing here.</div>
+      </div>
+      <div class="row">
+        <div class="k">R, the flood multiplier<br><span style="color:var(--fg-faint);font-size:11px">default 4 — measure it</span></div>
+        <div class="v">Meshtastic uses managed flooding: every node that hears a broadcast
+          rebroadcasts it. So one transmission of yours costs the <em>channel</em> roughly R times
+          what it costs you. R is a property of your mesh's RF topology seen from your position —
+          it cannot be derived, simulated or guessed well, and <strong>4 is a placeholder</strong>.
+          Every airtime figure scales linearly with it. <a class="inline" href="#survey">Measure
+          it</a> rather than tuning it.</div>
+      </div>
+      <div class="row">
+        <div class="k">Hop limit<br><span style="color:var(--fg-faint);font-size:11px">set it low</span></div>
+        <div class="v">How many times a packet may be relayed onward. It is a direct multiplier on
+          reach <em>and</em> on cost. Raising it is the fastest way to make your instance
+          expensive for everybody else.</div>
+      </div>
+      <div class="row">
+        <div class="k">The ceiling<br><span style="color:var(--fg-faint);font-size:11px">5% — leave it</span></div>
+        <div class="v"><code>mesh.airtime_ceiling_pct</code> is the share of the channel that the
+          <em>whole BBS network</em> should occupy — not your share. It is deliberately small: a
+          BBS is a guest on a mesh built for other things. The code clamps it at 15 whatever you
+          write.</div>
+      </div>
+      <div class="row">
+        <div class="k">The budget<br><span style="color:var(--fg-faint);font-size:11px">derived, not set</span></div>
+        <div class="v">Your instance's allowance: the ceiling divided by
+          <code>expected_instance_count</code>, then adjusted for R. You never set this. It is
+          computed, and <code>meshbbs serve</code> prints it at startup in packets and posts per
+          day, because a percentage is not a thing anybody can reason about.</div>
+      </div>
+      <div class="row">
+        <div class="k">The governor<br><span style="color:var(--fg-faint);font-size:11px">always on</span></div>
+        <div class="v">The component that spends the budget: it batches, prioritises, defers and
+          refuses. It is why an instance cannot flood the mesh even if its sysop has misconfigured
+          everything else, and it is not switchable.</div>
+      </div>
+      <div class="row">
+        <div class="k">Quiet hours<br><span style="color:var(--fg-faint);font-size:11px">optional</span></div>
+        <div class="v">Local-time windows in which this node transmits nothing at all, e.g.
+          <code>22:00-06:00</code>. Windows may wrap midnight. Worth setting if your radio shares a
+          neighbourhood with people who notice.</div>
+      </div>
+      <div class="row">
+        <div class="k"><code>bbsnet</code><br><span style="color:var(--fg-faint);font-size:11px">the channel</span></div>
+        <div class="v">The secondary Meshtastic channel that carries BBS traffic, named by
+          <code>mesh.channel_name</code>. Same name and key on every instance in your network.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="budget">
+    <div class="eyebrow">Step 4, continued</div>
+    <div class="col prose">
+      <h2>What the budget actually buys</h2>
+      <p>
+        Share a 5% ceiling across fifty instances and each one gets about
+        <span class="num">21</span> seconds of transmit time a day. Ten full packets. That is the
+        number every other decision in the design answers to, and it is worth internalising before
+        you federate anything.
+      </p>
+      <p>
+        Three consequences worth knowing up front. Posts are batched over a 15–30 minute window
+        rather than sent as they are written, so federation is not chat. File contents never cross
+        the mesh at any size — only catalogs replicate, and bytes move over IP or on a memory
+        stick. And a busy area can exhaust a day's allowance, which is what
+        <code>meshbbs area share</code> exists to bound.
+      </p>
+      <p>
+        <a class="inline" href="concept.html#budget">The full arithmetic, and what it forces →</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="survey">
+    <div class="eyebrow">Step 5</div>
+    <div class="col prose">
+      <h2>Measuring R on your mesh</h2>
+      <p>
+        <code>mesh survey</code> needs only the radio — no database, no SSH server, no config
+        beyond the device connection. It listens with the radio silent to establish a baseline,
+        transmits a small paced load at each hop limit, and attributes the rise in channel
+        utilisation to rebroadcasts of its own packets.
+      </p>
+      <p>
+        It prints the plan and refuses to start until you have read it. <strong>This command
+        transmits.</strong> It is polite about it — it will not start on a busy channel, aborts if
+        the channel gets busier, and defaults to about 1% duty — but it does put packets on a
+        shared band for as long as you tell it to.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-cap"><span>Captured from a real run</span><b>meshbbs mesh survey</b></div>
+      <div class="term-body">
+<pre><span class="p">$</span> <span class="c">./meshbbs mesh survey</span>
+<span class="b">Survey plan</span>
+  <span class="d">radio</span>          LONG_FAST (SF11, BW250kHz, CR4/5)
+  <span class="d">baseline</span>       30m0s, silent — twice, before and after
+  <span class="d">load</span>           30m0s at each of hop [1 3 5]
+  <span class="d">total time</span>     2h30m0s
+  <span class="d">transmits</span>      about 27 packets of 200 bytes
+  <span class="d">our airtime</span>    about 52s (before rebroadcasts)
+
+<span class="w">Error: not transmitting: re-run with --yes once the plan above looks right</span>
+
+<span class="p">$</span> <span class="c">./meshbbs mesh survey --yes --out fog-city-survey.txt</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="rows">
+      <div class="row">
+        <div class="k">Before you start</div>
+        <div class="v">Set the telemetry interval to 60s (step 3), pick a couple of hours when the
+          mesh is quiet, and leave the radio where it will actually live — R is measured from a
+          position, and moving the antenna afterwards invalidates it.</div>
+      </div>
+      <div class="row">
+        <div class="k">Shorter runs</div>
+        <div class="v"><code>--baseline 10m --load 10m --hops 3</code> gives a rough number in
+          about 40 minutes. The defaults are long because the measurement is a difference between
+          two noisy quantities, and confidence comes from samples.</div>
+      </div>
+      <div class="row">
+        <div class="k">Reading the result</div>
+        <div class="v">The report ends with "what this means for your instance": R at the best hop
+          limit, and what that buys in seconds, full packets and short posts per day. It also
+          reports ambient drift between the opening and closing baselines — if the mesh got busier
+          while you were transmitting, your R is overstated and the report says so.</div>
+      </div>
+      <div class="row">
+        <div class="k">If it fails to measure</div>
+        <div class="v">"No usable R was measured" means the load never rose above the channel's own
+          noise. That is an honest answer rather than an error: re-run when the mesh is quieter, or
+          with a longer load phase. A quiet mesh with no neighbours has no rebroadcasts to
+          measure — R really is near 1 there.</div>
+      </div>
+      <div class="row">
+        <div class="k">Then what</div>
+        <div class="v">Put the number in <code>mesh.flood_multiplier</code>. The report is plain
+          text on purpose: sysops send them to each other, and the project aggregates them into a
+          distribution that eventually replaces the guessed default for everyone.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <section id="enable">
+    <div class="eyebrow">Step 6</div>
+    <div class="col prose">
+      <h2>Turning federation on</h2>
+      <p>
+        Two lines of config and a restart. The mesh comes up <em>before</em> the SSH server accepts
+        anyone, so a misconfigured radio, an absent channel or a ham-mode violation stops startup
+        instead of leaving an instance that looks healthy and silently federates nothing.
+      </p>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="term">
+      <div class="term-cap"><span>The minimum</span><b>config.toml</b></div>
+      <div class="term-body">
+<pre><span class="b">[mesh]</span>
+<span class="c">enabled</span>          = <span class="g">true</span>
+<span class="c">serial_device</span>    = <span class="c">"/dev/ttyUSB0"</span>   <span class="d"># or leave empty to auto-detect</span>
+<span class="c">hop_limit</span>        = <span class="g">3</span>
+<span class="c">flood_multiplier</span> = <span class="g">5.2</span>               <span class="d"># whatever the survey measured</span></pre>
+      </div>
+    </div>
+
+    <div class="gap-s"></div>
+
+    <div class="col prose">
+      <p style="font-size:16px;color:var(--fg-dim)">
+        Restart, and the startup banner grows three lines: the transport and channel, the radio's
+        own hardware, preset and hop limit, and the derived airtime budget in human terms. Then
+        federate an area — <code>meshbbs area federate general</code> — and grant somebody
+        <code>post_federated</code>. Neither happens by itself.
+      </p>
+    </div>
+
+    <div class="gap-m"></div>
+
+    <div class="note warn">
+      <span class="tag">Licensed operators, read this first</span>
+      <p>
+        If your node reports a licensed operator (Meshtastic's ham mode), meshbbs blocks encrypted
+        traffic rather than let you stumble into an FCC Part 97 violation: Part 97 prohibits
+        messages encoded to obscure their meaning, and a channel PSK is exactly that. The override
+        exists — <code>mesh.ham_mode_override = "i_accept_part97_responsibility"</code> — and the
+        licence at risk is yours.
+      </p>
+      <p>
+        What is <em>not</em> restricted matters more: signatures authenticate without obscuring
+        anything, so a ham-mode instance federates forums, node records and succession normally. It
+        gives up private mail over the mesh, and nothing else.
+      </p>
+    </div>
+  </section>
+
+  <a class="next" href="peering.html">
+    <span class="nk">Next</span>
+    <span class="nt">Peering — node IDs, and what "peering" means here →</span>
+  </a>
+
+  <footer>
+    <span>MIT licensed</span>
+    <a href="https://github.com/aghman/meshbbs">GitHub</a>
+    <a href="https://github.com/aghman/meshbbs/blob/main/docs/design.md">High-level design</a>
+    <a href="config-reference.html">Configuration reference</a>
+    <a href="https://meshtastic.org">Meshtastic</a>
+  </footer>
+</div>
+
+</body>
+</html>

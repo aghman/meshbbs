@@ -117,6 +117,14 @@ recovered, and the instance would have to re-establish with its peers as a new n
   authentication and enrolment. Owns §5.3 of the design doc in detail.
 - [Configuration reference](docs/config.md) — generated; run `meshbbs config reference` for the
   same content.
+- [How it is tested](docs/testing.md) — deterministic simulation, the determinism checker, golden
+  screens, and the generated-docs targets.
+
+Sysop-facing guides live on the project site: [running a
+node](https://aghman.github.io/meshbbs/running.html), [configuration](https://aghman.github.io/meshbbs/config.html),
+[attaching a radio](https://aghman.github.io/meshbbs/radio.html),
+[peering](https://aghman.github.io/meshbbs/peering.html) and
+[troubleshooting](https://aghman.github.io/meshbbs/troubleshooting.html).
 
 ### Keeping your own message key
 

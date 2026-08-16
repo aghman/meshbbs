@@ -135,7 +135,7 @@ type Users struct {
 
 // Theme configures appearance (§5.4, [D15], [N5]).
 type Theme struct {
-	Default  string `toml:"default" default:"classic" doc:"Built-in or file theme name. Run the BBS and press N for the list."`
+	Default  string `toml:"default" default:"classic" doc:"Built-in or file theme name, applied to every session on this instance. 'meshbbs serve' prints the available names at startup; there is no per-user theme picker in the interface."`
 	Dir      string `toml:"dir" default:"themes" doc:"Directory scanned for *.toml style overrides, relative to data_dir unless absolute ([N5])."`
 	Encoding string `toml:"default_encoding" default:"auto" doc:"auto, utf8, or cp437. 'auto' guesses from the client's locale and terminal type."`
 }
