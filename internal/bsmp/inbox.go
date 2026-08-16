@@ -103,9 +103,19 @@ type InboxStats struct {
 	// staring at the radio will change it. Corrupt is the bytes not surviving
 	// the trip, which is a link or a decoder problem and nothing to do with
 	// what the sender meant. Lumped together they diagnose neither.
-	Corrupt    int
-	Duplicates int
-	Evicted    int
+	Corrupt int
+	// UnknownDictionary counts bundles packed with a compression dictionary
+	// this build does not hold (§7.4).
+	//
+	// Split from Rejected for the same reason Corrupt is: it points somewhere
+	// else entirely. This one is not a malformed peer and not a bad link — it is
+	// a peer running a NEWER build than this node, and the fix is to upgrade
+	// here. It is also the counter that says dictionary negotiation is not
+	// working, since a node advertising its level correctly should never be sent
+	// something it cannot read.
+	UnknownDictionary int
+	Duplicates        int
+	Evicted           int
 }
 
 // NewInbox builds an inbox.
@@ -253,6 +263,16 @@ func (in *Inbox) symbol(dg link.Datagram) error {
 	// every other symbol arriving from every other peer.
 	b, err := bundle.Unpack(packed, in.cfg.Dictionaries)
 	if err != nil {
+		if errors.Is(err, bundle.ErrUnknownDictionary) {
+			// Its own counter and its own sentence, because the remedy is here
+			// rather than at the sender: this node is behind (§7.4). Everything
+			// this peer sends will fail the same way until it is upgraded, so
+			// saying "would not unpack" would be both true and useless.
+			in.bump(func(s *InboxStats) { s.UnknownDictionary++ })
+			in.event(fmt.Sprintf("bundle from %s needs a compression dictionary this build "+
+				"does not hold: %v", dg.From.Short(), err))
+			return nil
+		}
 		in.bump(func(s *InboxStats) { s.Rejected++ })
 		in.event(fmt.Sprintf("bundle from %s decoded but would not unpack: %v", dg.From.Short(), err))
 		return nil

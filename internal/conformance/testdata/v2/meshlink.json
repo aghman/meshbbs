@@ -1,0 +1,54 @@
+{
+  "format_version": 2,
+  "vectors": [
+    {
+      "name": "announce-basic",
+      "kind": "announce",
+      "note": "the radio number is INSIDE the signature, which is what makes a captured announcement unreplayable from another radio",
+      "input": {
+        "key": "node-a",
+        "radio": 2050694189,
+        "at": 1700000000
+      },
+      "encoded": "0354f5282565491705c21c5166529b2b5687ec272ce0f050ae74900e7f8e9433797a3b1c2d6553f100b6f22230bdbcce39af16093a92a124dcb260db6866cd3c9fba41763c9959db756326d847a905fc84c6f605ea263a41882eff9b111b6e9572167707b3f912a70a"
+    },
+    {
+      "name": "announce-radio-max",
+      "kind": "announce",
+      "input": {
+        "key": "node-b",
+        "radio": 4294967295,
+        "at": 1700000000
+      },
+      "encoded": "03eee56d608a0550a044620954803c496e0c6fd841090007bace3cbd579c4bf822ffffffff6553f100819c822898e8299a75a01f5b4f528f67dba8b71bb0d81f495ebdd1d76d229f891d2a1de198eb99e962c203fcc3f523f8dc073dcfe587e714711e11aea744f408"
+    },
+    {
+      "name": "announce-epoch",
+      "kind": "announce",
+      "note": "timestamp zero",
+      "input": {
+        "key": "node-a",
+        "radio": 1,
+        "at": 0
+      },
+      "encoded": "0354f5282565491705c21c5166529b2b5687ec272ce0f050ae74900e7f8e9433790000000100000000521c744893dc9ab9bd31e23d458bb9870da40f288df3e5c244188a5beed21740b99aac5aba3f9e31530a3f3c99bd11136119b79edb0620496cb426273806c206"
+    },
+    {
+      "name": "whois-basic",
+      "kind": "whois",
+      "note": "five bytes: the frame type and the radio being asked about",
+      "input": {
+        "target": 2050694189
+      },
+      "encoded": "047a3b1c2d"
+    },
+    {
+      "name": "whois-zero",
+      "kind": "whois",
+      "input": {
+        "target": 0
+      },
+      "encoded": "0400000000"
+    }
+  ]
+}

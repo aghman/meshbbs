@@ -3,6 +3,8 @@ package sneakernet
 import (
 	"bytes"
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aghman/meshbbs/internal/blobstore"
@@ -231,6 +233,60 @@ func TestOneBadBundleDoesNotFailTheImport(t *testing.T) {
 	}
 	if len(res.Rejected) != 1 {
 		t.Errorf("rejected %v, want exactly one bundle", res.Rejected)
+	}
+}
+
+// A stick from a newer board is refused in one sentence, before anything is
+// parsed (§7.4).
+//
+// This is the case dictionary negotiation cannot reach: there is no round trip
+// in a hand-off, so the writer declares what a reader needs and the reader
+// checks it up front. Refusing per bundle would be the same fact N times, after
+// a partial import rather than instead of one.
+func TestACarrierNeedingANewerDictionaryIsRefusedUpFront(t *testing.T) {
+	a, b := newInstance(t, 11), newInstance(t, 12)
+	a.post(t, 3, "from the future")
+	b.learn(t, a)
+	dict, set := dicts(t)
+
+	out, err := Export(a.gs, dict, ExportOptions{Self: a.key.ID(), Now: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The stick says it needs a dictionary this build does not hold. Its bundles
+	// are perfectly good; the point is that they are never reached.
+	out.MinDictionary = set.Highest() + 1
+
+	res, err := Import(b.gs, set, out)
+	if err == nil {
+		t.Fatal("a carrier needing an unavailable dictionary was imported")
+	}
+	if !errors.Is(err, bundle.ErrUnknownDictionary) {
+		t.Errorf("got %v, want bundle.ErrUnknownDictionary", err)
+	}
+	if res.Records != 0 || res.Bundles != 0 || len(res.Rejected) != 0 {
+		t.Errorf("the import did work before refusing: %+v", res)
+	}
+	for _, want := range []string{"upgrade this node", "holds up to"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not tell the sysop what to do (%q missing): %v", want, err)
+		}
+	}
+}
+
+// The declared minimum is what was actually used, not the node's ceiling — so a
+// carrier written with an older dictionary stays readable by older boards.
+func TestExportDeclaresTheDictionaryItUsed(t *testing.T) {
+	a := newInstance(t, 13)
+	a.post(t, 2, "hello")
+	dict, _ := dicts(t)
+
+	out, err := Export(a.gs, dict, ExportOptions{Self: a.key.ID(), Now: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.MinDictionary != dict.ID() {
+		t.Errorf("carrier declares dictionary %d, packed with %d", out.MinDictionary, dict.ID())
 	}
 }
 

@@ -55,6 +55,14 @@ symbol headers and masks, and the signed announcements:
 make conformance
 ```
 
+The corpus is kept in **generations** — `testdata/v1`, `testdata/v2` — each a
+snapshot of all three wire versions as they stood when it was frozen. Old ones
+are never deleted, because they are what the cross-version tests use: layers
+whose version did not change must still encode identically, and layers whose
+version did must now be *rejected* with a version error rather than a
+truncation. That second check found a real bug the first time it ran, so it is
+not ceremony.
+
 **If this fails, do not regenerate it.** The bytes on the mesh have changed, and
 regenerating turns that into a green test and a diff nobody reads closely. Find
 the encoder change. If it was intended, it is a wire-format change and needs a

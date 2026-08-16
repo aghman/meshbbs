@@ -130,6 +130,7 @@ func TestDecodeIsBoundedAgainstHostileCounts(t *testing.T) {
 		b = append(b, FormatVersion)
 		b = append(b, bytes.Repeat([]byte{0}, identity.NodeIDLen)...)
 		b = binary.BigEndian.AppendUint32(b, 0)
+		b = append(b, 0) // minimum dictionary (§7.4)
 		return b
 	}
 
@@ -195,6 +196,7 @@ func TestDecodeRefusesNonCanonicalInput(t *testing.T) {
 		b = append(b, FormatVersion)
 		b = append(b, bytes.Repeat([]byte{0}, identity.NodeIDLen)...)
 		b = binary.BigEndian.AppendUint32(b, 0)
+		b = append(b, 0)          // minimum dictionary (§7.4)
 		b = append(b, 0x80, 0x00) // vector count 0, overlong
 		b = append(b, 0x00)       // bundle count 0
 		if _, err := Decode(b); !errors.Is(err, ErrNotCanonical) && !errors.Is(err, ErrTruncated) {
@@ -209,6 +211,7 @@ func TestDecodeRefusesNonCanonicalInput(t *testing.T) {
 		b = append(b, FormatVersion)
 		b = append(b, bytes.Repeat([]byte{0}, identity.NodeIDLen)...)
 		b = binary.BigEndian.AppendUint32(b, 0)
+		b = append(b, 0) // minimum dictionary (§7.4)
 		b = binary.AppendUvarint(b, 2)
 		for i := 0; i < 2; i++ {
 			b = append(b, area[:]...)

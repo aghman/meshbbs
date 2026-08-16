@@ -1,4 +1,4 @@
-# BSMP wire-format conformance vectors, version 1
+# BSMP wire-format conformance vectors
 
 These files freeze the bytes MeshBBS puts on a mesh. They are the teeth behind
 design §12.6 and behind `[D10]`'s commitment to publish the format in Phase 6.
@@ -9,8 +9,42 @@ other and says nothing about *which* bytes they agreed on. A change that flips
 the record timestamp to little-endian on both sides passes the entire test suite;
 it fails here, and only here.
 
-**These vectors are append-only.** Nothing in this directory is ever edited or
+**These vectors are append-only.** Nothing in these directories is ever edited or
 regenerated. See "Changing things" below.
+
+## Generations
+
+`v1/`, `v2/` — each one a snapshot of all three wire versions as they stood when
+it was frozen, listed in `conformance.Generations`:
+
+| generation | record | bundle | gossip | what moved |
+|---|---|---|---|---|
+| `v1` | 1 | 1 | 1 | the first corpus |
+| `v2` | 1 | 1 | 2 | the digest gained a dictionary byte (§7.4) |
+
+A generation is a snapshot of all three rather than a directory per format,
+because the only combination worth testing against is one that actually shipped
+together — which is what a third-party implementation needs to know, and what a
+directory per format would need extra bookkeeping to express.
+
+**An old generation is not dead weight.** It becomes the cross-version corpus,
+and it earns its keep in both directions at once:
+
+- Layers whose version did **not** change must still encode byte-identically.
+  That is the half nobody thinks to check. When one format moves, the risk is not
+  to the format that moved — it gets a new generation and everybody's attention —
+  but to the ones that did not, where the current generation is regenerated at
+  the same moment and would happily freeze a fresh mistake.
+- Layers whose version **did** change must now be **rejected**, with a version
+  error rather than a truncation. That is §7.1's pre-freeze drop-and-log policy
+  as an assertion.
+
+That second one earned its place on its first run: it found that `DecodeDigest`
+checked the v2 header length *before* the version byte, so a three-byte v1 digest
+came back as "truncated gossip message" — sending a sysop to look at the radios
+when the answer was that a peer needed upgrading. Version is now read before any
+structural rule, in every gossip decoder, because a length rule belongs to the
+version that defined it.
 
 ## Reading a vector
 
@@ -109,11 +143,20 @@ refuse anyway. Find the encoder change. If it was intended, then it is a wire
 format change and needs a version bump and a compatibility story in both
 directions — not an edited expectation.
 
-**A format version is bumped.** These vectors describe version 1 of each format.
-Version 2 gets `testdata/v2/` beside this directory, and §12.6's cross-version
-bullet — old vectors read by the new code, new vectors rejected cleanly by the
-old — becomes work worth doing. `TestCorpusMatchesFormatVersions` fails until it
-is, deliberately.
+Note that the generator only ever writes the **current** generation. There is
+deliberately no flag aiming it at an older one: it can only produce the bytes
+today's encoders emit, so such a flag could only write wrong bytes into a frozen
+directory and then be refused by the append-only check.
+
+**A format version is bumped.** Add a generation to `conformance.Generations`
+recording the new combination, then run the generator — it creates the directory
+and fills it. `TestCurrentGenerationMatchesTheCode` fails until you do, which is
+the point: it stops the tempting alternative of repointing the existing
+generation at a format it was not frozen under.
+
+Do not delete the old directory. It is the cross-version corpus from that moment
+on, and deleting it would discard the only evidence of what a shipped build put
+on the air.
 
 ## Provenance
 

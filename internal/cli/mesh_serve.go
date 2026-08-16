@@ -44,9 +44,16 @@ type federation struct {
 	// explicit value otherwise.
 	eventWindow *time.Duration
 	eventMaxAge time.Duration
-	ctx         context.Context
-	clk         clock.Clock
-	log         *slog.Logger
+	// dicts is every dictionary this build can read (§7.4). The floor is
+	// negotiated as an ID and resolved against this.
+	dicts *bundle.DictionarySet
+	// dictFloor is the last negotiated level, kept so the log fires when it
+	// CHANGES rather than every tick. A standing condition repeated every five
+	// minutes is how a sysop learns to stop reading the log.
+	dictFloor uint8
+	ctx       context.Context
+	clk       clock.Clock
+	log       *slog.Logger
 }
 
 // startFederation brings up the mesh side of a running BBS.
@@ -161,8 +168,16 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 		ml.Close()
 		return nil, err
 	}
+	gossipCfg := gossip.DefaultConfig()
+	// §7.4: what this node can read is what its digests advertise, so it is read
+	// off the set rather than named separately. Two places to change it would be
+	// one place to get it wrong, and the failure — advertising a dictionary we
+	// cannot actually decode — would only show up as peers whose traffic we
+	// silently drop.
+	gossipCfg.Dictionary = dicts.Highest()
+
 	engine := gossip.New(key.ID(), gstore, outbox, e.clock,
-		rng.NewSeeded(binary.BigEndian.Uint64(engSeed[:])), gossip.DefaultConfig())
+		rng.NewSeeded(binary.BigEndian.Uint64(engSeed[:])), gossipCfg)
 
 	inbox, err := bsmp.NewInbox(bsmp.InboxConfig{
 		Engine:       engine,
@@ -179,6 +194,10 @@ func startFederation(ctx context.Context, e *env, key identity.NodeKey, st *stor
 		link: ml, gov: gov, engine: engine,
 		inbox: inbox, outbox: outbox, gstore: gstore, st: st, svc: svc, ctx: ctx,
 		clk: e.clock, log: log,
+		dicts: dicts,
+		// Seeded with what we actually start out compressing with, so the first
+		// refresh reports a change only if the mesh really is holding us back.
+		dictFloor: dict.ID(),
 	}
 	// Load the caps once before the first tick, so a restart does not leave
 	// every area uncapped for a whole tick interval.
@@ -457,6 +476,61 @@ func (f *federation) refreshAreaShares() {
 	f.gov.SetAreaShares(raw)
 }
 
+// refreshDictionary applies §7.4's negotiated floor to what we compress with.
+//
+// The floor is the highest dictionary every peer this node can currently hear
+// has said it holds. It is applied here rather than chosen once at startup
+// because it moves: peers upgrade, peers appear, and peers fall silent and stop
+// constraining us. None of those should need a restart.
+//
+// # The log fires on change, and names who
+//
+// Because SendRecords broadcasts, one peer on an old build holds the whole mesh
+// at its level — everyone hears the same bytes, so there is one dictionary to
+// pick. That is a real cost the sysop can act on (upgrade that board, or accept
+// it), and it is invisible otherwise: compression getting worse looks exactly
+// like nothing happening.
+//
+// So it is said once per change, with the peer named, in the same spirit as
+// `meshbbs door events` reporting a league this node carries but does not play.
+// Repeating a standing condition every five minutes is how a status log becomes
+// something nobody reads.
+func (f *federation) refreshDictionary() {
+	floor, holder, constrained := f.engine.DictionaryFloor()
+	if floor == f.dictFloor {
+		return
+	}
+
+	d, err := f.dicts.Get(floor)
+	if err != nil {
+		// Unreachable unless a peer advertises a dictionary above ours, which
+		// the floor cannot produce — it is a minimum with our own level as its
+		// ceiling. Logged rather than ignored because if it ever happens the
+		// arithmetic is wrong, and carrying on with the previous dictionary is
+		// the safe half of that.
+		f.log.Warn("negotiated compression dictionary is one this node does not hold",
+			"dictionary", floor, "err", err)
+		return
+	}
+
+	was := f.dictFloor
+	f.dictFloor = floor
+	f.outbox.SetDictionary(d)
+
+	switch {
+	case constrained:
+		f.log.Info("compressing with an older dictionary to stay readable",
+			"dictionary", floor,
+			"this_node_holds", f.dicts.Highest(),
+			"held_back_by", holder.Short(),
+			"remedy", "upgrade that node, or accept the lower compression ratio")
+	case was < floor:
+		f.log.Info("compression dictionary raised",
+			"dictionary", floor, "was", was,
+			"reason", "every peer we can hear now holds it")
+	}
+}
+
 func (f *federation) run(ctx context.Context) {
 	tick := f.clk.After(tickInterval)
 	telemetry := f.clk.After(telemetryInterval)
@@ -489,6 +563,10 @@ func (f *federation) run(ctx context.Context) {
 			// noisy league without a restart, and a cap that needed one is a
 			// cap nobody would reach for while the mesh was actually busy.
 			f.refreshAreaShares()
+			// Peers announce what they can read in their digests, so the
+			// negotiated floor moves on the same clock the digests arrive on
+			// (§7.4).
+			f.refreshDictionary()
 			f.flushDoorEvents()
 			if err := f.engine.Tick(); err != nil {
 				f.log.Error("sync engine", "err", err)
@@ -552,6 +630,12 @@ func (f *federation) logStatus() {
 		"rx_evicted", in.Evicted,
 		"rx_rejected", in.Rejected,
 		"rx_corrupt", in.Corrupt,
+		// Its own field, because the remedy is here rather than at the sender:
+		// a peer is packing with a dictionary this build does not hold, and
+		// everything it sends will fail identically until this node is
+		// upgraded (§7.4).
+		"rx_unknown_dictionary", in.UnknownDictionary,
+		"dictionary", f.dictFloor,
 		"rx_undecryptable", lnk.Undecryptable,
 		"rx_wrong_channel", lnk.WrongChannel,
 		"since_rx", lnk.SinceRx.Round(time.Second),

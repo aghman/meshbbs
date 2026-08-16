@@ -2,6 +2,8 @@ package gossip
 
 import (
 	"bytes"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aghman/meshbbs/internal/identity"
@@ -38,13 +40,16 @@ func TestTenAreasFitInOnePacket(t *testing.T) {
 	if size != d.Size() {
 		t.Errorf("Size() reports %d but Encode produced %d", d.Size(), size)
 	}
-	// 233 is the Meshtastic MTU. The design budgets 100 bytes for ten areas;
-	// the 3-byte envelope takes it to 103.
+	// 233 is the Meshtastic MTU. The design budgets 100 bytes for ten areas; the
+	// envelope takes it to 104 — type, version, dictionary and area count. The
+	// dictionary byte is §7.4's announcement, and this is the assertion that
+	// prices it: it moved a ten-area digest from 103 to 104, and moved MaxAreas
+	// not at all.
 	if size > 233 {
 		t.Fatalf("a ten-area digest is %d bytes and no longer fits one packet", size)
 	}
-	if size != 103 {
-		t.Errorf("ten-area digest is %d bytes, expected 103 (3 envelope + 10x10)", size)
+	if size != 104 {
+		t.Errorf("ten-area digest is %d bytes, expected 104 (4 envelope + 10x10)", size)
 	}
 	t.Logf("ten areas: %d bytes, %d of the 233-byte MTU", size, size)
 }
@@ -214,7 +219,7 @@ func TestDigestRejectsMalformed(t *testing.T) {
 		}()},
 		{"too many areas declared", func() []byte {
 			b := append([]byte(nil), good...)
-			b[2] = MaxAreas + 1
+			b[3] = MaxAreas + 1
 			return b
 		}()},
 	}
@@ -227,6 +232,58 @@ func TestDigestRejectsMalformed(t *testing.T) {
 
 // Duplicate area tags are the other way to get two wire forms for one digest:
 // which entry wins would decide the fingerprint.
+// The dictionary byte is what §7.4's negotiation rides on, so it has to survive
+// a round trip and it has to survive the sort.
+//
+// The sort matters more than it looks: Encode reorders Areas in place, and a
+// header field written from the struct after that reordering would be fine,
+// while one captured before it would not. Encoding a digest whose areas are
+// deliberately out of order is what tells the two apart.
+func TestDigestCarriesTheDictionary(t *testing.T) {
+	for _, id := range []uint8{0, 1, 2, 255} {
+		d := NewDigest(map[record.AreaTag]*vv.Vector{
+			tag("zulu"): vec(1, 3), tag("alpha"): vec(1, 1), tag("mike"): vec(1, 2),
+		})
+		d.Dictionary = id
+
+		got, err := DecodeDigest(d.Encode())
+		if err != nil {
+			t.Fatalf("dictionary %d: %v", id, err)
+		}
+		if got.Dictionary != id {
+			t.Errorf("dictionary %d did not survive the round trip, got %d", id, got.Dictionary)
+		}
+		if len(got.Areas) != 3 {
+			t.Errorf("dictionary %d: %d areas survived, want 3", id, len(got.Areas))
+		}
+	}
+}
+
+// A digest with no dictionary byte is a v1 digest, and this build must say so
+// rather than failing on a length it cannot explain.
+//
+// This is §7.1's pre-freeze drop-and-log with the "log" half made useful: the
+// error names both versions, and it is distinguishable with errors.Is so the
+// cross-version corpus can assert it without matching on a string.
+func TestDigestRejectsTheOlderVersion(t *testing.T) {
+	d := NewDigest(map[record.AreaTag]*vv.Vector{tag("a"): vec(1, 1)})
+	v2 := d.Encode()
+
+	// A v1 digest of the same content: no dictionary byte, version 1.
+	v1 := append([]byte{v2[0], 1}, v2[3:]...)
+
+	_, err := DecodeDigest(v1)
+	if err == nil {
+		t.Fatal("a version 1 digest was accepted")
+	}
+	if !errors.Is(err, ErrUnsupportedVersion) {
+		t.Errorf("want ErrUnsupportedVersion, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "version 1") {
+		t.Errorf("error does not name the sender's version: %v", err)
+	}
+}
+
 func TestDigestRejectsDuplicateAreas(t *testing.T) {
 	d := NewDigest(map[record.AreaTag]*vv.Vector{tag("a"): vec(1, 1)})
 	b := d.Encode()

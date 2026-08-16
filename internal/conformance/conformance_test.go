@@ -3,6 +3,7 @@ package conformance
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/aghman/meshbbs/internal/bundle"
@@ -21,13 +22,21 @@ const breakNote = "\n" +
 	"`go run ./tools/conformance` will refuse anyway. Find the encoder change. If it is\n" +
 	"intended, it needs a format version bump and a compatibility story in both\n" +
 	"directions, not an edited expectation.\n" +
-	"See internal/conformance/testdata/v1/README.md."
+	"See internal/conformance/testdata/README.md."
 
+// load reads the CURRENT generation. The cross-version tests load older ones
+// explicitly, because reading an old corpus is a different question with a
+// different expected answer.
 func load(t *testing.T) (*Corpus, KeySet) {
 	t.Helper()
-	c, err := Load(Dir)
+	return loadGeneration(t, Current())
+}
+
+func loadGeneration(t *testing.T, g Generation) (*Corpus, KeySet) {
+	t.Helper()
+	c, err := Load(g.Dir())
 	if err != nil {
-		t.Fatalf("load corpus: %v", err)
+		t.Fatalf("load corpus generation %d: %v", g.N, err)
 	}
 	keys, err := c.KeySet()
 	if err != nil {
@@ -45,38 +54,177 @@ func same(t *testing.T, vector, field string, want, got []byte) {
 		vector, field, want, got, breakNote)
 }
 
-// TestCorpusMatchesFormatVersions guards the directory name.
+// TestCurrentGenerationMatchesTheCode is the guard that forces a new generation.
 //
-// testdata/v1 holds vectors for version 1 of each format. If a FormatVersion is
-// bumped, these bytes describe a format the code no longer speaks, and the
-// vectors belong in a testdata/v2 beside them with cross-version tests in both
-// directions (§12.6). Failing here is the reminder to do that rather than to
-// quietly retire the old corpus.
-func TestCorpusMatchesFormatVersions(t *testing.T) {
-	if record.FormatVersion != 1 {
-		t.Errorf("record.FormatVersion is %d; %s holds version 1 vectors", record.FormatVersion, Dir)
-	}
-	if bundle.FormatVersion != 1 {
-		t.Errorf("bundle.FormatVersion is %d; %s holds version 1 vectors", bundle.FormatVersion, Dir)
-	}
-	if gossip.FormatVersion != 1 {
-		t.Errorf("gossip.FormatVersion is %d; %s holds version 1 vectors", gossip.FormatVersion, Dir)
+// The current generation records which wire versions were in force when it was
+// frozen. Bump any of them without cutting a new generation and this fails,
+// which is the reminder to add one to Generations rather than to quietly
+// regenerate a corpus that then describes a format nothing speaks.
+func TestCurrentGenerationMatchesTheCode(t *testing.T) {
+	g := Current()
+	for _, v := range []struct {
+		name   string
+		frozen uint8
+		actual uint8
+	}{
+		{"record", g.Record, record.FormatVersion},
+		{"bundle", g.Bundle, bundle.FormatVersion},
+		{"gossip", g.Gossip, gossip.FormatVersion},
+	} {
+		if v.frozen != v.actual {
+			t.Errorf("%s.FormatVersion is %d, but corpus generation %d was frozen at %d.\n"+
+				"Add a generation to conformance.Generations and run `make vectors`; do not "+
+				"repoint the existing one.", v.name, v.actual, g.N, v.frozen)
+		}
 	}
 
 	c, _ := load(t)
 	docs := map[string]int{
-		KeysFile:     c.Keys.FormatVersion,
-		RecordsFile:  c.Records.FormatVersion,
-		BodiesFile:   c.Bodies.FormatVersion,
-		BundlesFile:  c.Bundles.FormatVersion,
-		ControlFile:  c.Control.FormatVersion,
-		FountainFile: c.Fountain.FormatVersion,
-		LinkFile:     c.Link.FormatVersion,
+		KeysFile: c.Keys.FormatVersion, RecordsFile: c.Records.FormatVersion,
+		BodiesFile: c.Bodies.FormatVersion, BundlesFile: c.Bundles.FormatVersion,
+		ControlFile: c.Control.FormatVersion, FountainFile: c.Fountain.FormatVersion,
+		LinkFile: c.Link.FormatVersion,
 	}
 	for name, v := range docs {
-		if v != FormatVersion {
-			t.Errorf("%s declares format_version %d, want %d", name, v, FormatVersion)
+		if v != g.N {
+			t.Errorf("%s declares format_version %d, want generation %d", name, v, g.N)
 		}
+	}
+}
+
+// TestOlderGenerationsStillEncodeUnchangedLayers is the first direction of
+// §12.6's cross-version bullet, and the half nobody thinks to check.
+//
+// When one format moves, the danger is not to the format that moved — that one
+// gets a new generation and everybody's attention. It is to the four that did
+// not, where a shared helper or an idle refactor can shift bytes that no current
+// vector would catch, because the current generation was regenerated at the same
+// moment and would happily freeze the new mistake.
+//
+// So every older generation is still held to its record, bundle, fountain and
+// meshlink vectors, for as long as those versions have not changed.
+func TestOlderGenerationsStillEncodeUnchangedLayers(t *testing.T) {
+	cur := Current()
+	for _, g := range Generations[:len(Generations)-1] {
+		t.Run(g.Dir(), func(t *testing.T) {
+			c, keys := loadGeneration(t, g)
+
+			if g.Record == cur.Record {
+				for _, v := range c.Records.Vectors {
+					_, got, err := DeriveRecord(v.Input, keys)
+					if err != nil {
+						t.Errorf("%s: %v", v.Name, err)
+						continue
+					}
+					same(t, v.Name, "canonical", v.Canonical, got.Canonical)
+					same(t, v.Name, "id", v.ID, got.ID)
+					same(t, v.Name, "signature", v.Signature, got.Signature)
+				}
+				for _, v := range c.Bodies.Vectors {
+					got, err := DeriveBody(v.Kind, v.Input, keys)
+					if err != nil {
+						t.Errorf("%s: %v", v.Name, err)
+						continue
+					}
+					same(t, v.Name, "encoded", v.Encoded, got)
+				}
+			}
+
+			if g.Bundle == cur.Bundle {
+				records := map[string]*record.Record{}
+				for _, rv := range c.Records.Vectors {
+					r, _, err := DeriveRecord(rv.Input, keys)
+					if err != nil {
+						t.Fatalf("%s: %v", rv.Name, err)
+					}
+					records[rv.Name] = r
+				}
+				for _, v := range c.Bundles.Vectors {
+					got, err := DeriveBundleBody(v.Input, records)
+					if err != nil {
+						t.Errorf("%s: %v", v.Name, err)
+						continue
+					}
+					same(t, v.Name, "body", v.Body, got)
+				}
+			}
+
+			// The fountain codec and the link frames carry no gossip version at
+			// all, so they are held unconditionally.
+			for _, v := range c.Fountain.Symbols {
+				same(t, v.Name, "encoded", v.Encoded, DeriveSymbol(v.Input))
+			}
+			for _, v := range c.Fountain.Masks {
+				got, _, err := DeriveMask(v.Input, keys)
+				if err != nil {
+					t.Errorf("%s: %v", v.Name, err)
+					continue
+				}
+				same(t, v.Name, "mask", v.Mask, got)
+			}
+			for _, v := range c.Link.Vectors {
+				got, err := DeriveLink(v.Kind, v.Input, keys)
+				if err != nil {
+					t.Errorf("%s: %v", v.Name, err)
+					continue
+				}
+				same(t, v.Name, "encoded", v.Encoded, got)
+			}
+		})
+	}
+}
+
+// TestOlderGossipVectorsAreRejected is the other direction: what this build does
+// when a peer on an older release speaks to it.
+//
+// §7.1's pre-freeze policy is drop-and-log, and this is that policy as an
+// assertion rather than a sentence in a document. The distinction that matters
+// is WHICH refusal: a version error names both versions and tells a sysop to
+// upgrade somebody, while a truncation says the bytes were mangled and sends
+// them to look at the radios. The digest length changed, so without the version
+// check first this would be a truncation — which is exactly the wrong answer.
+func TestOlderGossipVectorsAreRejected(t *testing.T) {
+	cur := Current()
+	for _, g := range Generations[:len(Generations)-1] {
+		if g.Gossip == cur.Gossip {
+			continue
+		}
+		t.Run(g.Dir(), func(t *testing.T) {
+			c, _ := loadGeneration(t, g)
+
+			checked := 0
+			for _, v := range c.Control.Vectors {
+				var err error
+				switch v.Kind {
+				case CtrlDigest:
+					_, err = gossip.DecodeDigest(v.Encoded)
+				case CtrlVectorReq:
+					_, err = gossip.DecodeVectorReq(v.Encoded)
+				case CtrlVectorMsg:
+					_, err = gossip.DecodeVectorMsg(v.Encoded)
+				case CtrlRangeReq:
+					_, err = gossip.DecodeRangeReq(v.Encoded)
+				default:
+					// vv encoding and hashing are not gossip messages and carry
+					// no version, so they are unaffected by the bump.
+					continue
+				}
+				checked++
+
+				if err == nil {
+					t.Errorf("%s: a gossip version %d message was accepted by a build "+
+						"speaking version %d", v.Name, g.Gossip, cur.Gossip)
+					continue
+				}
+				if !errors.Is(err, gossip.ErrUnsupportedVersion) {
+					t.Errorf("%s: refused with %v, want ErrUnsupportedVersion — a version "+
+						"mismatch must not present as malformed input", v.Name, err)
+				}
+			}
+			if checked == 0 {
+				t.Error("no gossip messages were checked; the cross-version test is vacuous")
+			}
+		})
 	}
 }
 

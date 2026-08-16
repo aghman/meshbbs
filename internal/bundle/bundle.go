@@ -57,6 +57,15 @@ var (
 	// ErrNotCanonical is returned when input is a non-canonical encoding of what
 	// it parses to: one logical bundle must have exactly one wire form.
 	ErrNotCanonical = errors.New("non-canonical bundle encoding")
+	// ErrUnknownDictionary is returned when a bundle was packed with a
+	// dictionary this build does not hold (§7.4).
+	//
+	// Distinguishable because it is the one decode failure whose remedy is
+	// "upgrade this node" rather than "look at the radios". Without it the case
+	// lands in the same rejected-frame counter as malformed input and failed
+	// signatures, and the single most useful fact — a peer is ahead of us — is
+	// the one that gets lost.
+	ErrUnknownDictionary = errors.New("unknown compression dictionary")
 )
 
 // Bundle is a batch of records sharing an area.
@@ -519,10 +528,26 @@ func NewDictionarySet(dicts ...*Dictionary) (*DictionarySet, error) {
 func (s *DictionarySet) Get(id uint8) (*Dictionary, error) {
 	d, ok := s.byID[id]
 	if !ok {
-		return nil, fmt.Errorf("unknown compression dictionary %d; "+
-			"the sender is using one this node does not hold", id)
+		return nil, fmt.Errorf("%w %d; the sender is using one this node does not hold "+
+			"(this build holds up to %d) — upgrade this node", ErrUnknownDictionary, id, s.Highest())
 	}
 	return d, nil
+}
+
+// Highest is the largest dictionary ID in the set.
+//
+// This is what a node advertises in its digest (§7.4). "Highest" is a complete
+// description rather than a lossy one because §7.4 keeps old dictionaries
+// supported and a set is built from 0 upward, so holding N means holding all of
+// 0..N — a gap is not a state this design permits.
+func (s *DictionarySet) Highest() uint8 {
+	var max uint8
+	for id := range s.byID {
+		if id > max {
+			max = id
+		}
+	}
+	return max
 }
 
 // IDs returns the dictionary IDs held, for announcing in a digest.

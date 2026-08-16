@@ -1,5 +1,5 @@
 // Command conformance generates the frozen BSMP wire-format vectors of design
-// §12.6 into internal/conformance/testdata/v1.
+// §12.6 into the current generation under internal/conformance/testdata.
 //
 // # It is append-only, and that is the point
 //
@@ -33,8 +33,12 @@ import (
 	"lukechampine.com/blake3"
 )
 
-// corpusDir is where the vectors live, relative to the repository root.
-const corpusDir = "internal/conformance/" + conformance.Dir
+// corpusDir is the CURRENT generation's directory. The generator can only ever
+// produce bytes the current encoders emit, so there is deliberately no flag to
+// aim it at an older generation — such a flag could only ever write the wrong
+// bytes into a frozen directory and then be refused by the append-only check.
+// A new generation is cut by adding one to conformance.Generations.
+var corpusDir = filepath.Join("internal/conformance", conformance.Current().Dir())
 
 func main() {
 	if err := run(); err != nil {
@@ -951,7 +955,7 @@ type renderSection struct {
 func render(sections []renderSection) []byte {
 	var b bytes.Buffer
 	b.WriteString("{\n")
-	fmt.Fprintf(&b, "  \"format_version\": %d", conformance.FormatVersion)
+	fmt.Fprintf(&b, "  \"format_version\": %d", conformance.Current().N)
 	for _, s := range sections {
 		fmt.Fprintf(&b, ",\n  %q: [", s.key)
 		for i, raw := range s.raws {

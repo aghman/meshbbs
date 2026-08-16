@@ -30,7 +30,7 @@
 //
 // # Adding vectors
 //
-// The corpus is append-only. See testdata/v1/README.md.
+// The corpus is append-only, and kept in generations. See testdata/README.md.
 package conformance
 
 import (
@@ -52,12 +52,55 @@ import (
 	"github.com/aghman/meshbbs/internal/vv"
 )
 
-// Dir is the corpus directory for the current wire format.
+// A Generation is one directory of frozen vectors and the wire versions in
+// force when it was written.
 //
-// Versioned by directory so that a second format version lands beside this one
-// rather than replacing it, which is what §12.6's cross-version bullet needs.
-// With only FormatVersion 1 in existence there is nothing to cross yet.
-const Dir = "testdata/v1"
+// # Why generations rather than one directory per format
+//
+// BSMP is three independently versioned formats — records, bundles and gossip —
+// and they do not move together. A directory per format would be the tidier
+// model on paper and would immediately need cross-directory bookkeeping to say
+// which combination was ever shipped together, which is the only thing a
+// third-party implementation actually needs to know. So a generation is a
+// SNAPSHOT of all three, numbered, and a new one is cut whenever any of them
+// changes.
+//
+// # What an old generation is for
+//
+// It does not become dead weight and it is not deleted. It becomes the
+// cross-version corpus §12.6's third bullet asks for, and it tests in both
+// directions at once:
+//
+//   - Layers whose version did NOT change must still encode byte-identically.
+//     That is the useful half nobody thinks to check — a format bump elsewhere
+//     is exactly when an unrelated encoder gets disturbed by accident.
+//   - Layers whose version DID change must now be REJECTED, with a version
+//     error rather than a truncation. That is §7.1's pre-freeze drop-and-log
+//     stated as an assertion.
+type Generation struct {
+	// N is the generation number, and the directory it lives in.
+	N int
+	// Record, Bundle and Gossip are the wire versions frozen in it.
+	Record, Bundle, Gossip uint8
+}
+
+// Dir is where this generation's vectors live, relative to the package.
+func (g Generation) Dir() string { return fmt.Sprintf("testdata/v%d", g.N) }
+
+// Generations are every corpus ever frozen, oldest first.
+//
+// Append only. Removing one would discard the only evidence of what a shipped
+// build put on the air, which is the thing a third party would test against.
+var Generations = []Generation{
+	{N: 1, Record: 1, Bundle: 1, Gossip: 1},
+	// Gossip 2 added the dictionary byte to the digest header (§7.4). Records
+	// and bundles did not move, and generation 1's vectors for them must still
+	// hold — which is asserted rather than assumed.
+	{N: 2, Record: 1, Bundle: 1, Gossip: 2},
+}
+
+// Current is the generation this build speaks and the only one it can write.
+func Current() Generation { return Generations[len(Generations)-1] }
 
 // Hex renders a byte slice as a lowercase hex string in JSON.
 //
@@ -788,9 +831,9 @@ const (
 	LinkFile     = "meshlink.json"
 )
 
-// FormatVersion is stamped into every corpus file so a reader knows which wire
-// format the bytes belong to without inferring it from the directory name.
-const FormatVersion = 1
+// FormatVersion in a corpus file is its generation number, stamped so that a
+// vector pasted into a bug report still says which snapshot it came from
+// without the directory name travelling with it.
 
 // The per-file envelopes. Every file carries format_version so a vector pasted
 // into a bug report still says what it is.
