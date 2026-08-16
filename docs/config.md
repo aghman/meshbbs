@@ -41,7 +41,7 @@ Generated from the source. Do not edit by hand.
 | `telnet.guest_only` | bool | `true` | `MESHBBS_TELNET_GUEST_ONLY` | Serve read-only guest sessions only. Recommended: browsing over plaintext costs nothing, typing a password over it does. |
 | `telnet.max_sessions` | int | `16` | `MESHBBS_TELNET_MAX_SESSIONS` | Maximum concurrent telnet sessions. This is a public plaintext port, so it is capped. |
 | `telnet.port` | int | `2323` | `MESHBBS_TELNET_PORT` | Port to listen on. 23 is conventional but needs root. |
-| `theme.default` | string | `classic` | `MESHBBS_THEME_DEFAULT` | Built-in or file theme name. Run the BBS and press N for the list. |
+| `theme.default` | string | `classic` | `MESHBBS_THEME_DEFAULT` | Built-in or file theme name, applied to every session on this instance. 'meshbbs serve' prints the available names at startup; there is no per-user theme picker in the interface. |
 | `theme.default_encoding` | string | `auto` | `MESHBBS_THEME_DEFAULT_ENCODING` | auto, utf8, or cp437. 'auto' guesses from the client's locale and terminal type. |
 | `theme.dir` | string | `themes` | `MESHBBS_THEME_DIR` | Directory scanned for *.toml style overrides, relative to data_dir unless absolute ([N5]). |
 | `users.default_directory_listed` | bool | `true` | `MESHBBS_USERS_DEFAULT_DIRECTORY_LISTED` | Whether new users are listed in the network directory ([N9]). |
