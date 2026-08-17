@@ -37,7 +37,15 @@ import (
 )
 
 // FormatVersion is the gossip wire version. Bumping it is a protocol break.
-const FormatVersion uint8 = 1
+//
+// Version 2 added the dictionary byte to the digest header (§7.4). Bumped rather
+// than quietly extended, and it could not have been anything else: DecodeDigest
+// checks an exact length, so a v1 parser fed a v2 digest fails on the length
+// rather than on the version and reports nothing a sysop can act on. §7.1's
+// pre-freeze policy makes the break itself cheap — development releases promise
+// each other nothing — but "gossip version 1, this build speaks 2" is the part
+// worth paying a byte to say.
+const FormatVersion uint8 = 2
 
 // MsgType discriminates gossip messages. Values are wire format and must never
 // be renumbered.
@@ -84,6 +92,13 @@ const TransportOverhead = 9
 // mesh packet.
 const MaxControlMessage = MeshMTU - TransportOverhead
 
+// digestHeader is type, version, dictionary and area count.
+//
+// The dictionary byte cost nothing in area capacity, which is worth recording
+// because it was the question asked before spending it: MaxAreas is a floor
+// division, and (224-3)/10 and (224-4)/10 are both 22.
+const digestHeader = 4
+
 // MaxAreas bounds the areas in one digest, derived so that a full digest is
 // always one packet.
 //
@@ -96,7 +111,7 @@ const MaxControlMessage = MeshMTU - TransportOverhead
 // Full version vectors are the deliberate exception: at fifty instances one is
 // about 500 bytes, and §7.3 accepts that it spans packets. That is precisely
 // why they are exchanged on demand instead of broadcast every cycle.
-const MaxAreas = (MaxControlMessage - 3) / 10
+const MaxAreas = (MaxControlMessage - digestHeader) / 10
 
 var (
 	// ErrTruncated is returned when input ends mid-field.
@@ -106,6 +121,16 @@ var (
 	// ErrNotCanonical is returned when input is a non-canonical encoding of
 	// what it parses to. See the note on Decode.
 	ErrNotCanonical = errors.New("non-canonical gossip encoding")
+	// ErrUnsupportedVersion is returned for a message from a build speaking a
+	// different gossip version.
+	//
+	// Distinguishable on purpose. §7.1's pre-freeze policy is drop-and-log, and
+	// the two halves of that need separating: "a peer is on another release" is a
+	// thing a sysop fixes by upgrading somebody, while a truncation or a
+	// canonicality failure is a bug or an attack. Before this existed they were
+	// the same unstructured error, and §12.6's cross-version vectors need to
+	// assert the difference rather than match on a string.
+	ErrUnsupportedVersion = errors.New("unsupported gossip version")
 )
 
 // AreaState is one area's entry in a digest.
@@ -150,10 +175,30 @@ func AreaStateFrom(tag record.AreaTag, v *vv.Vector) AreaState {
 // Digest is the broadcast heartbeat: what this node holds, per area, in ten
 // bytes each.
 type Digest struct {
+	// Dictionary is the highest compression dictionary ID this node holds
+	// (§7.4).
+	//
+	// One byte, and "highest held" rather than a bitmap of what is held, because
+	// §7.4 promises old dictionaries stay supported and bundle.DefaultDictionarySet
+	// holds 0..N: a gap is not a state this design permits, so a bitmap would
+	// spend seven bits describing something unrepresentable.
+	//
+	// It rides on the digest because the digest is the thing every peer already
+	// hears on a schedule, which is what §7.4 meant by "announce in their
+	// digest". The cost is small enough to state exactly: at 8600µs/byte and a
+	// flood multiplier of 4, one byte is 34.4ms of channel per digest, and a
+	// fifty-node mesh on a five-hour interval spends about 8.3 seconds of
+	// channel a day on it — roughly 0.2% of §1.1's federation allocation.
+	Dictionary uint8
+
 	Areas []AreaState
 }
 
 // NewDigest builds a digest over a set of area vectors.
+//
+// The dictionary is left zero and set by the caller, because this package has no
+// business importing the compression code: gossip is anti-entropy, and the ID is
+// a number it carries rather than a capability it understands.
 func NewDigest(areas map[record.AreaTag]*vv.Vector) *Digest {
 	d := &Digest{Areas: make([]AreaState, 0, len(areas))}
 	for tag, v := range areas {
@@ -186,11 +231,11 @@ func (d *Digest) Get(tag record.AreaTag) (AreaState, bool) {
 }
 
 // Size is the encoded byte length, for airtime budgeting before sending.
-func (d *Digest) Size() int { return 3 + 10*len(d.Areas) }
+func (d *Digest) Size() int { return digestHeader + 10*len(d.Areas) }
 
 // Encode serialises the digest.
 //
-//	type(1) | version(1) | area_count(1) | (tag[4] | hash[4] | count[2])*
+//	type(1) | version(1) | dict(1) | area_count(1) | (tag[4] | hash[4] | count[2])*
 //
 // Areas ascend by tag, which is what makes the encoding canonical. Encode sorts
 // rather than trusting the caller, so the canonical form is a property of this
@@ -205,7 +250,7 @@ func (d *Digest) Size() int { return 3 + 10*len(d.Areas) }
 func (d *Digest) Encode() []byte {
 	sort.Slice(d.Areas, func(i, j int) bool { return lessTag(d.Areas[i].Tag, d.Areas[j].Tag) })
 	buf := make([]byte, 0, d.Size())
-	buf = append(buf, byte(MsgDigest), FormatVersion, byte(len(d.Areas)))
+	buf = append(buf, byte(MsgDigest), FormatVersion, d.Dictionary, byte(len(d.Areas)))
 	for _, a := range d.Areas {
 		buf = append(buf, a.Tag[:]...)
 		buf = append(buf, a.Hash[:]...)
@@ -225,25 +270,38 @@ func (d *Digest) Encode() []byte {
 // and the version vector, unvalidated reserved bits in the fountain symbol
 // header), so it is checked here by construction rather than waited for.
 func DecodeDigest(b []byte) (*Digest, error) {
-	if len(b) < 3 {
+	// Type and version are read before any structural check, and the order is
+	// load-bearing rather than stylistic.
+	//
+	// A version-1 digest is three bytes where this version's header is four, so
+	// checking the length first reports a TRUNCATION for what is really an older
+	// peer — sending a sysop to look at the radios when the answer is that
+	// somebody needs upgrading. Every length rule below belongs to version 2 and
+	// may not be applied to bytes that have not yet claimed to be version 2.
+	// Found by the cross-version corpus (§12.6) on its first run.
+	if len(b) < 2 {
 		return nil, ErrTruncated
 	}
 	if MsgType(b[0]) != MsgDigest {
 		return nil, fmt.Errorf("not a digest: message type %d", b[0])
 	}
 	if b[1] != FormatVersion {
-		return nil, fmt.Errorf("unsupported gossip version %d, expected %d", b[1], FormatVersion)
+		return nil, fmt.Errorf("%w: digest is gossip version %d, this build speaks %d",
+			ErrUnsupportedVersion, b[1], FormatVersion)
 	}
-	n := int(b[2])
+	if len(b) < digestHeader {
+		return nil, ErrTruncated
+	}
+	n := int(b[3])
 	if n > MaxAreas {
 		return nil, fmt.Errorf("%w: digest declares %d areas, limit is %d", ErrTooMany, n, MaxAreas)
 	}
-	if len(b) != 3+10*n {
+	if len(b) != digestHeader+10*n {
 		return nil, ErrTruncated
 	}
 
-	d := &Digest{Areas: make([]AreaState, 0, n)}
-	p := 3
+	d := &Digest{Dictionary: b[2], Areas: make([]AreaState, 0, n)}
+	p := digestHeader
 	var prev record.AreaTag
 	for i := 0; i < n; i++ {
 		var a AreaState
@@ -286,14 +344,21 @@ func (r *VectorReq) Encode() []byte {
 }
 
 func DecodeVectorReq(b []byte) (*VectorReq, error) {
-	if len(b) < 3 {
+	// Version before structure. See DecodeDigest: a length rule belongs to the
+	// version that defined it, so applying one to bytes that have not yet
+	// claimed that version turns "an older peer" into "malformed input".
+	if len(b) < 2 {
 		return nil, ErrTruncated
 	}
 	if MsgType(b[0]) != MsgVectorReq {
 		return nil, fmt.Errorf("not a vector request: message type %d", b[0])
 	}
 	if b[1] != FormatVersion {
-		return nil, fmt.Errorf("unsupported gossip version %d", b[1])
+		return nil, fmt.Errorf("%w: message is gossip version %d, this build speaks %d",
+			ErrUnsupportedVersion, b[1], FormatVersion)
+	}
+	if len(b) < 3 {
+		return nil, ErrTruncated
 	}
 	n := int(b[2])
 	if n > MaxAreas {
@@ -331,14 +396,21 @@ func (m *VectorMsg) Encode() []byte {
 }
 
 func DecodeVectorMsg(b []byte) (*VectorMsg, error) {
-	if len(b) < 6 {
+	// Version before structure. See DecodeDigest: a length rule belongs to the
+	// version that defined it, so applying one to bytes that have not yet
+	// claimed that version turns "an older peer" into "malformed input".
+	if len(b) < 2 {
 		return nil, ErrTruncated
 	}
 	if MsgType(b[0]) != MsgVector {
 		return nil, fmt.Errorf("not a vector message: message type %d", b[0])
 	}
 	if b[1] != FormatVersion {
-		return nil, fmt.Errorf("unsupported gossip version %d", b[1])
+		return nil, fmt.Errorf("%w: message is gossip version %d, this build speaks %d",
+			ErrUnsupportedVersion, b[1], FormatVersion)
+	}
+	if len(b) < 6 {
+		return nil, ErrTruncated
 	}
 	m := &VectorMsg{}
 	copy(m.Area[:], b[2:6])
@@ -417,14 +489,21 @@ func (r *RangeReq) Encode() []byte {
 }
 
 func DecodeRangeReq(b []byte) (*RangeReq, error) {
-	if len(b) < 7 {
+	// Version before structure. See DecodeDigest: a length rule belongs to the
+	// version that defined it, so applying one to bytes that have not yet
+	// claimed that version turns "an older peer" into "malformed input".
+	if len(b) < 2 {
 		return nil, ErrTruncated
 	}
 	if MsgType(b[0]) != MsgRangeReq {
 		return nil, fmt.Errorf("not a range request: message type %d", b[0])
 	}
 	if b[1] != FormatVersion {
-		return nil, fmt.Errorf("unsupported gossip version %d", b[1])
+		return nil, fmt.Errorf("%w: message is gossip version %d, this build speaks %d",
+			ErrUnsupportedVersion, b[1], FormatVersion)
+	}
+	if len(b) < 7 {
+		return nil, ErrTruncated
 	}
 	r := &RangeReq{}
 	copy(r.Area[:], b[2:6])

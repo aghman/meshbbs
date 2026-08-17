@@ -125,7 +125,12 @@ type Outbox struct {
 	// lossRate is the CURRENT estimate, seeded from Config.LossRate and moved
 	// by SetLossRate as the engine observes what is landing (§7.2 item 4).
 	lossRate float64
-	stats    Stats
+	// dict is the CURRENT compression dictionary, seeded from Config.Dictionary
+	// and moved by SetDictionary as peers say what they can read (§7.4). Same
+	// shape as lossRate and for the same reason: it is a value the federation
+	// loop learns rather than one the caller knew at construction.
+	dict  *bundle.Dictionary
+	stats Stats
 }
 
 // Stats are counters for the sysop status screen.
@@ -156,7 +161,7 @@ func NewOutbox(cfg Config) (*Outbox, error) {
 	if cfg.Classify == nil {
 		cfg.Classify = func(record.AreaTag) governor.Class { return governor.ClassForum }
 	}
-	return &Outbox{cfg: cfg, cursor: map[uint32]int{}, lossRate: cfg.LossRate}, nil
+	return &Outbox{cfg: cfg, cursor: map[uint32]int{}, lossRate: cfg.LossRate, dict: cfg.Dictionary}, nil
 }
 
 // SendMessage delivers a small control message (§7.3).
@@ -194,7 +199,11 @@ func (o *Outbox) SendMessage(to identity.NodeID, payload []byte) error {
 // records for free. That is the same broadcast economy §7.2 uses to choose
 // fountain coding over ARQ, applied one layer up.
 func (o *Outbox) SendRecords(area record.AreaTag, recs []*record.Record) error {
-	packed, err := bundle.Pack(&bundle.Bundle{Area: area, Records: recs}, o.cfg.Dictionary)
+	o.mu.Lock()
+	dict := o.dict
+	o.mu.Unlock()
+
+	packed, err := bundle.Pack(&bundle.Bundle{Area: area, Records: recs, DictID: dict.ID()}, dict)
 	if err != nil {
 		return err
 	}
@@ -347,6 +356,40 @@ func bundleIDFor(packed []byte) uint32 {
 // Clamped rather than validated, because the caller is a controller reacting to
 // noisy evidence and a transient overshoot should be absorbed, not returned as
 // an error nobody can act on.
+// SetDictionary changes which dictionary bundles are compressed with (§7.4).
+//
+// Called by the federation loop with gossip's negotiated floor: the highest
+// dictionary every peer this node can hear has said it holds. It changes at
+// runtime because peers upgrade, and because a peer that has fallen silent stops
+// constraining us — neither of which should need a restart to take effect.
+//
+// # Why this is one value and not one per peer
+//
+// SendRecords broadcasts. Every listening node hears the same bytes, so there is
+// exactly one dictionary to choose and one peer on an old build sets it for
+// everybody. The alternative — encoding the same records once per peer — would
+// give up the broadcast economy that §7.2 chose fountain coding to get, and
+// spend the airtime of N transmissions to save the bytes of one.
+//
+// A nil dictionary is ignored rather than accepted: compressing with nothing is
+// not a state Pack has, and a caller that resolved an ID to nothing has a bug
+// worth leaving visible in its own code rather than turning into a panic here.
+func (o *Outbox) SetDictionary(d *bundle.Dictionary) {
+	if d == nil {
+		return
+	}
+	o.mu.Lock()
+	o.dict = d
+	o.mu.Unlock()
+}
+
+// Dictionary reports what bundles are currently compressed with.
+func (o *Outbox) Dictionary() *bundle.Dictionary {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.dict
+}
+
 func (o *Outbox) SetLossRate(rate float64) {
 	if rate < 0 {
 		rate = 0

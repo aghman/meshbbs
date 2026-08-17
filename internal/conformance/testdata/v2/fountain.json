@@ -1,0 +1,221 @@
+{
+  "format_version": 2,
+  "symbols": [
+    {
+      "name": "symbol-k1-index0",
+      "note": "K=1 needs no coding at all; most DMs land here",
+      "input": {
+        "bundle_id": 16909060,
+        "index": 0,
+        "k": 1,
+        "data": "68656c6c6f"
+      },
+      "encoded": "400102030400010068656c6c6f"
+    },
+    {
+      "name": "symbol-index-255",
+      "note": "index still fits byte 5",
+      "input": {
+        "bundle_id": 3735928559,
+        "index": 255,
+        "k": 10,
+        "data": "41414141414141414141414141414141"
+      },
+      "encoded": "40deadbeefff0a0041414141414141414141414141414141"
+    },
+    {
+      "name": "symbol-index-256",
+      "note": "index 256: the low half is in byte 5 and the high half in byte 7, which is the one thing about this header a reader would not guess",
+      "input": {
+        "bundle_id": 3735928559,
+        "index": 256,
+        "k": 10,
+        "data": "41414141414141414141414141414141"
+      },
+      "encoded": "40deadbeef000a0141414141414141414141414141414141"
+    },
+    {
+      "name": "symbol-index-max",
+      "note": "index at the uint16 ceiling",
+      "input": {
+        "bundle_id": 0,
+        "index": 65535,
+        "k": 10,
+        "data": "00"
+      },
+      "encoded": "4000000000ff0aff00"
+    },
+    {
+      "name": "symbol-k-max",
+      "note": "K at MaxK",
+      "input": {
+        "bundle_id": 287454020,
+        "index": 64,
+        "k": 64,
+        "data": "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e"
+      },
+      "encoded": "40112233444040007e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e"
+    }
+  ],
+  "masks": [
+    {
+      "name": "mask-k1",
+      "note": "K=1 is the special case: the sole source symbol, always",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 1234,
+        "index": 1,
+        "k": 1
+      },
+      "mask": "01",
+      "degree": 1
+    },
+    {
+      "name": "mask-k2-i2",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 1234,
+        "index": 2,
+        "k": 2
+      },
+      "mask": "01",
+      "degree": 1
+    },
+    {
+      "name": "mask-k8-i8",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 1234,
+        "index": 8,
+        "k": 8
+      },
+      "mask": "2f",
+      "degree": 5
+    },
+    {
+      "name": "mask-k8-i9",
+      "note": "same block, next index",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 1234,
+        "index": 9,
+        "k": 8
+      },
+      "mask": "14",
+      "degree": 2
+    },
+    {
+      "name": "mask-k8-i8-other-sender",
+      "note": "identical bundle and index, different sender: the mask MUST differ",
+      "input": {
+        "sender_key": "node-b",
+        "bundle_id": 1234,
+        "index": 8,
+        "k": 8
+      },
+      "mask": "13",
+      "degree": 3
+    },
+    {
+      "name": "mask-k8-i8-other-bundle",
+      "note": "identical sender and index, different bundle",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 5678,
+        "index": 8,
+        "k": 8
+      },
+      "mask": "98",
+      "degree": 3
+    },
+    {
+      "name": "mask-k32-i40",
+      "note": "K=32: exactly one 32-bit draw, no partial batch",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 42,
+        "index": 40,
+        "k": 32
+      },
+      "mask": "bf749930",
+      "degree": 17
+    },
+    {
+      "name": "mask-k33-i40",
+      "note": "K=33 needs a second draw of which only one bit is used, which is where an off-by-one in the batching would show",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 42,
+        "index": 40,
+        "k": 33
+      },
+      "mask": "bf74993000",
+      "degree": 17
+    },
+    {
+      "name": "mask-k64-i100",
+      "note": "K at MaxK",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 42,
+        "index": 100,
+        "k": 64
+      },
+      "mask": "c096144e2a483a4d",
+      "degree": 25
+    }
+  ],
+  "repairs": [
+    {
+      "name": "repair-systematic-0",
+      "note": "a systematic symbol is the source fragment verbatim, at zero coding overhead",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 99,
+        "payload": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7",
+        "sym_size": 32,
+        "index": 0
+      },
+      "k": 7,
+      "encoded": "4000000063000700000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "name": "repair-first",
+      "note": "the first repair symbol, index K",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 99,
+        "payload": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7",
+        "sym_size": 32,
+        "index": 7
+      },
+      "k": 7,
+      "encoded": "4000000063070700c0c1c2c3c4c5c6c7000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "repair-second",
+      "input": {
+        "sender_key": "node-a",
+        "bundle_id": 99,
+        "payload": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7",
+        "sym_size": 32,
+        "index": 8
+      },
+      "k": 7,
+      "encoded": "40000000630807002020202020202020202020202020202020202020202020202020202020202020"
+    },
+    {
+      "name": "repair-other-sender",
+      "note": "same block from a different sender: the repair bytes MUST differ",
+      "input": {
+        "sender_key": "node-b",
+        "bundle_id": 99,
+        "payload": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7",
+        "sym_size": 32,
+        "index": 7
+      },
+      "k": 7,
+      "encoded": "40000000630707002020202020202020e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+    }
+  ]
+}

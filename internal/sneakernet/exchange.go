@@ -73,6 +73,11 @@ func Export(src Exporter, dict *bundle.Dictionary, opt ExportOptions) (*Carrier,
 		Vectors:   map[record.AreaTag]*vv.Vector{},
 		Blobs:     opt.Blobs,
 		Requests:  opt.Requests,
+		// Declared from the dictionary actually used rather than from the
+		// node's ceiling, so the requirement is exactly what the bundles need
+		// and a carrier written with an older dictionary stays readable by
+		// older boards (§7.4).
+		MinDictionary: dict.ID(),
 	}
 
 	want := map[record.AreaTag]bool{}
@@ -165,6 +170,17 @@ type ImportResult struct {
 // enforces area rules. What is tolerated here is a bundle that will not
 // UNPACK — a framing problem, not an authenticity one.
 func Import(dst Importer, dicts *bundle.DictionarySet, c *Carrier) (ImportResult, error) {
+	// Refused before anything is parsed, because the answer is the same for
+	// every bundle on the stick and the sysop is standing there holding it
+	// (§7.4). Reporting this per bundle would be N copies of one fact, and the
+	// fact would arrive after a partial import rather than instead of one.
+	if c.MinDictionary > dicts.Highest() {
+		return ImportResult{}, fmt.Errorf("%w: this carrier was packed with compression "+
+			"dictionary %d and this build holds up to %d — upgrade this node, or ask for a "+
+			"carrier written with an older dictionary",
+			bundle.ErrUnknownDictionary, c.MinDictionary, dicts.Highest())
+	}
+
 	var res ImportResult
 	for i, raw := range c.Bundles {
 		b, err := bundle.Unpack(raw, dicts)

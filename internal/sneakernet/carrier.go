@@ -84,7 +84,14 @@ var Magic = [4]byte{'M', 'B', 'X', 'F'}
 // inside the request count with a truncation error, and "carrier format version
 // 1, this build speaks 2" is what a sysop holding a stick from a board on an
 // older build can act on.
-const FormatVersion uint8 = 2
+//
+// Version 3 added MinDictionary, for the same reason one layer down. §7.4's
+// dictionary negotiation works on the mesh because a digest arrives before the
+// traffic does — and it can never work here, because a stick has no round trip
+// and the person carrying it may be walking toward a board this one has never
+// met. So the requirement is declared up front instead of negotiated, and the
+// far end can refuse in one sentence before parsing anything.
+const FormatVersion uint8 = 3
 
 // Limits. See the package comment on why these are stricter in spirit than the
 // mesh's: the medium has no MTU and no rate limit.
@@ -140,6 +147,24 @@ type Carrier struct {
 	// is (§6.2.1): it came from another machine's clock and is rendered, never
 	// computed from.
 	CreatedAt uint32
+	// MinDictionary is the highest compression dictionary any bundle in here
+	// was packed with, and therefore the lowest a reader must hold (§7.4).
+	//
+	// # Why a stick declares instead of negotiating
+	//
+	// On the mesh a node learns what its peers can read from their digests and
+	// picks a dictionary everybody holds. A carrier has no peers and no round
+	// trip: it is written once, carried by a human, and handed to a board that
+	// may never have been heard from. There is nothing to negotiate with, ever,
+	// so the only honest options are to declare the requirement or to guess.
+	//
+	// Declaring it costs one byte on a medium with no MTU and turns the failure
+	// from "truncated bundle" somewhere inside an import into "this carrier
+	// needs dictionary 2, this build holds up to 1" before a single record is
+	// read. That distinction is the whole reason for the version bump — the
+	// per-bundle dictionary ID was already on the wire, but only reachable
+	// after committing to the parse.
+	MinDictionary uint8
 	// Vectors say what the sender held per area when it wrote this, so a
 	// receiver can compute a reply without a conversation.
 	Vectors map[record.AreaTag]*vv.Vector
@@ -244,6 +269,7 @@ func Encode(c *Carrier) ([]byte, error) {
 	buf = append(buf, FormatVersion)
 	buf = append(buf, c.Origin[:]...)
 	buf = binary.BigEndian.AppendUint32(buf, c.CreatedAt)
+	buf = append(buf, c.MinDictionary)
 
 	areas := make([]record.AreaTag, 0, len(c.Vectors))
 	for a := range c.Vectors {
@@ -372,6 +398,12 @@ func decode(data []byte, allowTrailing bool) (*Carrier, int, error) {
 		return nil, 0, err
 	}
 	c.CreatedAt = binary.BigEndian.Uint32(created)
+
+	minDict, err := take(1, "the minimum dictionary")
+	if err != nil {
+		return nil, 0, err
+	}
+	c.MinDictionary = minDict[0]
 
 	vectorCount, err := uvarint("the vector count")
 	if err != nil {

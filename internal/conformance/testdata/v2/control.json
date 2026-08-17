@@ -1,0 +1,375 @@
+{
+  "format_version": 2,
+  "vectors": [
+    {
+      "name": "digest-empty",
+      "kind": "digest",
+      "note": "three bytes and no areas",
+      "input": {
+        "areas": null
+      },
+      "encoded": "01020000"
+    },
+    {
+      "name": "digest-one",
+      "kind": "digest",
+      "input": {
+        "areas": [
+          {
+            "area": "general",
+            "hash": "a1a1a1a1",
+            "count": 42
+          }
+        ]
+      },
+      "encoded": "0102000179d42c56a1a1a1a1002a"
+    },
+    {
+      "name": "digest-unsorted",
+      "kind": "digest",
+      "note": "areas supplied in a deliberately wrong order: Encode sorts by tag, and this is what pins that it does rather than trusting the caller",
+      "input": {
+        "areas": [
+          {
+            "area": "zulu",
+            "hash": "c3c3c3c3",
+            "count": 3
+          },
+          {
+            "area": "alpha",
+            "hash": "c1c1c1c1",
+            "count": 1
+          },
+          {
+            "area": "mike",
+            "hash": "c2c2c2c2",
+            "count": 2
+          }
+        ]
+      },
+      "encoded": "01020003644a9bc5c1c1c1c100017b0d33e9c3c3c3c30003cc1e30dec2c2c2c20002"
+    },
+    {
+      "name": "digest-count-saturated",
+      "kind": "digest",
+      "note": "count at the 16-bit ceiling",
+      "input": {
+        "areas": [
+          {
+            "area": "general",
+            "hash": "a2a2a2a2",
+            "count": 65535
+          }
+        ]
+      },
+      "encoded": "0102000179d42c56a2a2a2a2ffff"
+    },
+    {
+      "name": "digest-max-areas",
+      "kind": "digest",
+      "note": "a full digest, which must still be one mesh packet",
+      "input": {
+        "areas": [
+          {
+            "area": "area-00",
+            "hash": "00000000",
+            "count": 0
+          },
+          {
+            "area": "area-01",
+            "hash": "01010101",
+            "count": 100
+          },
+          {
+            "area": "area-02",
+            "hash": "02020202",
+            "count": 200
+          },
+          {
+            "area": "area-03",
+            "hash": "03030303",
+            "count": 300
+          },
+          {
+            "area": "area-04",
+            "hash": "04040404",
+            "count": 400
+          },
+          {
+            "area": "area-05",
+            "hash": "05050505",
+            "count": 500
+          },
+          {
+            "area": "area-06",
+            "hash": "06060606",
+            "count": 600
+          },
+          {
+            "area": "area-07",
+            "hash": "07070707",
+            "count": 700
+          },
+          {
+            "area": "area-08",
+            "hash": "08080808",
+            "count": 800
+          },
+          {
+            "area": "area-09",
+            "hash": "09090909",
+            "count": 900
+          },
+          {
+            "area": "area-10",
+            "hash": "0a0a0a0a",
+            "count": 1000
+          },
+          {
+            "area": "area-11",
+            "hash": "0b0b0b0b",
+            "count": 1100
+          },
+          {
+            "area": "area-12",
+            "hash": "0c0c0c0c",
+            "count": 1200
+          },
+          {
+            "area": "area-13",
+            "hash": "0d0d0d0d",
+            "count": 1300
+          },
+          {
+            "area": "area-14",
+            "hash": "0e0e0e0e",
+            "count": 1400
+          },
+          {
+            "area": "area-15",
+            "hash": "0f0f0f0f",
+            "count": 1500
+          },
+          {
+            "area": "area-16",
+            "hash": "10101010",
+            "count": 1600
+          },
+          {
+            "area": "area-17",
+            "hash": "11111111",
+            "count": 1700
+          },
+          {
+            "area": "area-18",
+            "hash": "12121212",
+            "count": 1800
+          },
+          {
+            "area": "area-19",
+            "hash": "13131313",
+            "count": 1900
+          },
+          {
+            "area": "area-20",
+            "hash": "14141414",
+            "count": 2000
+          },
+          {
+            "area": "area-21",
+            "hash": "15151515",
+            "count": 2100
+          }
+        ]
+      },
+      "encoded": "0102001600766f92090909090384041e76850707070702bc043957240808080803200bea01840d0d0d0d05141042e0570000000000001182423601010101006412157fd71414141407d01c5efbfc04040404019020e648eb0606060602584afd20fe0c0c0c0c04b05186084f0202020200c85c1cd3060505050501f476031c30121212120708811604390a0a0a0a03e8928d947c0b0b0b0b044c966ea8421111111106a4c1aa0f6b0e0e0e0e0578c24336cb13131313076cc6dfb84a03030303012cd0aacb29101010100640d5c40c24151515150834e37369170f0f0f0f05dc"
+    },
+    {
+      "name": "vector-req-one",
+      "kind": "vector_req",
+      "input": {
+        "areas": [
+          "general"
+        ]
+      },
+      "encoded": "02020179d42c56"
+    },
+    {
+      "name": "vector-req-unsorted",
+      "kind": "vector_req",
+      "note": "same sorting guarantee as the digest",
+      "input": {
+        "areas": [
+          "zulu",
+          "alpha",
+          "mike"
+        ]
+      },
+      "encoded": "020203644a9bc57b0d33e9cc1e30de"
+    },
+    {
+      "name": "vector-msg-empty",
+      "kind": "vector_msg",
+      "note": "an empty vector still encodes its count",
+      "input": {
+        "area": "general",
+        "entries": null
+      },
+      "encoded": "030279d42c5600"
+    },
+    {
+      "name": "vector-msg-four",
+      "kind": "vector_msg",
+      "note": "origins ascend by ID, not by the order given",
+      "input": {
+        "area": "general",
+        "entries": [
+          {
+            "key": "node-a",
+            "seq": 1
+          },
+          {
+            "key": "node-b",
+            "seq": 127
+          },
+          {
+            "key": "node-c",
+            "seq": 128
+          },
+          {
+            "key": "node-d",
+            "seq": 18446744073709551615
+          }
+        ]
+      },
+      "encoded": "030279d42c56042cb22d8888c9353780019ee3169099924f497fbdc70538ebad4892ffffffffffffffffff01e41be10756a217e501"
+    },
+    {
+      "name": "range-req-one",
+      "kind": "range_req",
+      "input": {
+        "area": "general",
+        "ranges": [
+          {
+            "key": "node-a",
+            "from": 5,
+            "to": 9
+          }
+        ]
+      },
+      "encoded": "040279d42c5601e41be10756a217e50504"
+    },
+    {
+      "name": "range-req-multi",
+      "kind": "range_req",
+      "note": "ranges sort by origin then by From; the wire carries the SPAN, not the absolute To",
+      "input": {
+        "area": "general",
+        "ranges": [
+          {
+            "key": "node-c",
+            "from": 10,
+            "to": 10
+          },
+          {
+            "key": "node-a",
+            "from": 200,
+            "to": 400
+          },
+          {
+            "key": "node-a",
+            "from": 1,
+            "to": 3
+          },
+          {
+            "key": "node-b",
+            "from": 0,
+            "to": 127
+          }
+        ]
+      },
+      "encoded": "040279d42c56042cb22d8888c935370a009ee3169099924f49007fe41be10756a217e50102e41be10756a217e5c801c801"
+    },
+    {
+      "name": "vv-encode-empty",
+      "kind": "vv_encode",
+      "input": {
+        "entries": null
+      },
+      "encoded": "00"
+    },
+    {
+      "name": "vv-encode-one",
+      "kind": "vv_encode",
+      "input": {
+        "entries": [
+          {
+            "key": "node-a",
+            "seq": 1
+          }
+        ]
+      },
+      "encoded": "01e41be10756a217e501"
+    },
+    {
+      "name": "vv-encode-four",
+      "kind": "vv_encode",
+      "note": "sequence numbers across the uvarint width boundaries",
+      "input": {
+        "entries": [
+          {
+            "key": "node-a",
+            "seq": 1
+          },
+          {
+            "key": "node-b",
+            "seq": 127
+          },
+          {
+            "key": "node-c",
+            "seq": 128
+          },
+          {
+            "key": "node-d",
+            "seq": 18446744073709551615
+          }
+        ]
+      },
+      "encoded": "042cb22d8888c9353780019ee3169099924f497fbdc70538ebad4892ffffffffffffffffff01e41be10756a217e501"
+    },
+    {
+      "name": "vv-hash-empty",
+      "kind": "vv_hash",
+      "note": "the fingerprint a digest carries for an area holding nothing",
+      "input": {
+        "entries": null
+      },
+      "encoded": "af1349b9"
+    },
+    {
+      "name": "vv-hash-four",
+      "kind": "vv_hash",
+      "input": {
+        "entries": [
+          {
+            "key": "node-a",
+            "seq": 1
+          },
+          {
+            "key": "node-b",
+            "seq": 127
+          },
+          {
+            "key": "node-c",
+            "seq": 128
+          },
+          {
+            "key": "node-d",
+            "seq": 18446744073709551615
+          }
+        ]
+      },
+      "encoded": "35630794"
+    }
+  ]
+}

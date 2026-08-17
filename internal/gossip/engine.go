@@ -105,6 +105,15 @@ type Config struct {
 	// It feeds the peer count that scales the digest interval, so a mesh that
 	// shrinks speeds back up rather than staying slow forever.
 	PeerTimeout time.Duration
+
+	// Dictionary is the highest compression dictionary ID this node holds
+	// (§7.4). It is stamped on every digest and is the ceiling for
+	// DictionaryFloor.
+	//
+	// A bare uint8 rather than anything from the bundle package on purpose:
+	// this is anti-entropy, and it carries the number without knowing what
+	// compression is. The wiring resolves the ID back to a dictionary.
+	Dictionary uint8
 }
 
 // DefaultConfig returns sensible defaults for a LongFast mesh.
@@ -136,6 +145,18 @@ type peerState struct {
 	// digest settles it either way, which is the feedback §7.2 item 4 asks for:
 	// "peers' high-water marks reveal whether bundles are landing".
 	awaiting map[record.AreaTag]awaitedPush
+
+	// dictionary is the highest compression dictionary this peer has said it
+	// holds (§7.4), and dictKnown is whether it has said so at all.
+	//
+	// The flag is not redundant with a zero value, and conflating them would be
+	// a real bug. A peerState is created by the first message of ANY type, so a
+	// peer that sends a vector before its first digest would present as holding
+	// dictionary 0 — and since the floor is a minimum, one such peer would drag
+	// the whole mesh down to dictionary 0 for as long as it stayed quiet.
+	// Silence is not a claim, so an unknown peer does not vote.
+	dictionary uint8
+	dictKnown  bool
 }
 
 // awaitedPush is one unanswered question: did that bundle arrive?
@@ -262,7 +283,49 @@ func (e *Engine) Digest() *Digest {
 	for _, a := range e.store.Areas() {
 		areas[a] = e.store.Vector(a)
 	}
-	return NewDigest(areas)
+	d := NewDigest(areas)
+	d.Dictionary = e.cfg.Dictionary
+	return d
+}
+
+// DictionaryFloor is the best compression dictionary this node may encode with
+// (§7.4): the highest one that every peer it can currently hear also holds.
+//
+// # Why a floor rather than a choice per peer
+//
+// Outbox.SendRecords BROADCASTS. One bundle goes out and every listening node
+// hears the same bytes, so there is no per-peer selection to make the way there
+// would be over a point-to-point link — the node picks one dictionary and lives
+// with it. The consequence is worth stating plainly because it is surprising:
+// ONE peer on an old build holds the entire mesh at its level. That is not a
+// flaw in the rule, it is what broadcast means, and it is why the caller reports
+// who is responsible instead of quietly compressing worse.
+//
+// Two peers deliberately do not vote. One that has never sent a digest has said
+// nothing about what it holds, and silence is not a claim (see peerState). One
+// that has fallen past PeerTimeout is gone by the same definition the digest
+// interval already uses, so a mesh that loses its laggard recovers on the next
+// cycle rather than staying slow until a restart.
+//
+// Returns the level, the peer responsible when one is holding us below our own
+// ceiling, and whether that is the case.
+func (e *Engine) DictionaryFloor() (uint8, identity.NodeID, bool) {
+	floor := e.cfg.Dictionary
+	var holder identity.NodeID
+
+	cutoff := e.clk.Now().Add(-e.cfg.PeerTimeout)
+	for _, p := range e.peers {
+		if !p.dictKnown {
+			continue
+		}
+		if e.cfg.PeerTimeout > 0 && !p.lastHeard.After(cutoff) {
+			continue
+		}
+		if p.dictionary < floor {
+			floor, holder = p.dictionary, p.id
+		}
+	}
+	return floor, holder, floor < e.cfg.Dictionary
 }
 
 // Tick advances the engine: fires due reconciliation steps and broadcasts the
@@ -390,6 +453,11 @@ func (e *Engine) onDigest(p *peerState, payload []byte) error {
 		return err
 	}
 	e.stats.DigestsHeard++
+
+	// §7.4: the digest is where a peer says what it can read. Recorded before
+	// anything else in the cycle, because a digest that goes on to tell us
+	// nothing about areas still told us this.
+	p.dictionary, p.dictKnown = d.Dictionary, true
 
 	shared := 0
 	matching := 0

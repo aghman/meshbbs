@@ -1,0 +1,261 @@
+{
+  "format_version": 2,
+  "vectors": [
+    {
+      "name": "node-min",
+      "kind": "node",
+      "note": "both labels empty, each costing one length byte",
+      "input": {
+        "key": "node-a",
+        "display_name": "",
+        "sysop_contact": "",
+        "incarnation": 0
+      },
+      "encoded": "54f5282565491705c21c5166529b2b5687ec272ce0f050ae74900e7f8e943379000000000000"
+    },
+    {
+      "name": "node-typical",
+      "kind": "node",
+      "input": {
+        "key": "node-a",
+        "display_name": "pnw-bbs",
+        "sysop_contact": "sysop@pnw",
+        "incarnation": 1
+      },
+      "encoded": "54f5282565491705c21c5166529b2b5687ec272ce0f050ae74900e7f8e9433790000000107706e772d626273097379736f7040706e77"
+    },
+    {
+      "name": "node-max",
+      "kind": "node",
+      "note": "labels at MaxDisplayNameLen and MaxSysopContactLen",
+      "input": {
+        "key": "node-b",
+        "display_name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+        "sysop_contact": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "incarnation": 4294967295
+      },
+      "encoded": "eee56d608a0550a044620954803c496e0c6fd841090007bace3cbd579c4bf822ffffffff206e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e4063636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363"
+    },
+    {
+      "name": "profile-listed",
+      "kind": "profile",
+      "input": {
+        "nick": "austin",
+        "dm_key": "2121212121212121212121212121212121212121212121212121212121212121",
+        "flags": 0
+      },
+      "encoded": "0661757374696e212121212121212121212121212121212121212121212121212121212121212100"
+    },
+    {
+      "name": "profile-unlisted",
+      "kind": "profile",
+      "note": "FlagUnlisted set: was listed, has opted out (§6.7)",
+      "input": {
+        "nick": "austin",
+        "dm_key": "2121212121212121212121212121212121212121212121212121212121212121",
+        "flags": 1
+      },
+      "encoded": "0661757374696e212121212121212121212121212121212121212121212121212121212121212101"
+    },
+    {
+      "name": "profile-nick-max",
+      "kind": "profile",
+      "note": "nick at MaxNickLen",
+      "input": {
+        "nick": "nnnnnnnnnnnnnnnnnnnnnnnn",
+        "dm_key": "2222222222222222222222222222222222222222222222222222222222222222",
+        "flags": 0
+      },
+      "encoded": "186e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e222222222222222222222222222222222222222222222222222222222222222200"
+    },
+    {
+      "name": "succession-basic",
+      "kind": "succession",
+      "note": "fixed width: 8 + 32 + 4, no length field to disagree with",
+      "input": {
+        "successor_key": "node-b",
+        "effective": 1700003600
+      },
+      "encoded": "9ee3169099924f49eee56d608a0550a044620954803c496e0c6fd841090007bace3cbd579c4bf8226553ff10"
+    },
+    {
+      "name": "file-min",
+      "kind": "file",
+      "note": "one-character name, no description, no tags",
+      "input": {
+        "name": "a",
+        "size": 0,
+        "hash": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "description": ""
+      },
+      "encoded": "0161005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0000"
+    },
+    {
+      "name": "file-size-127",
+      "kind": "file",
+      "note": "size in one uvarint byte",
+      "input": {
+        "name": "small.txt",
+        "size": 127,
+        "hash": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+        "description": ""
+      },
+      "encoded": "09736d616c6c2e7478747f5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b0000"
+    },
+    {
+      "name": "file-size-128",
+      "kind": "file",
+      "note": "size needing two uvarint bytes — the boundary the first fuzz run found an overlong encoding at",
+      "input": {
+        "name": "small.txt",
+        "size": 128,
+        "hash": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+        "description": ""
+      },
+      "encoded": "09736d616c6c2e74787480015b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b0000"
+    },
+    {
+      "name": "file-size-max",
+      "kind": "file",
+      "note": "size at the uint64 ceiling",
+      "input": {
+        "name": "huge.bin",
+        "size": 18446744073709551615,
+        "hash": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+        "description": ""
+      },
+      "encoded": "08687567652e62696effffffffffffffffff015c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c0000"
+    },
+    {
+      "name": "file-tags-one",
+      "kind": "file",
+      "input": {
+        "name": "ansi-pack.zip",
+        "size": 4096,
+        "hash": "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d",
+        "description": "art pack",
+        "tags": [
+          "art"
+        ]
+      },
+      "encoded": "0d616e73692d7061636b2e7a697080205d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d08617274207061636b0103617274"
+    },
+    {
+      "name": "file-max",
+      "kind": "file",
+      "note": "every bounded field at its limit",
+      "input": {
+        "name": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "size": 1099511627776,
+        "hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+        "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "tags": [
+          "tttttttttttt",
+          "uuuuuuuuuuuu",
+          "vvvvvvvvvvvv"
+        ]
+      },
+      "encoded": "40666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666668080808080205e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e506464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464030c7474747474747474747474740c7575757575757575757575750c767676767676767676767676"
+    },
+    {
+      "name": "door-event-single",
+      "kind": "door_event",
+      "note": "one event, no target, no payload — the minimum a league record can say",
+      "input": {
+        "game": "tradewars",
+        "events": [
+          {
+            "kind": 1,
+            "actor": "austin"
+          }
+        ]
+      },
+      "encoded": "0974726164657761727301010661757374696e0000"
+    },
+    {
+      "name": "door-event-target",
+      "kind": "door_event",
+      "note": "a target writes its nick AND its node; absent, neither is on the wire",
+      "input": {
+        "game": "tradewars",
+        "events": [
+          {
+            "kind": 3,
+            "actor": "austin",
+            "target": "kestrel",
+            "target_key": "node-b",
+            "payload": "0102"
+          }
+        ]
+      },
+      "encoded": "0974726164657761727301030661757374696e076b65737472656c9ee3169099924f49020102"
+    },
+    {
+      "name": "door-event-max",
+      "kind": "door_event",
+      "note": "MaxDoorEventsPerRecord events with every bounded field at its limit",
+      "input": {
+        "game": "gggggggggggggggg",
+        "events": [
+          {
+            "kind": 0,
+            "actor": "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "target": "tttttttttttttttttttttttt",
+            "target_key": "node-b",
+            "payload": "808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080"
+          },
+          {
+            "kind": 1,
+            "actor": "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "target": "tttttttttttttttttttttttt",
+            "target_key": "node-b",
+            "payload": "818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181"
+          },
+          {
+            "kind": 2,
+            "actor": "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "target": "tttttttttttttttttttttttt",
+            "target_key": "node-b",
+            "payload": "828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282"
+          },
+          {
+            "kind": 3,
+            "actor": "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "target": "tttttttttttttttttttttttt",
+            "target_key": "node-b",
+            "payload": "838383838383838383838383838383838383838383838383838383838383838383838383838383838383838383838383"
+          },
+          {
+            "kind": 4,
+            "actor": "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "target": "tttttttttttttttttttttttt",
+            "target_key": "node-b",
+            "payload": "848484848484848484848484848484848484848484848484848484848484848484848484848484848484848484848484"
+          },
+          {
+            "kind": 5,
+            "actor": "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "target": "tttttttttttttttttttttttt",
+            "target_key": "node-b",
+            "payload": "858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585"
+          },
+          {
+            "kind": 6,
+            "actor": "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "target": "tttttttttttttttttttttttt",
+            "target_key": "node-b",
+            "payload": "868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686"
+          },
+          {
+            "kind": 7,
+            "actor": "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "target": "tttttttttttttttttttttttt",
+            "target_key": "node-b",
+            "payload": "878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787"
+          }
+        ]
+      },
+      "encoded": "1067676767676767676767676767676767080018616161616161616161616161616161616161616161616161187474747474747474747474747474747474747474747474749ee3169099924f49308080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080800118616161616161616161616161616161616161616161616161187474747474747474747474747474747474747474747474749ee3169099924f49308181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181810218616161616161616161616161616161616161616161616161187474747474747474747474747474747474747474747474749ee3169099924f49308282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282820318616161616161616161616161616161616161616161616161187474747474747474747474747474747474747474747474749ee3169099924f49308383838383838383838383838383838383838383838383838383838383838383838383838383838383838383838383830418616161616161616161616161616161616161616161616161187474747474747474747474747474747474747474747474749ee3169099924f49308484848484848484848484848484848484848484848484848484848484848484848484848484848484848484848484840518616161616161616161616161616161616161616161616161187474747474747474747474747474747474747474747474749ee3169099924f49308585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585850618616161616161616161616161616161616161616161616161187474747474747474747474747474747474747474747474749ee3169099924f49308686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686860718616161616161616161616161616161616161616161616161187474747474747474747474747474747474747474747474749ee3169099924f4930878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787"
+    }
+  ]
+}
