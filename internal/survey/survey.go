@@ -20,15 +20,26 @@
 //	R ≈ (channel_utilization_load − channel_utilization_baseline) / air_util_tx_load
 //
 // Both figures come from the node's own telemetry. What §7.8 assumed, and
-// hardware disproved, is that they can be sampled on demand: a Heltec V3 on
-// firmware 2.7.15 refreshes its self-reported metrics only on the telemetry
-// interval, which ships as an "unset" sentinel meaning the 30-minute default.
-// Watched for four minutes, the numbers did not move once, and a self-addressed
-// telemetry request is answered with a routing error rather than metrics.
+// hardware disproved, is that they can be sampled on demand: a self-addressed
+// telemetry request is answered with a routing error rather than metrics, so
+// the only reading available is whatever the node last wrote into its own
+// nodedb entry. A survey can therefore go no faster than that entry refreshes.
 //
-// So a survey cannot sample every minute the way §7.8.2 describes unless the
-// node is told to update more often. Preflight checks for that and refuses to
-// run rather than producing a curve drawn through four identical readings.
+// The trap is which setting controls it, and it cost an afternoon to find.
+// `device_update_interval` governs how often the node BROADCASTS telemetry to
+// the mesh. It does NOT govern how often the firmware refreshes its own entry,
+// which is the thing read here. Measured on a Heltec V3 on firmware 2.7.15
+// with that interval set to 3600s, uptime advanced in exact 60-second steps and
+// both utilization figures moved with it — a factor of sixty between the number
+// the node declares and the rate it actually refreshes at.
+//
+// An earlier reading of this same radio, four minutes with no movement at all,
+// was taken with the telemetry module switched OFF. That is the thing that
+// actually stops the refresh, and no interval setting substitutes for it.
+//
+// So preflight MEASURES the refresh rate instead of reading the configured
+// interval, because the configured interval is a statement about the mesh
+// rather than about us. See probeCadence.
 package survey
 
 import (
@@ -53,9 +64,11 @@ const maxPlausibleInterval = 24 * time.Hour
 
 // TelemetryCadence interprets the interval a node reports.
 //
-// It returns false when the node is on the firmware default, which is the case
-// that matters: at 30 minutes, no survey shorter than several hours can sample
-// anything.
+// This is the node's telemetry BROADCAST interval, not the rate at which it
+// refreshes the metrics a survey reads — the two are independent, and assuming
+// otherwise is what probeCadence exists to stop. It survives because `mesh
+// info` displays it and because it is useful context in a refusal, not because
+// anything decides on it.
 func TelemetryCadence(secs uint32) (time.Duration, bool) {
 	if secs == 0 {
 		return DefaultTelemetryInterval, false
@@ -139,6 +152,11 @@ type Config struct {
 	Load time.Duration
 	// Sample is how often to read the node's metrics.
 	Sample time.Duration
+	// Probe is how long preflight watches before deciding whether the node's
+	// metrics move at all. Proportional to Sample rather than fixed, since a
+	// survey sampling every ten minutes needs a correspondingly longer look
+	// before "nothing moved" means anything.
+	Probe time.Duration
 	// HopLimits to sweep. §7.8.2 asks for 1, 3 and 5 — the sweep is the most
 	// actionable output, because it prices what hop limit costs the commons.
 	HopLimits []uint32
@@ -170,6 +188,21 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Sample <= 0 {
 		c.Sample = time.Minute
+	}
+	if c.Probe <= 0 {
+		// The longest refresh gap that still yields minPhaseSamples in the
+		// shortest phase. Watching for exactly that means a probe which sees
+		// nothing has proved the phase would fail, without guessing at a
+		// window. Floored at two samples so the probe always gets to look
+		// twice.
+		shortest := c.Baseline
+		if c.Load < shortest {
+			shortest = c.Load
+		}
+		c.Probe = shortest / minPhaseSamples
+		if c.Probe < 2*c.Sample {
+			c.Probe = 2 * c.Sample
+		}
 	}
 	if len(c.HopLimits) == 0 {
 		c.HopLimits = []uint32{1, 3, 5}
@@ -258,7 +291,12 @@ type Report struct {
 	Started, Ended time.Time
 	Preset         airtime.Preset
 	Region         string
-	Baseline       Phase
+	// Cadence is the metric refresh rate preflight MEASURED, which is not
+	// necessarily the interval the node declares. Recorded because §7.8.3 wants
+	// these reports comparable across sysops, and two runs at different
+	// cadences are not directly comparable.
+	Cadence  time.Duration
+	Baseline Phase
 	// BaselineEnd repeats the baseline after the load phases, with the radio
 	// silent again. See Drift.
 	BaselineEnd Phase
@@ -350,6 +388,17 @@ func (r *Report) DriftRaw() (float64, bool) {
 	return r.BaselineEnd.MeanChannel() - r.Baseline.MeanChannel(), true
 }
 
+// Check runs preflight alone: it decides whether this node can be surveyed at
+// all, and puts nothing on the air doing it.
+//
+// It exists because that answer costs a couple of minutes while a survey costs
+// hours, and until it did, the only way to discover a node could not be
+// measured was to commit to the whole run and read the refusal.
+func Check(ctx context.Context, node Node, cfg Config) (time.Duration, error) {
+	cfg.applyDefaults()
+	return preflight(ctx, node, cfg)
+}
+
 // Run performs a survey.
 //
 // It is deliberately conservative about starting: a survey transmits, and §7.8.3
@@ -358,13 +407,15 @@ func (r *Report) DriftRaw() (float64, bool) {
 func Run(ctx context.Context, node Node, cfg Config) (*Report, error) {
 	cfg.applyDefaults()
 
-	if err := preflight(node, cfg); err != nil {
+	cadence, err := preflight(ctx, node, cfg)
+	if err != nil {
 		return nil, err
 	}
 
 	rep := &Report{
 		Started: cfg.Clock.Now(),
 		Preset:  node.Preset(),
+		Cadence: cadence,
 	}
 	census := newCensus()
 	stop := collect(ctx, node.Heard(), census)
@@ -424,22 +475,106 @@ func Run(ctx context.Context, node Node, cfg Config) (*Report, error) {
 	return rep, nil
 }
 
-// preflight refuses surveys that cannot produce a number.
-func preflight(node Node, cfg Config) error {
-	cadence, configured := TelemetryCadence(node.TelemetryIntervalSecs())
-	if !configured || cadence > cfg.Sample {
-		// This is the check hardware taught us to make. Without it the survey
-		// runs for an hour and reports a confident R computed from the same
-		// cached reading sampled sixty times.
-		return fmt.Errorf("%w: it refreshes every %s but the survey samples every %s\n"+
-			"set Telemetry → device metrics update interval to %.0fs on the node "+
-			"(Meshtastic app → Module Settings → Telemetry), then run this again",
-			ErrMetricsTooSlow, cadence, cfg.Sample, cfg.Sample.Seconds())
+// minPhaseSamples is how many fresh readings a phase needs before its mean and
+// standard error are worth quoting.
+//
+// Below this the interval on R is drawn through so few points that it claims a
+// precision the node never provided — which is the failure mode the original
+// version of this check was written to prevent, and the part of it that was
+// right.
+const minPhaseSamples = 5
+
+// probeCadence measures how often the node actually refreshes its metrics.
+//
+// Preflight cannot ask. The one field that looks like an answer —
+// device_update_interval — is about broadcasting to the mesh, and has been
+// observed disagreeing with the real refresh rate by a factor of sixty (see the
+// package comment). So this watches, using the same freshness test the phases
+// themselves use, and believes only what it sees.
+//
+// It wants TWO fresh readings rather than one. One proves only that a refresh
+// happened somewhere inside the window; two bound the interval between them,
+// which is the number every message downstream of here quotes.
+func probeCadence(ctx context.Context, node Node, cfg Config) (time.Duration, int, error) {
+	deadline := cfg.Clock.Now().Add(cfg.Probe)
+
+	var prev Metrics
+	if m, ok := node.Metrics(); ok {
+		prev = m
 	}
+
+	var at []time.Time
+	for cfg.Clock.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return 0, 0, ctx.Err()
+		case <-cfg.Clock.After(cfg.Sample):
+		}
+		if m, ok := node.Metrics(); ok && m.fresh(prev) {
+			at = append(at, cfg.Clock.Now())
+			prev = m
+		}
+	}
+
+	if len(at) < 2 {
+		return 0, len(at), nil
+	}
+	// The mean gap across the whole window, not the first gap: any single gap
+	// is quantised by our own sample interval and reads as anywhere between one
+	// and two refresh periods.
+	span := at[len(at)-1].Sub(at[0])
+	return time.Duration(int64(span) / int64(len(at)-1)), len(at), nil
+}
+
+// preflight refuses surveys that cannot produce a number, and returns the
+// refresh cadence it measured.
+func preflight(ctx context.Context, node Node, cfg Config) (time.Duration, error) {
 	if _, ok := node.Metrics(); !ok {
-		return fmt.Errorf("%w: the node has not reported any metrics yet", ErrMetricsTooSlow)
+		return 0, fmt.Errorf("%w: the node has not reported any metrics yet", ErrMetricsTooSlow)
 	}
-	return nil
+
+	progress(cfg, fmt.Sprintf("checking how often the node refreshes its metrics (up to %s)", cfg.Probe))
+	cadence, fresh, err := probeCadence(ctx, node, cfg)
+	if err != nil {
+		return 0, err
+	}
+
+	shortest := cfg.Baseline
+	if cfg.Load < shortest {
+		shortest = cfg.Load
+	}
+
+	if fresh < 2 {
+		// Both causes are named because this evidence cannot separate them. A
+		// window this short sees nothing whether the telemetry module is off or
+		// merely slower than the window, and asserting the first is how the
+		// previous version of this check sent a sysop after a setting that does
+		// not control the thing they were trying to fix.
+		declared, _ := TelemetryCadence(node.TelemetryIntervalSecs())
+		return 0, fmt.Errorf("%w: watched for %s and saw %d fresh readings, so a %s phase "+
+			"cannot yield the %d this needs\n"+
+			"either the node's telemetry module is off — enable Meshtastic app → Module "+
+			"Settings → Telemetry → Device Metrics — or it refreshes slower than that, in "+
+			"which case lengthen --baseline and --load until it has time to\n"+
+			"(the node declares a %s interval, but that governs telemetry BROADCAST to the "+
+			"mesh rather than how often it refreshes the metrics read here, so tuning it "+
+			"is not the fix)",
+			ErrMetricsTooSlow, cfg.Probe, fresh, shortest, minPhaseSamples, declared)
+	}
+
+	// Reachable only because Probe is floored at two samples: below that floor
+	// a probe that saw two readings has already proved the cadence is fast
+	// enough. With the floor, a short phase can still fail here.
+	if got := int(shortest / cadence); got < minPhaseSamples {
+		return 0, fmt.Errorf("%w: it refreshes about every %s, which is %d readings in a %s phase and %d are needed\n"+
+			"either lengthen --baseline and --load to at least %s, or speed the node's telemetry up",
+			ErrMetricsTooSlow, cadence.Round(time.Second), got, shortest, minPhaseSamples,
+			(time.Duration(minPhaseSamples) * cadence).Round(time.Minute))
+	}
+
+	progress(cfg, fmt.Sprintf("metrics refresh about every %s — %d readings per %s phase",
+		cadence.Round(time.Second), int(shortest/cadence), shortest))
+	return cadence, nil
 }
 
 // measure runs one phase, transmitting if hopLimit is non-zero.

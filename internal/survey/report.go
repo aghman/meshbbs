@@ -74,7 +74,14 @@ func (r *Report) Write(w io.Writer, instances int) {
 	if r.Region != "" {
 		p(", region %s", r.Region)
 	}
-	p("\n\n")
+	p("\n")
+	if r.Cadence > 0 {
+		// Measured, not configured. Two reports taken at different cadences
+		// rest on different numbers of samples, so a reader comparing them
+		// needs this before anything below it means much.
+		p("Metrics   refreshed every %s (measured)\n", r.Cadence.Round(time.Second))
+	}
+	p("\n")
 
 	p("Baseline (transmitting nothing)\n")
 	p("  channel busy   %.2f%% (sd %.2f, %d fresh samples, %d stale reads)\n",

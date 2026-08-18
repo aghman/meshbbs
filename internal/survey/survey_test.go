@@ -25,8 +25,14 @@ type fakeNode struct {
 	ambient   float64 // baseline channel utilization, percent
 	noise     float64 // per-sample jitter, percentage points
 	telemSecs uint32
-	clk       *clock.Virtual
-	rnd       rng.Source
+	// refresh is how often the node rewrites its own nodedb entry. Zero means
+	// continuously, which is what most of these tests want. It is deliberately
+	// INDEPENDENT of telemSecs: on real hardware those two disagreed by a
+	// factor of sixty, and a fake that ties them together cannot reproduce the
+	// bug this models.
+	refresh time.Duration
+	clk     *clock.Virtual
+	rnd     rng.Source
 
 	mu       sync.Mutex
 	txAir    float64 // our cumulative transmit percentage
@@ -52,8 +58,13 @@ func (f *fakeNode) Metrics() (Metrics, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	// Uptime advances with the clock, which is what marks a reading as fresh.
+	// Uptime advances with the clock, which is what marks a reading as fresh —
+	// quantised to the refresh interval, so a node between refreshes hands back
+	// the same snapshot exactly as the firmware does.
 	f.uptime = f.clk.Now().Sub(time.Unix(0, 0))
+	if f.refresh > 0 {
+		f.uptime = f.uptime.Truncate(f.refresh)
+	}
 
 	ambient := f.ambient
 	if f.ambientF != nil {
@@ -206,23 +217,65 @@ func (h *hopVaryingNode) Transmit(ctx context.Context, n int, hop uint32) error 
 	return h.fakeNode.Transmit(ctx, n, hop)
 }
 
-// The check hardware taught us to make: a node on the firmware default cannot
-// be sampled often enough, and a survey that ran anyway would report a
-// confident number computed from one cached reading.
-func TestPreflightRefusesASlowNode(t *testing.T) {
+// A node whose metrics never move cannot be surveyed, and the survey has to say
+// so before it transmits rather than after an hour of identical readings.
+func TestPreflightRefusesANodeThatDoesNotRefresh(t *testing.T) {
 	clk := clock.NewVirtual(time.Unix(0, 0))
 	node := newFakeNode(clk, 4, 2)
-	node.telemSecs = 0 // the firmware default
+	node.refresh = time.Hour // telemetry module effectively off
 
-	_, err := Run(context.Background(), node, Config{
-		Baseline: time.Minute, Load: time.Minute, Sample: time.Minute, Clock: clk,
-	})
+	_, err := runVirtual(t, node, Config{
+		Baseline: 10 * time.Minute, Load: 10 * time.Minute, Sample: time.Minute,
+	}, clk)
 	if !errors.Is(err, ErrMetricsTooSlow) {
 		t.Fatalf("err = %v, want ErrMetricsTooSlow", err)
 	}
-	// The message has to say what to change, since the fix is on the node.
-	if !strings.Contains(err.Error(), "device metrics update interval") {
-		t.Errorf("error does not tell the sysop what to set: %v", err)
+	// The remedy is the telemetry module, not the interval. Naming the interval
+	// here is what sent a sysop chasing a setting that does not control this.
+	if !strings.Contains(err.Error(), "Device Metrics") {
+		t.Errorf("error does not name the module to enable: %v", err)
+	}
+}
+
+// The regression this check exists for: a node that DECLARES a slow interval
+// but refreshes quickly must be surveyed, not refused.
+//
+// This is the real hardware case — a Heltec V3 declaring 3600s while rewriting
+// its own entry every 60s. The previous preflight read the declaration and
+// refused, which blocked a measurement the node was perfectly capable of.
+func TestPreflightAcceptsAFastNodeDeclaringASlowInterval(t *testing.T) {
+	clk := clock.NewVirtual(time.Unix(0, 0))
+	node := newFakeNode(clk, 4, 2)
+	node.telemSecs = 3600      // what the node says about its mesh broadcasts
+	node.refresh = time.Minute // what it actually does
+
+	rep, err := runVirtual(t, node, Config{
+		Baseline: 20 * time.Minute, Load: 20 * time.Minute, Sample: time.Minute,
+		HopLimits: []uint32{3},
+	}, clk)
+	if err != nil {
+		t.Fatalf("survey refused a samplable node: %v", err)
+	}
+	if rep.Cadence < 30*time.Second || rep.Cadence > 2*time.Minute {
+		t.Errorf("measured cadence = %s, want about 1m", rep.Cadence)
+	}
+}
+
+// A slow-but-moving node is not refused outright: it is refused for THIS phase
+// length, and told that longer phases are the other way through.
+func TestPreflightOffersLongerPhasesToASlowNode(t *testing.T) {
+	clk := clock.NewVirtual(time.Unix(0, 0))
+	node := newFakeNode(clk, 4, 2)
+	node.refresh = 5 * time.Minute
+
+	_, err := runVirtual(t, node, Config{
+		Baseline: 10 * time.Minute, Load: 10 * time.Minute, Sample: time.Minute,
+	}, clk)
+	if !errors.Is(err, ErrMetricsTooSlow) {
+		t.Fatalf("err = %v, want ErrMetricsTooSlow", err)
+	}
+	if !strings.Contains(err.Error(), "lengthen") {
+		t.Errorf("error does not offer the longer-phase remedy: %v", err)
 	}
 }
 

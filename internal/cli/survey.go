@@ -54,9 +54,12 @@ channel, aborts if the channel gets busier, and defaults to about 1% duty —
 but it does put packets on a shared band for as long as you tell it to. Pass
 --yes once you have read what it plans to do.
 
-Your node must also report its metrics often enough to sample. A stock node
-updates them every 30 minutes, which is far too slow; set Telemetry → device
-metrics update interval to 60s in the Meshtastic app first.`,
+Your node must also refresh its metrics often enough to sample. The survey
+measures that for itself before it transmits, and says what it found — do not
+go by the node's telemetry interval, which governs broadcasts to the mesh and
+can disagree with the real refresh rate by a wide margin. If the check fails,
+the usual cause is the telemetry module being switched off entirely: Meshtastic
+app → Module Settings → Telemetry → Device Metrics.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o := cmd.OutOrStdout()
@@ -129,6 +132,15 @@ metrics update interval to 60s in the Meshtastic app first.`,
 			plan := planFor(radio.Preset(), cfg)
 			fmt.Fprintf(o, "%s\n", plan)
 			if !confirm {
+				// Check the node before asking for confirmation, so the plan is
+				// not the last thing a sysop sees before committing hours to a
+				// radio that cannot be sampled. Nothing is transmitted here.
+				cadence, err := survey.Check(ctx, radio, cfg)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(o, "This node can be surveyed: metrics refresh about every %s.\n\n",
+					cadence.Round(time.Second))
 				return errors.New("not transmitting: re-run with --yes once the plan above looks right")
 			}
 
