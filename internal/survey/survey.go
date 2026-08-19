@@ -253,6 +253,41 @@ type Phase struct {
 	Airtime time.Duration
 }
 
+// DutyCycle is the percentage of this phase we spent transmitting, computed
+// from what we actually sent rather than from what the node reported.
+//
+// This is the denominator §7.8.1's arithmetic needs, and it is exact. The
+// node's own air_util_tx cannot serve, and the reason was measured rather than
+// assumed: the two figures live on completely different timescales.
+//
+// A burst of ~19s of airtime on a Heltec V3 (firmware 2.7.15) drove
+// channel_utilization to 17.46% and it was back at ambient 90 seconds later —
+// a window of a minute or less, since an hour-scale average could not exceed
+// ~0.5% from that much airtime however it was arranged. Over the same burst
+// air_util_tx went 0.356 -> 0.851 and was still 0.814 THIRTY MINUTES after the
+// last packet.
+//
+// So the numerator is fast and air_util_tx is slow, and dividing one by the
+// other compares two different windows. In a hop sweep that reads LOW in the
+// first phase (the average has not filled) and HIGH in the last (it still
+// carries the earlier ones), so R falls with hop limit — an artifact of the
+// instrument that looks exactly like a property of the mesh. Measured: three
+// phases of an identical 1.07% load reported 0.308, 1.011 and 1.353.
+//
+// The tradeoff, stated because it biases the answer: this counts what the
+// application asked to send and misses protocol overhead, retries and the
+// node's own telemetry broadcasts. So it slightly UNDER-states our occupancy
+// and therefore slightly OVER-states R — the safe direction, since over-stating
+// R under-spends the commons (§1.1), and a bounded bias rather than a drifting
+// one.
+func (p Phase) DutyCycle() float64 {
+	span := p.Ended.Sub(p.Started)
+	if span <= 0 {
+		return 0
+	}
+	return p.Airtime.Seconds() / span.Seconds() * 100
+}
+
 // MeanChannel and MeanTx average the phase's fresh samples.
 func (p Phase) MeanChannel() float64 { return mean(p.channelSeries()) }
 func (p Phase) MeanTx() float64      { return mean(p.txSeries()) }
@@ -278,12 +313,19 @@ func (p Phase) txSeries() []float64 {
 type REstimate struct {
 	HopLimit uint32
 	// R is the point estimate. It is meaningless without Low and High.
-	R           float64
-	Low, High   float64
-	Confident   bool
-	Explain     string
-	DeltaBusy   float64
+	R         float64
+	Low, High float64
+	Confident bool
+	Explain   string
+	DeltaBusy float64
+	// OurTransmit is the denominator R was computed from: our own duty cycle
+	// over the phase, from Phase.Airtime.
 	OurTransmit float64
+	// ReportedTx is what the node's air_util_tx claimed over the same phase.
+	// It does not feed R and is kept only for comparison — a wide gap is the
+	// node's hour-scale average lagging, which is expected rather than alarming
+	// and is why it is not the denominator.
+	ReportedTx float64
 }
 
 // Report is everything a survey produced.
@@ -309,17 +351,17 @@ type Report struct {
 // Drift is how much the ambient channel moved between the opening and closing
 // baselines, in percentage points.
 //
-// # Why one baseline is not enough
+// # Why a second baseline exists
 //
-// R is computed as (rise in channel utilization) ÷ (rise in our own transmit),
+// R is computed as (rise in channel utilization) ÷ (our own duty cycle),
 // against a baseline measured once, up to two hours before the last load phase
-// ends. That arithmetic silently assumes the mesh was equally busy the whole
-// time. On a community mesh it is not: traffic climbs through the evening as
-// people get home, and every point it climbs by is attributed to rebroadcasts
-// of OUR packets — inflating R with no signal that anything is wrong. The
-// existing AbortRise guard is 15 points, which is a runaway-channel tripwire,
-// not a drift detector; a 0.5-point drift against a 1-point load is invisible
-// to it and doubles the answer.
+// ends. That arithmetic assumes the mesh was equally busy the whole time. On a
+// community mesh it is not: traffic climbs through the evening as people get
+// home, and every point it climbs by is attributed to rebroadcasts of OUR
+// packets — inflating R with no signal that anything is wrong. The AbortRise
+// guard is 15 points, which is a runaway-channel tripwire, not a drift
+// detector; a 0.5-point drift against a 1-point load is invisible to it and
+// doubles the answer.
 //
 // Measuring the baseline again at the end does not correct for this — the
 // correction would need to know WHEN the drift happened — but it does make it
@@ -327,61 +369,27 @@ type Report struct {
 // a bias nobody can see. Positive means the mesh got busier and R is
 // over-stated.
 //
-// # Why the two baselines are not compared directly
+// # Why this is now a plain subtraction
 //
-// The obvious implementation — closing mean minus opening mean — reports drift
-// on a mesh that did not move, and the estimator test proved it: a steady
-// synthetic mesh came back at +3.17 points. The cause is our OWN transmissions.
-// air_util_tx is a rolling average, so when the closing baseline starts the
-// node is still carrying the load phase that just ended, and channel
-// utilization still carries its rebroadcasts. The closing baseline is therefore
-// biased upward by exactly the thing the survey was measuring.
+// It was not always. An earlier version subtracted an estimated residual from
+// both baselines before comparing them, on the theory that the closing baseline
+// was still carrying the load phase that had just ended — and it had to return
+// a conservative floor, because using the measured R to compute that residual
+// puts feedback in the loop. On the first hardware run that produced a reported
+// range of -8.32 to +0.78 points against rises of 2 to 3 points, which is not a
+// measurement of anything.
 //
-// Waiting for the average to decay would work and would cost another hour of
-// silence. Subtracting the residual is free and uses a quantity already
-// sampled: each phase knows its own mean transmit, and channel utilization is
-// ambient + transmit × R by the same identity §7.8.1 inverts to get R. So both
-// baselines are reduced to their ambient component before being compared, and
-// what remains is the mesh's own traffic.
+// The premise was wrong, and measuring it settled the matter. channel
+// utilization is a FAST figure: a burst that drove it to 17.46% was back at
+// ambient 90 seconds later, and across a 30-minute silent decay it averaged
+// 1.89 against a pre-burst ambient of 1.97. There is no residual to subtract,
+// because the channel measure has already forgotten. (air_util_tx is the slow
+// one — still elevated half an hour on — which is exactly why it is not in this
+// arithmetic either.)
 //
-// # Why this returns a floor and not an answer
-//
-// Using the measured R to subtract the residual has feedback in it, and the
-// direction is unhelpful: drift inflates R, an inflated R subtracts more than
-// the residual is worth, and the drift shrinks. Measured on the synthetic mesh,
-// a true ambient rise of 1.50 points reported as 0.31 — the correction ate 80%
-// of the signal it was there to expose.
-//
-// So this is deliberately the CONSERVATIVE end. DriftRaw is the other end, with
-// nothing subtracted, biased upward by however much of our own load average had
-// not yet decayed. The truth is between them, and the report prints both rather
-// than choosing: a warning that fires on the floor cannot cry wolf on a steady
-// mesh, and a reader who sees a wide gap between the two knows the closing
-// baseline started too soon after the load.
-//
-// Correcting this properly means waiting for air_util_tx to decay before
-// sampling — Meshtastic averages it over an hour, so that is an hour of extra
-// silence per run. Worth doing if drift ever turns out to be the thing limiting
-// a measurement; not worth it before that is known.
+// Both baselines are silent, so both read pure ambient, and the honest
+// comparison is the direct one.
 func (r *Report) Drift() (float64, bool) {
-	if len(r.BaselineEnd.Samples) == 0 {
-		return 0, false
-	}
-	// Without a confident estimate, assume no multiplication: that subtracts
-	// the least, so an unmeasurable run cannot manufacture a drift warning.
-	rr := 1.0
-	if best, ok := r.Best(); ok {
-		rr = best.R
-	}
-	ambient := func(p Phase) float64 { return p.MeanChannel() - rr*p.MeanTx() }
-	return ambient(r.BaselineEnd) - ambient(r.Baseline), true
-}
-
-// DriftRaw is the uncorrected difference between the two baselines.
-//
-// The upper end of the range Drift floors: it still contains whatever part of
-// our own load the node's rolling transmit average had not yet forgotten.
-func (r *Report) DriftRaw() (float64, bool) {
 	if len(r.BaselineEnd.Samples) == 0 {
 		return 0, false
 	}
@@ -462,7 +470,7 @@ func Run(ctx context.Context, node Node, cfg Config) (*Report, error) {
 		// report alongside the error lets the caller keep what was measured.
 		return rep, err
 	}
-	rep.BaselineEnd = tail
+	rep.BaselineEnd = tail.afterSettling(channelSettle)
 	if drift, ok := rep.Drift(); ok {
 		progress(cfg, fmt.Sprintf("baseline: closed at %.2f%% busy, %+.2f points against the opening baseline",
 			tail.MeanChannel(), drift))
@@ -473,6 +481,37 @@ func Run(ctx context.Context, node Node, cfg Config) (*Report, error) {
 	rep.Ended = cfg.Clock.Now()
 	rep.Notes = notes(rep)
 	return rep, nil
+}
+
+// channelSettle is how long the channel-utilization figure goes on carrying
+// traffic that has already stopped.
+//
+// Measured, not assumed: a burst that drove the figure to 17.46% was back at
+// ambient 90 seconds later. Two minutes is that with margin, at the one-minute
+// resolution the metrics refresh at.
+//
+// It matters in exactly one place. The closing baseline starts the instant the
+// last load phase ends, so its first readings still contain our own packets,
+// and counting them makes a steady mesh look like it got busier.
+const channelSettle = 2 * time.Minute
+
+// afterSettling drops the samples taken before the channel figure had time to
+// forget what came before this phase.
+func (p Phase) afterSettling(d time.Duration) Phase {
+	cut := p.Started.Add(d)
+	kept := p.Samples[:0:0]
+	for _, m := range p.Samples {
+		if !m.At.Before(cut) {
+			kept = append(kept, m)
+		}
+	}
+	// Never hand back an empty phase: a short baseline that is all settling is
+	// better reported as noisy than as absent.
+	if len(kept) == 0 {
+		return p
+	}
+	p.Samples = kept
+	return p
 }
 
 // minPhaseSamples is how many fresh readings a phase needs before its mean and
@@ -587,6 +626,14 @@ func measure(ctx context.Context, node Node, cfg Config, name string, hopLimit u
 	p := Phase{Name: name, HopLimit: hopLimit, Started: cfg.Clock.Now()}
 	deadline := p.Started.Add(dur)
 
+	// Stop transmitting before the phase ends, and keep sampling through the
+	// gap. The channel figure looks back about a minute, so a packet sent in
+	// the last seconds has most of its effect AFTER the phase boundary — the
+	// mean would miss it while the duty-cycle denominator still counted the
+	// packet, biasing R downward. Downward is the unsafe direction: under-
+	// stating R over-spends the commons (§1.1).
+	txDeadline := deadline.Add(-channelSettle)
+
 	// Pace transmissions to hit the target duty cycle. One packet costs its
 	// airtime; sending one every airtime/(duty) seconds averages to that duty.
 	var txEvery time.Duration
@@ -618,16 +665,40 @@ func measure(ctx context.Context, node Node, cfg Config, name string, hopLimit u
 		}
 
 		// Abort if someone else started needing the channel.
-		if base != nil && len(p.Samples) > 0 {
-			latest := p.Samples[len(p.Samples)-1]
-			ambient := latest.ChannelUtilization - latest.AirUtilTx
+		//
+		// Both terms are phase means rather than the latest sample, because the
+		// channel figure is fast and therefore spiky: a single reading that
+		// happens to contain one of our packets can sit ten points above the
+		// mean and would trip this on our own traffic.
+		//
+		// Our own contribution is discounted from what we KNOW we sent, not
+		// from air_util_tx. That average spans about an hour, so early in a
+		// phase it discounts almost nothing and the guard mistakes our own load
+		// for somebody else's — measured against the fake mesh, it false-aborted
+		// at "ambient 28.4%" while the channel was carrying our own packets.
+		//
+		// The subtraction still assumes R = 1, so what remains includes our own
+		// rebroadcasts and reads high. That is the safe direction for a
+		// politeness guard — it gives the channel up early rather than late —
+		// and is why the threshold is a runaway tripwire at 15 points rather
+		// than anything finer.
+		// minPhaseSamples before this may fire: the channel figure is spiky, and
+		// a mean over one or two readings is not evidence that anyone needs the
+		// channel. It false-aborted at "ambient 17.9%" on a mesh sitting at 2%.
+		if base != nil && len(p.Samples) >= minPhaseSamples {
+			elapsed := cfg.Clock.Now().Sub(p.Started)
+			var ours float64
+			if elapsed > 0 {
+				ours = p.Airtime.Seconds() / elapsed.Seconds() * 100
+			}
+			ambient := p.MeanChannel() - ours
 			if ambient > base.MeanChannel()+cfg.AbortRise {
 				return p, fmt.Errorf("%w: ambient %.1f%% against a %.1f%% baseline",
 					ErrAborted, ambient, base.MeanChannel())
 			}
 		}
 
-		for hopLimit != 0 && !cfg.Clock.Now().Before(nextTx) {
+		for hopLimit != 0 && cfg.Clock.Now().Before(txDeadline) && !cfg.Clock.Now().Before(nextTx) {
 			if err := node.Transmit(ctx, cfg.PayloadBytes, hopLimit); err != nil {
 				return p, fmt.Errorf("transmitting load: %w", err)
 			}
@@ -648,11 +719,19 @@ func measure(ctx context.Context, node Node, cfg Config, name string, hopLimit u
 // estimate computes R for one load phase against the baseline.
 func estimate(base, load Phase, hop uint32) REstimate {
 	delta := load.MeanChannel() - base.MeanChannel()
-	tx := load.MeanTx() - base.MeanTx()
+	// Our own duty cycle, computed rather than read off the node. The numerator
+	// is a FAST measure (see Phase.DutyCycle), so the denominator has to
+	// describe the same window, and air_util_tx does not.
+	tx := load.DutyCycle()
 
-	est := REstimate{HopLimit: hop, DeltaBusy: delta, OurTransmit: tx}
+	est := REstimate{
+		HopLimit:    hop,
+		DeltaBusy:   delta,
+		OurTransmit: tx,
+		ReportedTx:  load.MeanTx() - base.MeanTx(),
+	}
 	if tx <= 0 {
-		est.Explain = "our own transmissions did not register in the node's telemetry"
+		est.Explain = "nothing was transmitted during this phase"
 		return est
 	}
 	est.R = delta / tx
