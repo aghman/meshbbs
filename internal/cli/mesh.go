@@ -205,17 +205,20 @@ func printRadioInfo(out io.Writer, info *meshtastic.RadioInfo) {
 	if len(free) > 0 {
 		fmt.Fprintf(out, "  unused slots: %s\n", strings.Join(free, ", "))
 	}
-	// The telemetry interval is not trivia: §7.8.1 measures R from two numbers
-	// the node only refreshes on this cadence, so at the 30-minute default a
-	// survey cannot sample often enough to measure anything.
+	// Labelled "broadcast" rather than "update" deliberately. This is how often
+	// the node sends telemetry TO THE MESH; it says nothing about how often the
+	// firmware refreshes the metrics printed below it, and reading it as though
+	// it did is what `mesh survey` used to get wrong (see internal/survey's
+	// package comment). A sysop looking at these two lines together should not
+	// be invited to make the same inference.
 	fmt.Fprintf(out, "\nTelemetry\n")
 	// A stock node reports 2147483647 here — INT32_MAX as an "unset, use the
 	// firmware default" sentinel. Rendering that literally gives "596523h",
 	// which is not a number anyone should have to interpret.
 	if d, ok := survey.TelemetryCadence(info.TelemetryIntervalSecs); ok {
-		fmt.Fprintf(out, "  metrics update  every %s\n", d)
+		fmt.Fprintf(out, "  mesh broadcast  every %s\n", d)
 	} else {
-		fmt.Fprintf(out, "  metrics update  firmware default (%s)\n", survey.DefaultTelemetryInterval)
+		fmt.Fprintf(out, "  mesh broadcast  firmware default (%s)\n", survey.DefaultTelemetryInterval)
 	}
 	if m := info.Metrics; m != nil {
 		fmt.Fprintf(out, "  channel busy    %.2f%%\n", m.ChannelUtilization)
