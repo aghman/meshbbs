@@ -194,6 +194,14 @@ func (r *Report) Write(w io.Writer, instances int) {
 //
 // Only confident estimates vote: an upper bound that happens to sit below its
 // neighbour says nothing, since it was never a measurement.
+//
+// The fall has to clear the later hop's own confidence interval before it
+// counts. A strict e.R < prev.R comparison fires on arithmetic noise, which the
+// two-node bench proved by tripping it on a curve that was FLAT — hops 1 and 5
+// both measured R 1.7 off identical rises, differing somewhere past the second
+// decimal. A flat sweep is exactly what a topology with one relay should
+// produce, so a guard that calls it "not physical" is worse than no guard: it
+// teaches the reader to skip the warning.
 func (r *Report) CurveInverted() bool {
 	var prev REstimate
 	var have bool
@@ -201,7 +209,7 @@ func (r *Report) CurveInverted() bool {
 		if !e.Confident {
 			continue
 		}
-		if have && e.HopLimit > prev.HopLimit && e.R < prev.R {
+		if have && e.HopLimit > prev.HopLimit && e.High < prev.R {
 			return true
 		}
 		prev, have = e, true

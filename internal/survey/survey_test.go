@@ -525,6 +525,33 @@ func TestDriftIsMeasuredAndFlagged(t *testing.T) {
 	}
 }
 
+// A flat sweep is what a one-relay topology produces, and it must not be called
+// impossible. The two-node bench tripped the strict comparison on hops 1 and 5
+// that measured the same R off identical rises.
+func TestFlatSweepIsNotCalledInverted(t *testing.T) {
+	r := &Report{Estimates: []REstimate{
+		{HopLimit: 1, R: 1.755, Low: 0.2, High: 3.3, Confident: true},
+		{HopLimit: 3, R: 1.4, Low: 0.0, High: 2.8},
+		{HopLimit: 5, R: 1.754, Low: 0.2, High: 3.3, Confident: true},
+	}}
+	if r.CurveInverted() {
+		t.Error("a flat sweep was reported as physically impossible")
+	}
+}
+
+// A fall that clears the later hop's interval is real, and is what the first
+// hardware sweep produced before the denominator was fixed.
+func TestGenuineInversionIsStillCaught(t *testing.T) {
+	r := &Report{Estimates: []REstimate{
+		{HopLimit: 1, R: 9.5, Low: 5.0, High: 14.0, Confident: true},
+		{HopLimit: 3, R: 3.3, Low: 2.1, High: 4.5, Confident: true},
+		{HopLimit: 5, R: 1.8, Low: 0.8, High: 2.7, Confident: true},
+	}}
+	if !r.CurveInverted() {
+		t.Error("R falling from 9.5 to 1.8 was not flagged")
+	}
+}
+
 // A steady mesh must NOT be flagged, or the warning becomes noise everyone
 // learns to skip past.
 func TestSteadyMeshIsNotFlaggedForDrift(t *testing.T) {
