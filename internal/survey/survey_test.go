@@ -34,12 +34,66 @@ type fakeNode struct {
 	clk     *clock.Virtual
 	rnd     rng.Source
 
-	mu       sync.Mutex
-	txAir    float64 // our cumulative transmit percentage
-	uptime   time.Duration
-	heard    chan Heard
-	sent     int
+	mu     sync.Mutex
+	uptime time.Duration
+	heard  chan Heard
+	sent   int
+	// txAt records when each packet went out and how long it took, so the two
+	// telemetry figures can be derived on DIFFERENT timescales. That is the
+	// whole point of this fake: modelling both as one slow average is
+	// self-consistent, passes, and is what let a denominator bug ship.
+	txAt     []txEvent
 	ambientF func(time.Time) float64
+}
+
+type txEvent struct {
+	at  time.Time
+	air time.Duration
+}
+
+// channelWindow is how far back the fake's channel-utilization figure looks.
+//
+// Measured, not guessed: on a Heltec V3 (firmware 2.7.15) a burst drove
+// channel_utilization to 17.46% and it was back at ambient 90 seconds later,
+// with a 30-minute silent decay averaging 1.89 against a pre-burst 1.97. An
+// hour-scale average could not have reached 17% from that much airtime at all.
+// A minute is the resolution the metrics refresh at, so it is also the finest
+// window worth modelling.
+const channelWindow = time.Minute
+
+// instantDuty is our transmit percentage over the recent past: what the channel
+// actually carries now. Sampling once per window tiles the timeline, so the
+// mean over a phase is an unbiased estimate of the true duty cycle even though
+// any single reading is spiky.
+func (f *fakeNode) instantDuty() float64 {
+	// Boundary INCLUSIVE. On the virtual clock a packet lands exactly on a
+	// sample tick, so a strict After() drops every one of them and the fake
+	// reports a channel that never moves — an alignment artifact of the test
+	// harness, not anything a radio does.
+	cutoff := f.clk.Now().Add(-channelWindow)
+	var air time.Duration
+	for _, e := range f.txAt {
+		if !e.at.Before(cutoff) {
+			air += e.air
+		}
+	}
+	return air.Seconds() / channelWindow.Seconds() * 100
+}
+
+// reportedTx models air_util_tx: an average over the whole run so far, which
+// LAGS badly. On hardware it went 0.356 -> 0.851 over a burst and was still
+// 0.814 thirty minutes after the last packet. Nothing in the estimator may use
+// it; it exists so a test can see the two figures disagree.
+func (f *fakeNode) reportedTx() float64 {
+	elapsed := f.clk.Now().Sub(time.Unix(0, 0)).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	var air time.Duration
+	for _, e := range f.txAt {
+		air += e.air
+	}
+	return air.Seconds() / elapsed * 100
 }
 
 func newFakeNode(clk *clock.Virtual, trueR, ambient float64) *fakeNode {
@@ -74,9 +128,11 @@ func (f *fakeNode) Metrics() (Metrics, bool) {
 
 	// The channel carries the ambient traffic plus our own transmissions and
 	// their rebroadcasts — which is exactly the relationship §7.8.1 inverts.
+	// The two fields are built from DIFFERENT timescales, as on hardware: a
+	// fast channel measure and a slow transmit average.
 	return Metrics{
-		ChannelUtilization: ambient + f.txAir*f.trueR + jitter,
-		AirUtilTx:          f.txAir,
+		ChannelUtilization: ambient + f.instantDuty()*f.trueR + jitter,
+		AirUtilTx:          f.reportedTx(),
 		Uptime:             f.uptime,
 		At:                 f.clk.Now(),
 	}, true
@@ -86,12 +142,7 @@ func (f *fakeNode) Transmit(ctx context.Context, n int, hop uint32) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent++
-	// Each packet adds its airtime to the running percentage. The window here
-	// is the whole run, which is close enough for an estimator test.
-	elapsed := f.clk.Now().Sub(time.Unix(0, 0)).Seconds()
-	if elapsed > 0 {
-		f.txAir = float64(f.sent) * f.preset.Packet(n).Seconds() / elapsed * 100
-	}
+	f.txAt = append(f.txAt, txEvent{at: f.clk.Now(), air: f.preset.Packet(n)})
 	return nil
 }
 
@@ -465,19 +516,39 @@ func TestDriftIsMeasuredAndFlagged(t *testing.T) {
 		t.Errorf("drift of %+.2f points was not flagged in the notes:\n%v", drift, rep.Notes)
 	}
 
-	// The conservative floor must not exceed the raw difference, or the two
-	// ends of the range have swapped and the report reads as nonsense.
-	raw, _ := rep.DriftRaw()
-	if drift > raw {
-		t.Errorf("drift floor %+.2f exceeds raw drift %+.2f", drift, raw)
-	}
-
 	// And the shareable report must carry it, since that is the artefact a
 	// sysop sends to someone else who cannot see these notes.
 	var sb strings.Builder
 	rep.Write(&sb, DefaultInstanceCount)
 	if !strings.Contains(sb.String(), "closing") {
 		t.Errorf("report does not show the closing baseline:\n%s", sb.String())
+	}
+}
+
+// A flat sweep is what a one-relay topology produces, and it must not be called
+// impossible. The two-node bench tripped the strict comparison on hops 1 and 5
+// that measured the same R off identical rises.
+func TestFlatSweepIsNotCalledInverted(t *testing.T) {
+	r := &Report{Estimates: []REstimate{
+		{HopLimit: 1, R: 1.755, Low: 0.2, High: 3.3, Confident: true},
+		{HopLimit: 3, R: 1.4, Low: 0.0, High: 2.8},
+		{HopLimit: 5, R: 1.754, Low: 0.2, High: 3.3, Confident: true},
+	}}
+	if r.CurveInverted() {
+		t.Error("a flat sweep was reported as physically impossible")
+	}
+}
+
+// A fall that clears the later hop's interval is real, and is what the first
+// hardware sweep produced before the denominator was fixed.
+func TestGenuineInversionIsStillCaught(t *testing.T) {
+	r := &Report{Estimates: []REstimate{
+		{HopLimit: 1, R: 9.5, Low: 5.0, High: 14.0, Confident: true},
+		{HopLimit: 3, R: 3.3, Low: 2.1, High: 4.5, Confident: true},
+		{HopLimit: 5, R: 1.8, Low: 0.8, High: 2.7, Confident: true},
+	}}
+	if !r.CurveInverted() {
+		t.Error("R falling from 9.5 to 1.8 was not flagged")
 	}
 }
 

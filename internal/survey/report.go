@@ -93,12 +93,11 @@ func (r *Report) Write(w io.Writer, instances int) {
 		// it is the same measurement and a reader comparing the two should not
 		// have to scroll. The sign is the useful part: positive means the mesh
 		// got busier while we were transmitting, and R is over-stated.
-		raw, _ := r.DriftRaw()
 		p("  closing        %.2f%% (sd %.2f, %d fresh samples)\n",
 			r.BaselineEnd.MeanChannel(), r.BaselineEnd.SDChannel(), len(r.BaselineEnd.Samples))
-		p("  ambient drift  %+.2f to %+.2f points over the run\n", drift, raw)
-		p("                 (the range is our own transmit average still decaying;\n")
-		p("                  a wide one means the closing baseline started too soon)\n")
+		p("  ambient drift  %+.2f points over the run\n", drift)
+		p("                 (positive means the mesh got busier while we transmitted,\n")
+		p("                  which over-states R)\n")
 	} else {
 		p("  closing        not measured — drift over the run is unknown\n")
 	}
@@ -120,7 +119,13 @@ func (r *Report) Write(w io.Writer, instances int) {
 	p("\n")
 
 	best, ok := r.Best()
-	if ok {
+	if r.CurveInverted() {
+		p("What this means for your instance\n")
+		p("  Nothing, from this run. R fell as hop limit rose, which a mesh cannot\n")
+		p("  do — more hops can only mean more rebroadcasts. That makes this a\n")
+		p("  measurement of the instrument rather than of the mesh, and any budget\n")
+		p("  derived from it would be invented. Re-run once the sweep climbs.\n\n")
+	} else if ok {
 		b := DeriveBudget(r.Preset, best.R, instances, MeshCeilingPercent)
 		p("What this means for your instance\n")
 		p("  R ≈ %.1f at hop limit %d\n", best.R, best.HopLimit)
@@ -177,6 +182,41 @@ func (r *Report) Write(w io.Writer, instances int) {
 	p("the correct thing to measure: it is your node's traffic being budgeted.\n")
 }
 
+// CurveInverted reports whether R falls as hop limit rises, which is not
+// something a mesh can do.
+//
+// More hops means more nodes rebroadcast, so R is non-decreasing in hop limit
+// (§7.8.2 step 5 expects it to climb steeply). A sweep that falls is the
+// instrument being wrong, not the mesh, and the report says so instead of
+// pricing a budget off the largest artifact in the run — which is exactly what
+// happened on the first hardware survey, where a contaminated denominator
+// produced 9.5, 3.3, 1.8 across hops 1, 3 and 5.
+//
+// Only confident estimates vote: an upper bound that happens to sit below its
+// neighbour says nothing, since it was never a measurement.
+//
+// The fall has to clear the later hop's own confidence interval before it
+// counts. A strict e.R < prev.R comparison fires on arithmetic noise, which the
+// two-node bench proved by tripping it on a curve that was FLAT — hops 1 and 5
+// both measured R 1.7 off identical rises, differing somewhere past the second
+// decimal. A flat sweep is exactly what a topology with one relay should
+// produce, so a guard that calls it "not physical" is worse than no guard: it
+// teaches the reader to skip the warning.
+func (r *Report) CurveInverted() bool {
+	var prev REstimate
+	var have bool
+	for _, e := range r.Estimates {
+		if !e.Confident {
+			continue
+		}
+		if have && e.HopLimit > prev.HopLimit && e.High < prev.R {
+			return true
+		}
+		prev, have = e, true
+	}
+	return false
+}
+
 // Best returns the estimate at the node's own hop limit if that was surveyed,
 // otherwise the most confident one.
 func (r *Report) Best() (REstimate, bool) {
@@ -229,9 +269,23 @@ func notes(r *Report) []string {
 	if len(r.Census.Neighbours) == 1 {
 		out = append(out, "only one other radio was heard: R measured against a two-node mesh is close to meaningless, since there is nobody to rebroadcast")
 	}
+	if r.CurveInverted() {
+		out = append(out, "R FELL as hop limit rose, which is not physical: more hops can only add rebroadcasts. "+
+			"Treat every number in the sweep as suspect — this is the instrument, not the mesh")
+	}
 	for _, e := range r.Estimates {
 		if !e.Confident {
 			out = append(out, fmt.Sprintf("hop %d produced no usable measurement (%s)", e.HopLimit, e.Explain))
+		}
+		// The node's own account of what it transmitted is expected to lag —
+		// it is an hour-scale average and R does not use it — but a wide gap is
+		// worth showing, because it is the shape of the bug that made the first
+		// hardware sweep unusable and the reason R is computed the way it is.
+		if e.Confident && e.ReportedTx > 0 && (e.ReportedTx > 2*e.OurTransmit || 2*e.ReportedTx < e.OurTransmit) {
+			out = append(out, fmt.Sprintf(
+				"hop %d: we transmitted %.2f%% and the node's air_util_tx read %.2f%% — expected, since that average "+
+					"spans about an hour while R is computed from what we actually sent",
+				e.HopLimit, e.OurTransmit, e.ReportedTx))
 		}
 	}
 	out = append(out, driftNotes(r)...)

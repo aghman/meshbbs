@@ -148,6 +148,27 @@ app → Module Settings → Telemetry → Device Metrics.`,
 			if err != nil {
 				// A refusal is a result, not a crash: it tells the sysop
 				// something true about their mesh or their node.
+				//
+				// But a survey that dies PART WAY through has still measured
+				// everything up to that point, and Run hands that back. Throwing
+				// it away was costing a full baseline and a completed hop sweep
+				// to one dropped TCP write — measured, on a run that died 20
+				// minutes in and left nothing behind. Hours are not cheap here:
+				// the default run is two and a half of them and a sysop is
+				// paying airtime for it.
+				if rep != nil && len(rep.Baseline.Samples) > 0 {
+					rep.Region = radio.Region()
+					fmt.Fprintf(o, "\n%v\n", err)
+					fmt.Fprintf(o, "\nThe survey did not finish. What it measured before stopping:\n\n")
+					rep.Write(o, instances)
+					if out != "" {
+						if f, ferr := os.Create(out); ferr == nil {
+							defer f.Close()
+							rep.Write(f, instances)
+							fmt.Fprintf(o, "\nPartial report written to %s\n", out)
+						}
+					}
+				}
 				return err
 			}
 			rep.Region = radio.Region()
