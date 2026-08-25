@@ -142,6 +142,10 @@ type Node interface {
 	Preset() airtime.Preset
 	// TelemetryIntervalSecs is what the node says about its own cadence.
 	TelemetryIntervalSecs() uint32
+	// ConfiguredHopLimit is the hop limit this node actually sends with. The
+	// sweep deliberately measures others too, but only this one prices the
+	// node's real traffic.
+	ConfiguredHopLimit() uint32
 }
 
 // Config parameterises a survey.
@@ -333,6 +337,10 @@ type Report struct {
 	Started, Ended time.Time
 	Preset         airtime.Preset
 	Region         string
+	// HopLimit is what the node is configured to send with, which is the hop
+	// the budget must be priced at — not necessarily one the sweep measured
+	// successfully.
+	HopLimit uint32
 	// Cadence is the metric refresh rate preflight MEASURED, which is not
 	// necessarily the interval the node declares. Recorded because §7.8.3 wants
 	// these reports comparable across sysops, and two runs at different
@@ -421,9 +429,10 @@ func Run(ctx context.Context, node Node, cfg Config) (*Report, error) {
 	}
 
 	rep := &Report{
-		Started: cfg.Clock.Now(),
-		Preset:  node.Preset(),
-		Cadence: cadence,
+		Started:  cfg.Clock.Now(),
+		Preset:   node.Preset(),
+		Cadence:  cadence,
+		HopLimit: node.ConfiguredHopLimit(),
 	}
 	census := newCensus()
 	stop := collect(ctx, node.Heard(), census)

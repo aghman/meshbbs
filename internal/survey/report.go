@@ -119,6 +119,7 @@ func (r *Report) Write(w io.Writer, instances int) {
 	p("\n")
 
 	best, ok := r.Best()
+	fallback, fok := r.Fallback()
 	if r.CurveInverted() {
 		p("What this means for your instance\n")
 		p("  Nothing, from this run. R fell as hop limit rose, which a mesh cannot\n")
@@ -128,7 +129,7 @@ func (r *Report) Write(w io.Writer, instances int) {
 	} else if ok {
 		b := DeriveBudget(r.Preset, best.R, instances, MeshCeilingPercent)
 		p("What this means for your instance\n")
-		p("  R ≈ %.1f at hop limit %d\n", best.R, best.HopLimit)
+		p("  R ≈ %.1f at hop limit %d, which is what this node sends with\n", best.R, best.HopLimit)
 		p("  At a %.0f%% mesh-wide ceiling shared %d ways, this node's share is\n",
 			b.CeilingPercent, b.Instances)
 		p("  %.0f seconds of channel time per day — about %.0f full packets,\n",
@@ -137,6 +138,22 @@ func (r *Report) Write(w io.Writer, instances int) {
 		if len(r.Estimates) > 1 {
 			p("  Hop limit is the lever: %s\n\n", hopAdvice(r))
 		}
+	} else if fok {
+		// The node's own hop limit failed but another hop worked. Show it, and
+		// be explicit that it prices traffic this node does not send, because
+		// the difference is the whole point of sweeping hop limit at all.
+		b := DeriveBudget(r.Preset, fallback.R, instances, MeshCeilingPercent)
+		p("What this means for your instance\n")
+		p("  Hop limit %d is what this node sends with, and it produced no usable\n", r.HopLimit)
+		p("  measurement — so there is no budget for the traffic you actually\n")
+		p("  originate. What follows prices hop limit %d instead, which you do not\n", fallback.HopLimit)
+		p("  use, and is shown only because it is the one hop that measured:\n\n")
+		p("  R ≈ %.1f at hop limit %d\n", fallback.R, fallback.HopLimit)
+		p("  At a %.0f%% mesh-wide ceiling shared %d ways, that would be\n",
+			b.CeilingPercent, b.Instances)
+		p("  %.0f seconds of channel time per day — about %.0f full packets.\n",
+			b.ChannelSecondsPerDay, b.FullPackets)
+		p("  Re-run before budgeting from it.\n\n")
 	} else {
 		p("What this means for your instance\n")
 		p("  No usable R was measured. The load did not rise above the channel's\n")
@@ -217,17 +234,49 @@ func (r *Report) CurveInverted() bool {
 	return false
 }
 
-// Best returns the estimate at the node's own hop limit if that was surveyed,
-// otherwise the most confident one.
+// Best returns the estimate the budget should be priced at: the one measured at
+// the hop limit this node actually sends with.
+//
+// The second return says whether that is what you got. It is false when the
+// node's own hop limit produced no usable measurement, and the caller must then
+// say so rather than quoting the fallback as if it were the answer.
+//
+// # Why the fallback is not good enough on its own
+//
+// This used to return whichever confident estimate had the largest R, on the
+// reasoning that over-stating R under-spends the commons. That is a sound
+// instinct and it was applied to the wrong question. R varies with hop limit by
+// design — pricing hop limit is what §7.8.2 calls the sweep's most actionable
+// output — so the largest R in a sweep is simply the value at the highest hop
+// limit, which the node may not use.
+//
+// The first N10 attempt is the case in point. The node ran hop_limit 3, hop 3
+// was the one phase that came back unusable, and the report priced the whole
+// budget off hop 5: "R ≈ 1.4 at hop limit 5 … about 28 full packets". A sysop
+// reads that as their budget. It is a budget for traffic they do not send, and
+// nothing on the page said so.
 func (r *Report) Best() (REstimate, bool) {
+	for _, e := range r.Estimates {
+		if e.Confident && e.HopLimit == r.HopLimit {
+			return e, true
+		}
+	}
+	return REstimate{}, false
+}
+
+// Fallback is the most conservative confident estimate at any hop limit.
+//
+// Only for the case where the node's own hop limit was not measurable: it is
+// something rather than nothing, and the largest R is the least generous
+// reading, but it prices a hop limit this node does not send with and must be
+// labelled that way wherever it is shown.
+func (r *Report) Fallback() (REstimate, bool) {
 	var best REstimate
 	var found bool
 	for _, e := range r.Estimates {
 		if !e.Confident {
 			continue
 		}
-		// Prefer the most conservative confident estimate: under-stating R
-		// means over-spending the commons, which is the error that matters.
 		if !found || e.R > best.R {
 			best, found = e, true
 		}
@@ -251,6 +300,16 @@ func hopAdvice(r *Report) string {
 	if lo.HopLimit == 0 || hi.HopLimit == lo.HopLimit {
 		return "not enough confident points to draw the curve"
 	}
+	// A multiplier is only advice when the sweep actually resolved a
+	// difference. If the higher hop's interval still contains the lower hop's
+	// estimate, it did not, and printing the ratio produces sentences like
+	// "1.0x more airtime for every packet" — which the two-node bench did,
+	// where a flat curve was the CORRECT answer for a one-relay topology.
+	if lo.R >= hi.Low && lo.R <= hi.High {
+		return fmt.Sprintf("hop %d and hop %d measured the same within their intervals, so this run does not "+
+			"price hop limit — it does not mean hop limit is free, only that the difference was smaller than the noise",
+			lo.HopLimit, hi.HopLimit)
+	}
 	return fmt.Sprintf("hop %d costs R≈%.1f, hop %d costs R≈%.1f — %.1fx more airtime for every packet",
 		lo.HopLimit, lo.R, hi.HopLimit, hi.R, hi.R/lo.R)
 }
@@ -264,10 +323,36 @@ func notes(r *Report) []string {
 			r.Baseline.Stale, len(r.Baseline.Samples)))
 	}
 	if r.Census.Packets == 0 {
-		out = append(out, "no packets were heard at all — if this mesh has other nodes, this one may not be hearing them")
+		// Zero is not evidence of a deaf radio. A relayed packet carries the
+		// ORIGINATOR's address, and the census skips our own, so a peer that
+		// only relays is invisible here by construction — which is exactly what
+		// a two-node bench looks like. The channel rising while we transmitted
+		// proves the radio is receiving, and separates the two cases.
+		var detected bool
+		for _, e := range r.Estimates {
+			if e.DeltaBusy > 0 {
+				detected = true
+				break
+			}
+		}
+		if detected {
+			out = append(out, "no packets were heard, but the channel did rise while we transmitted, so this radio is receiving. "+
+				"Either nothing nearby ORIGINATES traffic, or the only peers that hear us just relay — a relayed packet carries "+
+				"the originator's address, not the relay's, so it is not counted here")
+		} else {
+			out = append(out, "no packets were heard and the channel never rose while we transmitted — "+
+				"if this mesh has other nodes, this one may not be hearing them")
+		}
 	}
 	if len(r.Census.Neighbours) == 1 {
 		out = append(out, "only one other radio was heard: R measured against a two-node mesh is close to meaningless, since there is nobody to rebroadcast")
+	}
+	if _, ok := r.Best(); !ok {
+		if fb, fok := r.Fallback(); fok {
+			out = append(out, fmt.Sprintf(
+				"hop %d is this node's own hop limit and it produced no usable measurement, so the budget above is priced at hop %d instead — traffic this node does not send",
+				r.HopLimit, fb.HopLimit))
+		}
 	}
 	if r.CurveInverted() {
 		out = append(out, "R FELL as hop limit rose, which is not physical: more hops can only add rebroadcasts. "+
