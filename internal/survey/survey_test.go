@@ -25,6 +25,9 @@ type fakeNode struct {
 	ambient   float64 // baseline channel utilization, percent
 	noise     float64 // per-sample jitter, percentage points
 	telemSecs uint32
+	// hopLimit is what the node sends with, which is the hop the budget must be
+	// priced at. Independent of what the sweep measures.
+	hopLimit uint32
 	// refresh is how often the node rewrites its own nodedb entry. Zero means
 	// continuously, which is what most of these tests want. It is deliberately
 	// INDEPENDENT of telemSecs: on real hardware those two disagreed by a
@@ -102,6 +105,7 @@ func newFakeNode(clk *clock.Virtual, trueR, ambient float64) *fakeNode {
 		trueR:     trueR,
 		ambient:   ambient,
 		telemSecs: 60,
+		hopLimit:  3,
 		clk:       clk,
 		rnd:       rng.NewSeeded(7),
 		heard:     make(chan Heard, 256),
@@ -149,6 +153,7 @@ func (f *fakeNode) Transmit(ctx context.Context, n int, hop uint32) error {
 func (f *fakeNode) Heard() <-chan Heard           { return f.heard }
 func (f *fakeNode) Preset() airtime.Preset        { return f.preset }
 func (f *fakeNode) TelemetryIntervalSecs() uint32 { return f.telemSecs }
+func (f *fakeNode) ConfiguredHopLimit() uint32    { return f.hopLimit }
 
 // runVirtual drives a survey on a virtual clock, advancing time from another
 // goroutine so the engine's waits complete.
@@ -522,6 +527,110 @@ func TestDriftIsMeasuredAndFlagged(t *testing.T) {
 	rep.Write(&sb, DefaultInstanceCount)
 	if !strings.Contains(sb.String(), "closing") {
 		t.Errorf("report does not show the closing baseline:\n%s", sb.String())
+	}
+}
+
+// The budget must be priced at the hop limit the node SENDS with, not at
+// whichever hop happened to measure the largest R.
+func TestBestPrefersTheNodesOwnHopLimit(t *testing.T) {
+	r := &Report{HopLimit: 3, Estimates: []REstimate{
+		{HopLimit: 1, R: 1.1, High: 1.6, Confident: true},
+		{HopLimit: 3, R: 1.2, High: 1.8, Confident: true},
+		{HopLimit: 5, R: 1.4, High: 2.0, Confident: true},
+	}}
+	best, ok := r.Best()
+	if !ok {
+		t.Fatal("hop 3 was measured and confident, but Best found nothing")
+	}
+	if best.HopLimit != 3 {
+		t.Errorf("Best returned hop %d, want the node's own hop 3", best.HopLimit)
+	}
+}
+
+// The N10 run, exactly: the node's own hop limit was the one phase that failed,
+// and the report priced the whole budget off a hop the node does not use
+// without saying so anywhere.
+func TestUnmeasurableOwnHopLimitIsNotSilentlySubstituted(t *testing.T) {
+	r := &Report{HopLimit: 3, Preset: airtime.LongFast, Estimates: []REstimate{
+		{HopLimit: 1, R: 1.1, High: 1.6, Confident: true},
+		{HopLimit: 3, R: 0.9, High: 1.5}, // below 1, refused
+		{HopLimit: 5, R: 1.4, High: 2.0, Confident: true},
+	}}
+	if _, ok := r.Best(); ok {
+		t.Error("Best claimed a measurement at hop 3, which was refused")
+	}
+	fb, fok := r.Fallback()
+	if !fok || fb.HopLimit != 5 {
+		t.Fatalf("Fallback = %+v, want the hop-5 estimate", fb)
+	}
+
+	var sb strings.Builder
+	r.Write(&sb, DefaultInstanceCount)
+	out := sb.String()
+	if !strings.Contains(out, "no usable") {
+		t.Errorf("report does not say the node's own hop limit failed:\n%s", out)
+	}
+	if !strings.Contains(out, "you do not") && !strings.Contains(out, "does not send") {
+		t.Errorf("report does not warn that the budget prices another hop:\n%s", out)
+	}
+}
+
+// "1.0x more airtime for every packet" is not advice. The bench produced it on
+// a flat curve, which was the correct answer for a one-relay topology.
+func TestHopAdviceSaysNothingWhenTheSweepDidNotResolve(t *testing.T) {
+	r := &Report{HopLimit: 3, Estimates: []REstimate{
+		{HopLimit: 1, R: 1.961, Low: 1.3, High: 2.6, Confident: true},
+		{HopLimit: 5, R: 1.999, Low: 1.3, High: 2.7, Confident: true},
+	}}
+	got := hopAdvice(r)
+	if strings.Contains(got, "more airtime") {
+		t.Errorf("flat sweep priced hop limit anyway: %q", got)
+	}
+	if !strings.Contains(got, "same within their intervals") {
+		t.Errorf("advice does not explain why it is silent: %q", got)
+	}
+	// And a curve that DOES resolve must still be priced.
+	r2 := &Report{HopLimit: 3, Estimates: []REstimate{
+		{HopLimit: 1, R: 2.0, Low: 1.8, High: 2.2, Confident: true},
+		{HopLimit: 5, R: 8.0, Low: 7.5, High: 8.5, Confident: true},
+	}}
+	if got := hopAdvice(r2); !strings.Contains(got, "more airtime") {
+		t.Errorf("a real 4x climb was not priced: %q", got)
+	}
+}
+
+// An empty census is the CORRECT answer when the only peer relays: a relayed
+// packet carries the originator's address, so a pure relay is invisible here.
+// Saying the radio may be deaf, when the channel demonstrably rose, is wrong.
+func TestEmptyCensusDistinguishesDeafFromQuiet(t *testing.T) {
+	heardNothingButReceiving := &Report{HopLimit: 3, Estimates: []REstimate{
+		{HopLimit: 3, R: 2.0, Low: 1.3, High: 2.6, Confident: true, DeltaBusy: 6.7},
+	}}
+	found := false
+	for _, n := range notes(heardNothingButReceiving) {
+		if strings.Contains(n, "this radio is receiving") {
+			found = true
+		}
+		if strings.Contains(n, "may not be hearing them") {
+			t.Errorf("called the radio deaf while the channel was rising: %q", n)
+		}
+	}
+	if !found {
+		t.Errorf("no note explained the empty census:\n%v", notes(heardNothingButReceiving))
+	}
+
+	// Nothing heard AND no rise really is the suspicious case.
+	deaf := &Report{HopLimit: 3, Estimates: []REstimate{
+		{HopLimit: 3, R: 0, DeltaBusy: 0},
+	}}
+	var saw bool
+	for _, n := range notes(deaf) {
+		if strings.Contains(n, "may not be hearing them") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Errorf("a genuinely silent radio was not flagged:\n%v", notes(deaf))
 	}
 }
 

@@ -25,6 +25,7 @@ type Radio struct {
 	channel uint32
 	selfNum uint32
 	telemS  uint32
+	hopLim  uint32
 	clk     clock.Clock
 	rnd     rng.Source
 	refresh time.Duration
@@ -93,6 +94,7 @@ func Attach(ctx context.Context, conn *meshtastic.Conn, cfg RadioConfig) (*Radio
 		channel: idx,
 		selfNum: info.NodeNum,
 		telemS:  info.TelemetryIntervalSecs,
+		hopLim:  info.HopLimit,
 		clk:     cfg.Clock,
 		rnd:     cfg.Rand,
 		refresh: cfg.Refresh,
@@ -263,6 +265,7 @@ func (r *Radio) Transmit(ctx context.Context, n int, hopLimit uint32) error {
 func (r *Radio) Heard() <-chan Heard           { return r.heard }
 func (r *Radio) Preset() airtime.Preset        { return r.preset }
 func (r *Radio) TelemetryIntervalSecs() uint32 { return r.telemS }
+func (r *Radio) ConfiguredHopLimit() uint32    { return r.hopLim }
 
 // Region is what the node reports, for the report header.
 func (r *Radio) Region() string { return r.region }
