@@ -176,6 +176,15 @@ type Config struct {
 	// AbortRise aborts if ambient utilization climbs this many points above
 	// baseline mid-run, for the same reason.
 	AbortRise float64
+	// TransmitRetries is how many extra attempts a single transmit gets after
+	// a transient failure before the phase gives up. A survey is designed to
+	// run unattended for hours, so ending the whole run on one dropped write
+	// is the wrong shape — but a write that keeps failing is a real refusal,
+	// not a fluke, and still has to end the run.
+	TransmitRetries int
+	// TransmitBackoff is the delay before the first retry, doubled after each
+	// subsequent one.
+	TransmitBackoff time.Duration
 	// Clock is injected per §12.1.
 	Clock clock.Clock
 	// OnProgress receives human-readable progress, since a survey is measured
@@ -223,6 +232,12 @@ func (c *Config) applyDefaults() {
 	if c.AbortRise <= 0 {
 		c.AbortRise = 15
 	}
+	if c.TransmitRetries <= 0 {
+		c.TransmitRetries = 3
+	}
+	if c.TransmitBackoff <= 0 {
+		c.TransmitBackoff = 5 * time.Second
+	}
 	if c.Clock == nil {
 		c.Clock = clock.NewReal()
 	}
@@ -255,6 +270,11 @@ type Phase struct {
 	// Sent and Airtime are what we put on the air during this phase.
 	Sent    int
 	Airtime time.Duration
+	// Retries counts transmit attempts beyond the first that a packet needed
+	// to go out. A link that needed several is telling the sysop something
+	// about their setup, so this is surfaced in the report rather than
+	// swallowed silently.
+	Retries int
 }
 
 // DutyCycle is the percentage of this phase we spent transmitting, computed
@@ -625,6 +645,38 @@ func preflight(ctx context.Context, node Node, cfg Config) (time.Duration, error
 	return cadence, nil
 }
 
+// transmitWithRetry sends one load packet, retrying a transient failure a
+// small number of times with backoff before giving up.
+//
+// A transmit failure is not the same class of event as a refusal: the link
+// may be flaky rather than dead, and §7.8's survey is designed to run
+// unattended for hours, so ending the whole run on one dropped write is the
+// wrong shape. d998's WiFi/TCP link disproved the assumption that a write
+// either succeeds or means something — a broken pipe there was a pattern,
+// not a fluke, alongside config writes that reverted and had to be verified
+// with a settle-and-reread. Every retry is counted on the phase rather than
+// hidden, because a link that needed several is telling the sysop something
+// about their setup.
+func transmitWithRetry(ctx context.Context, node Node, cfg Config, p *Phase, hopLimit uint32) error {
+	backoff := cfg.TransmitBackoff
+	var lastErr error
+	for attempt := 0; attempt <= cfg.TransmitRetries; attempt++ {
+		if attempt > 0 {
+			p.Retries++
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-cfg.Clock.After(backoff):
+			}
+			backoff *= 2
+		}
+		if lastErr = node.Transmit(ctx, cfg.PayloadBytes, hopLimit); lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
+}
+
 // measure runs one phase, transmitting if hopLimit is non-zero.
 func measure(ctx context.Context, node Node, cfg Config, name string, hopLimit uint32, base *Phase) (Phase, error) {
 	dur := cfg.Baseline
@@ -708,8 +760,8 @@ func measure(ctx context.Context, node Node, cfg Config, name string, hopLimit u
 		}
 
 		for hopLimit != 0 && cfg.Clock.Now().Before(txDeadline) && !cfg.Clock.Now().Before(nextTx) {
-			if err := node.Transmit(ctx, cfg.PayloadBytes, hopLimit); err != nil {
-				return p, fmt.Errorf("transmitting load: %w", err)
+			if err := transmitWithRetry(ctx, node, cfg, &p, hopLimit); err != nil {
+				return p, fmt.Errorf("transmitting load: %w (gave up after %d retries)", err, p.Retries)
 			}
 			p.Sent++
 			p.Airtime += one
