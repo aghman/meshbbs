@@ -691,3 +691,73 @@ func TestSteadyMeshIsNotFlaggedForDrift(t *testing.T) {
 		}
 	}
 }
+
+// flakyNode wraps a fakeNode and fails Transmit on demand, to exercise the
+// retry path a dropped transport write takes (mesh-oyl).
+type flakyNode struct {
+	*fakeNode
+	mu         sync.Mutex
+	calls      int
+	failUntil  int  // Transmit fails for the first N calls, then succeeds
+	failAlways bool // Transmit never succeeds
+}
+
+func (f *flakyNode) Transmit(ctx context.Context, n int, hop uint32) error {
+	f.mu.Lock()
+	f.calls++
+	fail := f.failAlways || f.calls <= f.failUntil
+	f.mu.Unlock()
+	if fail {
+		return errors.New("write to tcp:192.168.0.47:4403: broken pipe")
+	}
+	return f.fakeNode.Transmit(ctx, n, hop)
+}
+
+// A transient transport failure must not end the run: the survey retries and
+// records how many retries it needed.
+func TestTransientTransmitFailureRetriesAndSucceeds(t *testing.T) {
+	clk := clock.NewVirtual(time.Unix(0, 0))
+	node := &flakyNode{fakeNode: newFakeNode(clk, 4, 2.0), failUntil: 2}
+
+	rep, err := runVirtual(t, node, Config{
+		Baseline: 15 * time.Minute, Load: 15 * time.Minute, Sample: time.Minute,
+		HopLimits: []uint32{3}, TargetDuty: 1.5,
+	}, clk)
+	if err != nil {
+		t.Fatalf("a recovering link ended the run: %v", err)
+	}
+	if len(rep.Loads) != 1 || rep.Loads[0].Retries == 0 {
+		t.Fatalf("retries were not recorded on the phase: %+v", rep.Loads)
+	}
+
+	var noted bool
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "transmit retries") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Error("the report does not surface the retries it needed")
+	}
+}
+
+// A transmit failure that never clears is a real refusal, not a fluke, and
+// still has to end the run — but the report already computed survives it.
+func TestPersistentTransmitFailureEndsRunWithPartialReport(t *testing.T) {
+	clk := clock.NewVirtual(time.Unix(0, 0))
+	node := &flakyNode{fakeNode: newFakeNode(clk, 4, 2.0), failAlways: true}
+
+	rep, err := runVirtual(t, node, Config{
+		Baseline: 15 * time.Minute, Load: 15 * time.Minute, Sample: time.Minute,
+		HopLimits: []uint32{3}, TargetDuty: 1.5,
+	}, clk)
+	if err == nil {
+		t.Fatal("a link that never recovers should end the run")
+	}
+	if !strings.Contains(err.Error(), "gave up after 3 retries") {
+		t.Errorf("error does not name the retry count: %v", err)
+	}
+	if rep == nil || len(rep.Baseline.Samples) == 0 {
+		t.Fatal("the partial report (at least the baseline) must survive a load-phase failure")
+	}
+}

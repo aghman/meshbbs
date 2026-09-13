@@ -373,6 +373,13 @@ func notes(r *Report) []string {
 				e.HopLimit, e.OurTransmit, e.ReportedTx))
 		}
 	}
+	for _, l := range r.Loads {
+		if l.Retries > 0 {
+			out = append(out, fmt.Sprintf(
+				"hop %d needed %d transmit retries before every packet went out — the link is not fully reliable",
+				l.HopLimit, l.Retries))
+		}
+	}
 	out = append(out, driftNotes(r)...)
 	return out
 }
